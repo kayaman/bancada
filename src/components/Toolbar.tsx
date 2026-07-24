@@ -14,6 +14,8 @@ interface Props {
   onVerify: () => void;
   onUpload: () => void;
   onReadMac: () => void;
+  scopeOn: boolean;
+  onToggleScope: () => void;
 }
 
 export default function Toolbar(props: Props) {
@@ -64,6 +66,13 @@ export default function Toolbar(props: Props) {
 
       <div className="spacer" />
 
+      <button
+        className={props.scopeOn ? "btn action toggled" : "btn action"}
+        onClick={props.onToggleScope}
+        title="Toggle oscilloscope view"
+      >
+        ∿ Scope
+      </button>
       <button
         className="btn action"
         onClick={props.onVerify}

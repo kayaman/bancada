@@ -11,6 +11,7 @@
 
 pub mod cli;
 pub mod esptool;
+pub mod scope;
 pub mod sketch;
 pub mod types;
 

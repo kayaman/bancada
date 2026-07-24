@@ -45,6 +45,11 @@ no reflection, no xor-out.
   `{"ev":"meta","sps":50000,"pins":[1],"atten":3,"width":12,"mode":"stream","overflows":0,"cal":[[0,0],[256,142],...]}`
   — `sps` is the **actual** rate granted by the driver; `cal` is a 17-point
   `[raw, millivolts]` table (raw 0..4096 step 256) for the active attenuation.
+  **`sps` is per-channel, not aggregate.** With two pins the ADC runs at
+  `sps * 2` and each pin is sampled `sps` times per second, so the host uses
+  `dt = 1/sps` for every channel regardless of channel count. The chip windows
+  quoted in §1.3 are aggregate, so the firmware clamps to
+  `min(req, chipMax/nch, linkMax/nch)` before reporting.
   Sent right after `start`, on config change, and every ~1 s (counters updated).
 - **RECORD_HDR** payload: UTF-8 JSON
   `{"ev":"record","trigger_idx":2048,"pre":2048,"post":6144,"sps":1000000,"pin":34}`

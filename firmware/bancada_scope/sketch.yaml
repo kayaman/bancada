@@ -3,12 +3,15 @@ profiles:
     fqbn: esp32:esp32:esp32
     platforms:
       - platform: esp32:esp32 (3.3.11)
+  # CDCOnBoot=cdc routes Serial to the native USB port (USB-Serial/JTAG) —
+  # without it Serial is UART0 and the desktop never sees the banner on
+  # /dev/ttyACM*. Classic ESP32 keeps the default (UART0 is its USB bridge).
   esp32s3:
-    fqbn: esp32:esp32:esp32s3
+    fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc
     platforms:
       - platform: esp32:esp32 (3.3.11)
   esp32c3:
-    fqbn: esp32:esp32:esp32c3
+    fqbn: esp32:esp32:esp32c3:CDCOnBoot=cdc
     platforms:
       - platform: esp32:esp32 (3.3.11)
 

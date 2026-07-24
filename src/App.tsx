@@ -10,9 +10,11 @@ import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
 import Console from "./components/Console";
+import ScopeView from "./components/ScopeView";
 
 type SideTab = "files" | "libraries";
 type BottomTab = "build" | "serial";
+type MainView = "editor" | "scope";
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
@@ -48,6 +50,10 @@ export default function App() {
   // ui
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [bottomTab, setBottomTab] = useState<BottomTab>("build");
+  const [mainView, setMainView] = useState<MainView>("editor");
+  // ScopeView stays mounted once opened so streams/subscriptions survive
+  // toggling back to the editor.
+  const [scopeMounted, setScopeMounted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
@@ -282,6 +288,70 @@ export default function App() {
     }
   };
 
+  // ---------- scope ----------
+
+  const toggleScope = () => {
+    setScopeMounted(true);
+    setMainView((v) => (v === "scope" ? "editor" : "scope"));
+  };
+
+  /** Start the serial monitor if it is off (plotter source needs it). */
+  const ensureMonitor = useCallback(async () => {
+    if (monitorOn) return;
+    if (!selectedPort) {
+      notify("Select a port first", true);
+      return;
+    }
+    setSerialLines([]);
+    await api.startMonitor(selectedPort, baudrate);
+    setMonitorOn(true);
+    setBottomTab("serial");
+  }, [monitorOn, selectedPort, baudrate, notify]);
+
+  /** Stop the serial monitor if it is on (ADC streaming needs the port). */
+  const stopMonitorIfOn = useCallback(async () => {
+    if (!monitorOn) return;
+    await api.stopMonitor();
+    setMonitorOn(false);
+  }, [monitorOn]);
+
+  /** Compile + flash the scope companion firmware sketch (build console shows progress). */
+  const flashScopeFirmware = useCallback(
+    async (dir: string, chipProfile: string): Promise<boolean> => {
+      if (!selectedPort) {
+        notify("Select a port first", true);
+        return false;
+      }
+      await stopMonitorIfOn().catch(() => {});
+      setBuildLines([]);
+      setBottomTab("build");
+      setBusy(true);
+      notify("Compiling companion firmware…");
+      try {
+        const c = await api.compileSketch(dir, chipProfile);
+        if (!c.success) {
+          notify("Companion firmware compile failed", true);
+          return false;
+        }
+        notify(`Flashing companion firmware to ${selectedPort}…`);
+        const u = await api.uploadSketch(dir, selectedPort, chipProfile);
+        notify(
+          u.success
+            ? "✓ Companion firmware flashed"
+            : "Companion firmware upload failed",
+          !u.success,
+        );
+        return u.success;
+      } catch (e) {
+        notify(String(e), true);
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [selectedPort, stopMonitorIfOn, notify],
+  );
+
   // ---------- render ----------
 
   return (
@@ -300,6 +370,8 @@ export default function App() {
         onVerify={verify}
         onUpload={upload}
         onReadMac={readMac}
+        scopeOn={mainView === "scope"}
+        onToggleScope={toggleScope}
       />
 
       <div className="main">
@@ -335,7 +407,10 @@ export default function App() {
           )}
         </aside>
 
-        <section className="editor-area">
+        <section
+          className="editor-area"
+          style={mainView === "scope" ? { display: "none" } : undefined}
+        >
           <div className="editor-title">
             {openFile ?? "no file open"}
             {openFile && dirtyFiles.has(openFile) ? " ● unsaved (Ctrl+S)" : ""}
@@ -355,6 +430,20 @@ export default function App() {
             editable={!!openFile}
           />
         </section>
+
+        {scopeMounted && (
+          <ScopeView
+            active={mainView === "scope"}
+            selectedPort={selectedPort}
+            busy={busy}
+            monitorOn={monitorOn}
+            baudrate={baudrate}
+            notify={notify}
+            onEnsureMonitor={ensureMonitor}
+            onStopMonitor={stopMonitorIfOn}
+            onFlashFirmware={flashScopeFirmware}
+          />
+        )}
       </div>
 
       <section className="bottom">

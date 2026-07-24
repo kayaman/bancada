@@ -1,24 +1,54 @@
 //! Bancada's Tauri layer: thin async commands over `bancada-core`, plus event
-//! streaming for build output and the serial monitor.
+//! streaming for build output, the serial monitor, and the scope.
 //!
 //! Events emitted to the frontend:
 //!   "build://line"      { stream: "stdout"|"stderr", line: string }
 //!   "serial://line"     { stream, line }
 //!   "serial://closed"   {}
+//!
+//! Scope commands (`docs/scope-architecture.md` §3): `scope_probe`,
+//! `scope_start`, `scope_single`, `scope_send`, `scope_stop`,
+//! `scope_install_firmware`, plus `save_text_file` / `save_binary_file`.
+//! `scope_start` streams binary envelopes (§2: kind 0x01 samples, 0x02 JSON
+//! events) over a `tauri::ipc::Channel` instead of events. The serial port
+//! has a single owner at a time — monitor child process or scope session —
+//! and acquiring it for one evicts the other.
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use bancada_core::cli::ArduinoCli;
+use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
 use bancada_core::sketch::{SketchProject, SketchYaml};
 use bancada_core::types::{DetectedPort, IndexedLibrary, InstalledLibrary, RunResult};
+use base64::Engine as _;
+use serialport::SerialPort;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// A running ADC-streaming session: the writer half of the port lives under
+/// the state mutex; the reader half is owned by a dedicated thread that never
+/// touches the mutex (same discipline as the monitor `Child`).
+struct ScopeSession {
+    writer: Box<dyn SerialPort>,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+/// Whoever currently holds the serial port. Exactly one owner at a time.
+enum SerialOwner {
+    Monitor(Child),
+    Scope(ScopeSession),
+}
 
 struct AppState {
     cli: ArduinoCli,
-    monitor: Mutex<Option<Child>>,
+    serial: Mutex<Option<SerialOwner>>,
 }
 
 /// Convert any core error into the string Tauri sends to JS.
@@ -26,11 +56,31 @@ fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// Kill and reap a child process, if one is running.
-fn kill_child(slot: &mut Option<Child>) {
-    if let Some(mut child) = slot.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+/// Kill and reap a monitor child process.
+fn kill_child(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Politely stop a scope session: ask the firmware to stop streaming, flag the
+/// reader thread down, release the writer handle and join the thread.
+fn stop_scope_session(mut session: ScopeSession) {
+    let _ = session.writer.write_all(scope::cmd_stop().as_bytes());
+    let _ = session.writer.flush();
+    session.stop.store(true, Ordering::Relaxed);
+    let join = session.join.take();
+    drop(session.writer);
+    if let Some(handle) = join {
+        let _ = handle.join();
+    }
+}
+
+/// Free the serial port from whichever owner holds it.
+fn evict_owner(slot: &mut Option<SerialOwner>) {
+    match slot.take() {
+        Some(SerialOwner::Monitor(child)) => kill_child(child),
+        Some(SerialOwner::Scope(session)) => stop_scope_session(session),
+        None => {}
     }
 }
 
@@ -228,8 +278,8 @@ fn start_monitor(
     port: String,
     baudrate: u32,
 ) -> Result<(), String> {
-    let mut guard = state.monitor.lock().unwrap();
-    kill_child(&mut guard);
+    let mut guard = state.serial.lock().unwrap();
+    evict_owner(&mut guard);
 
     let mut child = state.cli.monitor(&port, baudrate).map_err(err_str)?;
     let stdout = child.stdout.take().ok_or("monitor stdout unavailable")?;
@@ -255,24 +305,328 @@ fn start_monitor(
         }
     });
 
-    *guard = Some(child);
+    *guard = Some(SerialOwner::Monitor(child));
     Ok(())
 }
 
 #[tauri::command]
 fn stop_monitor(state: State<'_, AppState>) -> Result<(), String> {
-    kill_child(&mut state.monitor.lock().unwrap());
+    let mut guard = state.serial.lock().unwrap();
+    if matches!(guard.as_ref(), Some(SerialOwner::Monitor(_))) {
+        evict_owner(&mut guard);
+    }
     Ok(())
 }
 
 /// Transmit a line to the board through the monitor's stdin.
 #[tauri::command]
 fn monitor_send(state: State<'_, AppState>, data: String) -> Result<(), String> {
-    let mut guard = state.monitor.lock().unwrap();
-    let child = guard.as_mut().ok_or("serial monitor is not running")?;
+    let mut guard = state.serial.lock().unwrap();
+    let Some(SerialOwner::Monitor(child)) = guard.as_mut() else {
+        return Err("serial monitor is not running".to_string());
+    };
     let stdin = child.stdin.as_mut().ok_or("monitor stdin unavailable")?;
     writeln!(stdin, "{data}").map_err(err_str)?;
     stdin.flush().map_err(err_str)
+}
+
+// ---------- scope (ADC streaming firmware) ----------
+
+/// Open `port` at `baud`, 8N1, with DTR asserted and RTS deasserted —
+/// UART-bridge boards auto-reset on open; native CDC ports need DTR set
+/// before they transmit.
+fn open_scope_port(
+    port: &str,
+    baud: u32,
+    timeout: Duration,
+) -> Result<Box<dyn SerialPort>, String> {
+    let mut sp = serialport::new(port, baud)
+        .data_bits(serialport::DataBits::Eight)
+        .parity(serialport::Parity::None)
+        .stop_bits(serialport::StopBits::One)
+        .timeout(timeout)
+        .open()
+        .map_err(err_str)?;
+    let _ = sp.write_data_terminal_ready(true);
+    let _ = sp.write_request_to_send(false);
+    Ok(sp)
+}
+
+/// Pull complete lines out of an accumulating byte buffer, returning the
+/// first `!BANCADA` banner found, if any.
+fn banner_in_buffer(pending: &mut Vec<u8>) -> Option<ScopeCaps> {
+    while let Some(nl) = pending.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = pending.drain(..=nl).collect();
+        if let Some(caps) = scope::parse_banner(&String::from_utf8_lossy(&line)) {
+            return Some(caps);
+        }
+    }
+    None
+}
+
+/// Read from `sp` until `deadline`, feeding `pending`; returns early on banner.
+fn read_for_banner(
+    sp: &mut Box<dyn SerialPort>,
+    pending: &mut Vec<u8>,
+    deadline: Instant,
+) -> Option<ScopeCaps> {
+    let mut chunk = [0u8; 512];
+    while Instant::now() < deadline {
+        match sp.read(&mut chunk) {
+            Ok(0) => {}
+            Ok(n) => {
+                pending.extend_from_slice(&chunk[..n]);
+                if let Some(caps) = banner_in_buffer(pending) {
+                    return Some(caps);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None, // port vanished — caller reports
+        }
+    }
+    None
+}
+
+/// Probe one baud rate: tolerate boot garbage (the open may have reset the
+/// board — the boot banner itself may answer us), then ask `{"c":"id"}` up to
+/// three times.
+fn probe_at_baud(port: &str, baud: u32) -> Result<ScopeCaps, String> {
+    let mut sp = open_scope_port(port, baud, Duration::from_millis(200))?;
+    let mut pending: Vec<u8> = Vec::new();
+
+    // Boot window: a board that auto-reset on open prints its banner ~1 s in.
+    if let Some(caps) = read_for_banner(
+        &mut sp,
+        &mut pending,
+        Instant::now() + Duration::from_millis(1500),
+    ) {
+        return Ok(caps);
+    }
+
+    for _ in 0..3 {
+        sp.write_all(scope::cmd_id().as_bytes()).map_err(err_str)?;
+        sp.flush().map_err(err_str)?;
+        if let Some(caps) = read_for_banner(
+            &mut sp,
+            &mut pending,
+            Instant::now() + Duration::from_millis(400),
+        ) {
+            return Ok(caps);
+        }
+    }
+    Err(format!("no !BANCADA banner at {baud} baud"))
+}
+
+/// Detect the Bancada scope firmware on `port` and return its capabilities.
+#[tauri::command]
+async fn scope_probe(state: State<'_, AppState>, port: String) -> Result<ScopeCaps, String> {
+    {
+        let guard = state.serial.lock().unwrap();
+        match guard.as_ref() {
+            Some(SerialOwner::Scope(_)) => return Err("stop the scope first".to_string()),
+            Some(SerialOwner::Monitor(_)) => {
+                return Err("stop the serial monitor before probing the scope".to_string())
+            }
+            None => {}
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut last_err = String::new();
+        for baud in [921_600u32, 115_200] {
+            match probe_at_baud(&port, baud) {
+                Ok(mut caps) => {
+                    if caps.proto != 1 {
+                        return Err(format!(
+                            "scope firmware speaks protocol {} (need 1) — reflash the companion firmware",
+                            caps.proto
+                        ));
+                    }
+                    caps.baud = baud;
+                    return Ok(caps); // port handle already dropped by probe_at_baud
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        Err(format!(
+            "no Bancada scope firmware detected on {port} ({last_err})"
+        ))
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Send one channel message, reporting whether the frontend is still there.
+fn channel_send(on_message: &Channel<InvokeResponseBody>, bytes: Vec<u8>) -> bool {
+    on_message.send(InvokeResponseBody::Raw(bytes)).is_ok()
+}
+
+/// Reader-thread body: raw bytes → FrameScanner → channel envelopes.
+fn scope_reader_loop(
+    mut reader: Box<dyn SerialPort>,
+    stop: Arc<AtomicBool>,
+    on_message: Channel<InvokeResponseBody>,
+) {
+    let mut scanner = FrameScanner::new();
+    let mut buf = [0u8; 4096];
+    let mut crc_reported: u32 = 0;
+
+    while !stop.load(Ordering::Relaxed) {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => {
+                // Not a normal timeout; avoid a hot spin if the driver
+                // reports EOF-ish reads on a dying port.
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break, // fatal: port unplugged, permissions, ...
+        };
+
+        for frame in scanner.push(&buf[..n]) {
+            let sent = match frame.frame_type {
+                ScopeFrame::TYPE_SAMPLES => channel_send(
+                    &on_message,
+                    scope::envelope_samples(frame.flags, frame.first_sample_index, &frame.payload),
+                ),
+                // META / RECORD_HDR / ERROR payloads are already JSON events.
+                _ => channel_send(
+                    &on_message,
+                    scope::envelope_json(&String::from_utf8_lossy(&frame.payload)),
+                ),
+            };
+            if !sent {
+                return; // frontend gone; die quietly
+            }
+        }
+
+        let dropped = scanner.take_dropped();
+        if dropped > 0 {
+            channel_send(
+                &on_message,
+                scope::envelope_json(&format!("{{\"ev\":\"drop\",\"frames\":{dropped}}}")),
+            );
+        }
+        if scanner.crc_errors >= crc_reported + 50 {
+            crc_reported = scanner.crc_errors;
+            channel_send(
+                &on_message,
+                scope::envelope_json(&format!("{{\"ev\":\"crc\",\"count\":{crc_reported}}}")),
+            );
+        }
+    }
+
+    channel_send(&on_message, scope::envelope_json("{\"ev\":\"closed\"}"));
+}
+
+/// Start continuous ADC streaming; binary envelopes flow on `on_message`.
+#[tauri::command]
+fn scope_start(
+    state: State<'_, AppState>,
+    port: String,
+    baud: u32,
+    cfg: scope::ScopeStreamCfg,
+    on_message: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    let mut guard = state.serial.lock().unwrap();
+    evict_owner(&mut guard);
+
+    let mut writer = open_scope_port(&port, baud, Duration::from_millis(100))?;
+    writer
+        .write_all(scope::cmd_start(cfg.sps, &cfg.pins, cfg.atten).as_bytes())
+        .map_err(err_str)?;
+    writer.flush().map_err(err_str)?;
+
+    let reader = writer.try_clone().map_err(err_str)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_reader = stop.clone();
+    let join = std::thread::spawn(move || scope_reader_loop(reader, stop_reader, on_message));
+
+    *guard = Some(SerialOwner::Scope(ScopeSession {
+        writer,
+        stop,
+        join: Some(join),
+    }));
+    Ok(())
+}
+
+/// Arm a device-triggered single-shot capture on the running scope session.
+#[tauri::command]
+fn scope_single(state: State<'_, AppState>, cfg: scope::ScopeSingleCfg) -> Result<(), String> {
+    let mut guard = state.serial.lock().unwrap();
+    let Some(SerialOwner::Scope(session)) = guard.as_mut() else {
+        return Err("scope is not running".to_string());
+    };
+    session
+        .writer
+        .write_all(scope::cmd_single(&cfg).as_bytes())
+        .map_err(err_str)?;
+    session.writer.flush().map_err(err_str)
+}
+
+/// Escape hatch: send a raw control line to the scope port.
+#[tauri::command]
+fn scope_send(state: State<'_, AppState>, line: String) -> Result<(), String> {
+    let mut guard = state.serial.lock().unwrap();
+    let Some(SerialOwner::Scope(session)) = guard.as_mut() else {
+        return Err("scope is not running".to_string());
+    };
+    session
+        .writer
+        .write_all(format!("{line}\n").as_bytes())
+        .map_err(err_str)?;
+    session.writer.flush().map_err(err_str)
+}
+
+/// Stop the scope session, if one is running. No-op for any other owner.
+#[tauri::command]
+fn scope_stop(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.serial.lock().unwrap();
+    if matches!(guard.as_ref(), Some(SerialOwner::Scope(_))) {
+        evict_owner(&mut guard);
+    }
+    Ok(())
+}
+
+/// Materialize the embedded companion firmware as a compilable sketch dir;
+/// returns the sketch directory path (feed it to compile/upload).
+#[tauri::command]
+fn scope_install_firmware(dest_dir: String) -> Result<String, String> {
+    let base = if dest_dir.is_empty() {
+        std::env::temp_dir().join("bancada_scope_fw")
+    } else {
+        PathBuf::from(dest_dir)
+    };
+    let sketch_dir = base.join("bancada_scope");
+    std::fs::create_dir_all(&sketch_dir).map_err(err_str)?;
+    std::fs::write(
+        sketch_dir.join("bancada_scope.ino"),
+        include_str!("../../firmware/bancada_scope/bancada_scope.ino"),
+    )
+    .map_err(err_str)?;
+    std::fs::write(
+        sketch_dir.join("sketch.yaml"),
+        include_str!("../../firmware/bancada_scope/sketch.yaml"),
+    )
+    .map_err(err_str)?;
+    Ok(sketch_dir.to_string_lossy().into_owned())
+}
+
+// ---------- exports (paths come from the OS save dialog) ----------
+
+#[tauri::command]
+fn save_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(err_str)
+}
+
+#[tauri::command]
+fn save_binary_file(path: String, contents_b64: String) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(contents_b64.as_bytes())
+        .map_err(err_str)?;
+    std::fs::write(path, bytes).map_err(err_str)
 }
 
 // ---------- board utilities ----------
@@ -295,7 +649,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppState {
                 cli: ArduinoCli::default(),
-                monitor: Mutex::new(None),
+                serial: Mutex::new(None),
             });
             Ok(())
         })
@@ -317,16 +671,24 @@ pub fn run() {
             start_monitor,
             stop_monitor,
             monitor_send,
+            scope_probe,
+            scope_start,
+            scope_single,
+            scope_send,
+            scope_stop,
+            scope_install_firmware,
+            save_text_file,
+            save_binary_file,
             read_board_mac
         ])
         .build(tauri::generate_context!())
         .expect("error while building Bancada")
         .run(|app, event| {
-            // The monitor child holds the serial port exclusively; kill it on
+            // Whoever owns the serial port holds it exclusively; release it on
             // exit so the port is immediately free for other tools.
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
-                kill_child(&mut state.monitor.lock().unwrap());
+                evict_owner(&mut state.serial.lock().unwrap());
             }
         });
 }

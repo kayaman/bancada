@@ -27,7 +27,7 @@ export default function FileTree({ files, openFile, dirtyFiles, onOpen }: Props)
         const active = f.rel_path === openFile;
         const dirty = dirtyFiles.has(f.rel_path);
         return (
-          <div
+          <button
             key={f.rel_path}
             className={`tree-item file ${active ? "active" : ""}`}
             style={{ paddingLeft: 8 + depth * 14 }}
@@ -36,7 +36,7 @@ export default function FileTree({ files, openFile, dirtyFiles, onOpen }: Props)
           >
             {name}
             {dirty ? " ●" : ""}
-          </div>
+          </button>
         );
       })}
       {files.length === 0 && (
