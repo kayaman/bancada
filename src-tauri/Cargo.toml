@@ -1,0 +1,21 @@
+[package]
+name = "bancada"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "An Arduino workbench: editor, library manager and board utilities on top of arduino-cli"
+
+[lib]
+name = "bancada_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bancada-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
