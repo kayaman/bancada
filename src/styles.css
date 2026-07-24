@@ -344,6 +344,46 @@ body {
   padding: 4px 8px;
 }
 
+/* new-library form: stacked, because the sidebar is too narrow for the
+   horizontal .field row used in the scope controls */
+.lib-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.lib-new-form .field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+/* base .input/.select cap at 260px, which truncates in this column */
+.lib-new-form .input,
+.lib-new-form .select {
+  width: 100%;
+  max-width: none;
+}
+
+.lib-dest {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.lib-new-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .lib-card {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -400,12 +440,50 @@ body {
 /* ---------- consoles ---------- */
 
 .bottom {
-  height: 220px;
+  position: relative;
+  height: 220px; /* fallback; App sets an inline height when resizable */
   min-height: 120px;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+/* Invisible 8px grab strip straddling the panel's top border; glows accent
+   while hovered or dragged so the affordance is discoverable. */
+.panel-resize-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: ns-resize;
+  z-index: 10;
+  touch-action: none;
+  user-select: none;
+}
+
+.panel-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+  transition: background var(--transition);
+}
+
+.panel-resize-handle:hover::after,
+.panel-resize-handle:active::after {
+  background: var(--accent);
+}
+
+/* Expanded over the whole main area (.main is hidden while maximized). */
+.bottom.maximized {
+  height: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .console {

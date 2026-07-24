@@ -1,6 +1,7 @@
 // ScopeView — self-contained oscilloscope view. Owns the ScopeEngine
 // instance, its serial-line subscription (plotter source) and the ADC
-// streaming session. Replaces the editor area while active.
+// streaming session. Lives in the bottom panel as the Oscilloscope tab;
+// stays mounted while hidden so streams survive tab switches.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";

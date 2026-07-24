@@ -54,4 +54,17 @@ describe("parseLine", () => {
       { name: "ch2", value: 6 },
     ]);
   });
+
+  it("parses label=value pairs from debug prose", () => {
+    // real line printed by a moisture-sensor sketch
+    expect(
+      parseLine("[sensor] raw=2 fora da sanidade (50..4090) — verifique VCC/AOUT da sonda"),
+    ).toEqual([{ name: "raw", value: 2 }]);
+    expect(parseLine("x=1.5 y=-2e3")).toEqual([
+      { name: "x", value: 1.5 },
+      { name: "y", value: -2000 },
+    ]);
+    // colon wins when both separators appear in one token
+    expect(parseLine("t:1=9")).toEqual([]);
+  });
 });

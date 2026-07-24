@@ -74,6 +74,14 @@ npm run tauri build
   - **“+ Local…”** adds a local/proprietary library folder as a `dir:` entry
     in the active profile — per-project local libraries, which the official
     IDE cannot do
+  - **“New”** scaffolds a complete library in the sketchbook —
+    `library.properties`, `src/<Name>.{h,cpp}` with a stub class, `keywords.txt`
+    and an example that compiles as-is — then pins it into the active profile
+    as an absolute `dir:` entry. That pin matters: profile builds are
+    *hermetic*, so globally installed libraries are excluded from them and a
+    sketchbook library would otherwise be invisible to the build. The flip
+    side is that such an entry names a path on this machine, so a `sketch.yaml`
+    carrying one is not portable to a collaborator
 - Serial monitor via `arduino-cli monitor` (start/stop, baudrate, TX input)
 - Utilities: **read board MAC address** via esptool (shows chip type too)
 

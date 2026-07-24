@@ -65,6 +65,17 @@ pub struct SketchFile {
     pub is_dir: bool,
 }
 
+/// How a local library path is written into `sketch.yaml`.
+///
+/// arduino-cli accepts either form. Relative keeps the project relocatable and
+/// is right for a library inside the project tree; absolute is right for one
+/// outside it, such as a library in the global sketchbook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStyle {
+    Relative,
+    Absolute,
+}
+
 impl SketchProject {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
@@ -115,16 +126,46 @@ impl SketchProject {
     /// The stored path is made relative to the sketch dir when possible, so
     /// the project stays relocatable.
     pub fn add_local_library(&self, profile_name: &str, lib_dir: &Path) -> Result<SketchYaml> {
+        self.add_local_library_with(profile_name, lib_dir, PathStyle::Relative)
+    }
+
+    /// Add a local library `dir:` entry, choosing how the path is written.
+    ///
+    /// Use [`PathStyle::Absolute`] for libraries that live outside the project
+    /// tree — a library in the global sketchbook would otherwise be stored as a
+    /// brittle `../../Arduino/libraries/Foo`.
+    pub fn add_local_library_with(
+        &self,
+        profile_name: &str,
+        lib_dir: &Path,
+        style: PathStyle,
+    ) -> Result<SketchYaml> {
+        if style == PathStyle::Absolute && !lib_dir.is_absolute() {
+            return Err(Error::Other(format!(
+                "an absolute dir: entry needs an absolute path, got {}",
+                lib_dir.display()
+            )));
+        }
         let mut y = self.load_yaml()?;
         let profile = y
             .profiles
             .get_mut(profile_name)
             .ok_or_else(|| Error::Other(format!("no profile named `{profile_name}`")))?;
 
-        let stored = relativize(&self.dir, lib_dir);
-        let dep = LibraryDep::Local { dir: stored };
-        if !profile.libraries.contains(&dep) {
-            profile.libraries.push(dep);
+        // Compare resolved targets rather than the stored strings: the same
+        // library may already be pinned in the other style, and two `dir:`
+        // entries for one library would make arduino-cli see it twice.
+        let target = normalize(&self.dir.join(lib_dir));
+        let already = profile.libraries.iter().any(|l| match l {
+            LibraryDep::Local { dir } => normalize(&self.dir.join(dir)) == target,
+            LibraryDep::Registry(_) => false,
+        });
+        if !already {
+            let stored = match style {
+                PathStyle::Relative => relativize(&self.dir, lib_dir),
+                PathStyle::Absolute => lib_dir.to_string_lossy().into_owned(),
+            };
+            profile.libraries.push(LibraryDep::Local { dir: stored });
         }
         self.save_yaml(&y)?;
         Ok(y)
@@ -205,6 +246,34 @@ fn rel(root: &Path, p: &Path) -> String {
         .into_owned()
 }
 
+/// Lexically collapse `.` and `..` so two spellings of one path compare equal.
+///
+/// Not `canonicalize`: that touches the filesystem, fails for a path that does
+/// not exist yet, and resolves symlinks — and a sketchbook routinely contains
+/// symlinked libraries we want to keep distinct from their targets.
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Only pop a real directory name; keep leading `..` as-is.
+                if out
+                    .components()
+                    .next_back()
+                    .is_some_and(|c| matches!(c, std::path::Component::Normal(_)))
+                {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Best-effort relative path from `base` to `target` (walks up with `..`).
 fn relativize(base: &Path, target: &Path) -> String {
     let base: Vec<_> = base.components().collect();
@@ -218,9 +287,8 @@ fn relativize(base: &Path, target: &Path) -> String {
         // Different roots (shouldn't happen on Linux) — keep absolute.
         return target.to_string_lossy().into_owned();
     }
-    let mut parts: Vec<String> = std::iter::repeat("..".to_string())
-        .take(base.len() - common)
-        .collect();
+    let mut parts: Vec<String> =
+        std::iter::repeat_n("..".to_string(), base.len() - common).collect();
     parts.extend(
         target_c[common..]
             .iter()
@@ -300,6 +368,102 @@ profiles:
         // resolved paths are absolute
         let paths = proj.local_library_paths("esp32s3").unwrap();
         assert!(paths.iter().all(|p| p.is_absolute()));
+    }
+
+    /// A sketch with the SAMPLE yaml plus a library dir in an unrelated place,
+    /// which is what a global-sketchbook library looks like from a project.
+    fn sketch_and_outside_lib(tmp: &Path) -> (SketchProject, PathBuf) {
+        let sketch_dir = tmp.join("projects/monitor");
+        let lib_dir = tmp.join("sketchbook/libraries/EnvSensor");
+        std::fs::create_dir_all(&sketch_dir).unwrap();
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(sketch_dir.join("sketch.yaml"), SAMPLE).unwrap();
+        (SketchProject::open(&sketch_dir).unwrap(), lib_dir)
+    }
+
+    #[test]
+    fn add_local_library_absolute_writes_absolute_dir_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, lib_dir) = sketch_and_outside_lib(tmp.path());
+
+        let y = proj
+            .add_local_library_with("esp32s3", &lib_dir, PathStyle::Absolute)
+            .unwrap();
+        // SAMPLE already carries a `dir: ../libs/EnvSensor` entry, so look for
+        // the one we added rather than the first local entry.
+        let want = lib_dir.to_string_lossy().into_owned();
+        assert!(
+            y.profiles["esp32s3"].libraries.contains(&LibraryDep::Local {
+                dir: want.clone()
+            }),
+            "absolute entry missing from {:?}",
+            y.profiles["esp32s3"].libraries
+        );
+        assert!(Path::new(&want).is_absolute());
+
+        // and it resolves back to the same place
+        let paths = proj.local_library_paths("esp32s3").unwrap();
+        assert!(paths.contains(&lib_dir));
+    }
+
+    #[test]
+    fn relative_then_absolute_dedupes_to_one_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, lib_dir) = sketch_and_outside_lib(tmp.path());
+
+        let y1 = proj.add_local_library("esp32s3", &lib_dir).unwrap();
+        let before = y1.profiles["esp32s3"].libraries.len();
+        // Same library, other style: must not add a second entry, or arduino-cli
+        // would see the library twice.
+        let y2 = proj
+            .add_local_library_with("esp32s3", &lib_dir, PathStyle::Absolute)
+            .unwrap();
+        assert_eq!(y2.profiles["esp32s3"].libraries.len(), before);
+    }
+
+    #[test]
+    fn absolute_then_relative_also_dedupes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, lib_dir) = sketch_and_outside_lib(tmp.path());
+
+        let y1 = proj
+            .add_local_library_with("esp32s3", &lib_dir, PathStyle::Absolute)
+            .unwrap();
+        let before = y1.profiles["esp32s3"].libraries.len();
+        let y2 = proj.add_local_library("esp32s3", &lib_dir).unwrap();
+        assert_eq!(y2.profiles["esp32s3"].libraries.len(), before);
+    }
+
+    #[test]
+    fn absolute_style_rejects_a_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, _) = sketch_and_outside_lib(tmp.path());
+        let err = proj
+            .add_local_library_with("esp32s3", Path::new("libs/Foo"), PathStyle::Absolute)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn add_local_library_absolute_errors_on_unknown_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, lib_dir) = sketch_and_outside_lib(tmp.path());
+        let err = proj
+            .add_local_library_with("nope", &lib_dir, PathStyle::Absolute)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no profile named"), "{err}");
+    }
+
+    #[test]
+    fn normalize_collapses_dot_segments() {
+        assert_eq!(
+            normalize(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
+        // A leading `..` has nothing to pop and must survive.
+        assert_eq!(normalize(Path::new("../x")), PathBuf::from("../x"));
     }
 
     #[test]

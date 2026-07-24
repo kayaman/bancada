@@ -45,6 +45,42 @@ export interface InstalledLibrary {
   install_dir: string;
 }
 
+/** Fields for a brand-new library; blanks are defaulted by the backend. */
+export interface LibrarySpec {
+  name: string;
+  version: string;
+  author: string;
+  maintainer: string;
+  sentence: string;
+  paragraph: string;
+  category: string;
+  url: string;
+  architectures: string;
+}
+
+export interface CreatedLibrary {
+  dir: string;
+  files: string[];
+  warnings: string[];
+  /** Rewritten sketch.yaml, when the library was pinned to a profile. */
+  yaml?: SketchYaml | null;
+  /** Set when the library was created but pinning it to the profile failed. */
+  profile_error?: string | null;
+}
+
+/** The categories the Arduino library specification permits. */
+export const LIBRARY_CATEGORIES = [
+  "Display",
+  "Communication",
+  "Signal Input/Output",
+  "Sensors",
+  "Device Control",
+  "Timing",
+  "Data Storage",
+  "Data Processing",
+  "Other",
+] as const;
+
 export interface SketchFile {
   rel_path: string;
   is_dir: boolean;
@@ -79,6 +115,11 @@ export interface ChipInfo {
   mac: string;
   chip_type?: string;
   raw_output: string;
+}
+
+export interface AppSettings {
+  last_sketch_dir?: string | null;
+  last_open_file?: string | null;
 }
 
 export interface ScopeCaps {
@@ -152,6 +193,23 @@ export const installLibrary = (name: string, version?: string) =>
   invoke<void>("install_library", { name, version: version ?? null });
 export const uninstallLibrary = (name: string) =>
   invoke<void>("uninstall_library", { name });
+export const sketchbookLibrariesDir = () =>
+  invoke<string>("sketchbook_libraries_dir");
+/**
+ * Scaffold a new library in the sketchbook. When `sketchDir`/`profile` are
+ * given the library is also pinned into that profile as an absolute `dir:`
+ * entry, without which a profile build cannot see it.
+ */
+export const createLibrary = (
+  spec: LibrarySpec,
+  sketchDir?: string | null,
+  profile?: string | null,
+) =>
+  invoke<CreatedLibrary>("create_library", {
+    spec,
+    sketchDir: sketchDir ?? null,
+    profile: profile ?? null,
+  });
 
 export const compileSketch = (
   sketchDir: string,
@@ -184,6 +242,10 @@ export const monitorSend = (data: string) =>
 
 export const readBoardMac = (port: string) =>
   invoke<ChipInfo>("read_board_mac", { port });
+
+export const loadSettings = () => invoke<AppSettings>("load_settings");
+export const saveSettings = (settings: AppSettings) =>
+  invoke<void>("save_settings", { settings });
 
 // ---------- scope ----------
 

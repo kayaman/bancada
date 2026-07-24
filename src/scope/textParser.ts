@@ -1,8 +1,10 @@
 // Arduino Serial Plotter line parser.
 //
-// Accepts `label:value` pairs and bare numbers, separated by spaces, commas
-// and/or tabs. Bare numbers get positional names "ch1", "ch2", ...
-// Non-numeric tokens (and fully non-numeric lines) are ignored gracefully.
+// Accepts `label:value` (and `label=value`) pairs and bare numbers, separated
+// by spaces, commas and/or tabs. Bare numbers get positional names "ch1",
+// "ch2", ... Non-numeric tokens (and fully non-numeric lines) are ignored
+// gracefully, so debug prose like "[sensor] raw=42 out of range" still
+// yields the `raw` channel.
 
 export interface ParsedValue {
   name: string;
@@ -27,10 +29,11 @@ export function parseLine(line: string): ParsedValue[] {
   for (const raw of tokens) {
     const tok = raw.trim();
     if (tok.length === 0) continue;
-    const colon = tok.indexOf(":");
-    if (colon > 0 && colon < tok.length - 1) {
-      const name = tok.slice(0, colon).trim();
-      const v = parseNumber(tok.slice(colon + 1).trim());
+    let sep = tok.indexOf(":");
+    if (sep <= 0 || sep >= tok.length - 1) sep = tok.indexOf("=");
+    if (sep > 0 && sep < tok.length - 1) {
+      const name = tok.slice(0, sep).trim();
+      const v = parseNumber(tok.slice(sep + 1).trim());
       if (name.length > 0 && v !== null) out.push({ name, value: v });
       continue;
     }

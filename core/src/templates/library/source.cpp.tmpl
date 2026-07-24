@@ -1,0 +1,41 @@
+#include "{{FOLDER}}.h"
+
+{{CLASS}}::{{CLASS}}(uint32_t intervalMs)
+    : _intervalMs(intervalMs), _lastMs(0), _count(0), _ready(false) {}
+
+bool {{CLASS}}::begin() {
+  if (_intervalMs == 0) {
+    _ready = false;
+    return false;
+  }
+  reset();
+  _ready = true;
+  return true;
+}
+
+void {{CLASS}}::reset() {
+  _lastMs = millis();
+  _count = 0;
+}
+
+void {{CLASS}}::setInterval(uint32_t ms) {
+  _intervalMs = ms;
+}
+
+bool {{CLASS}}::update() {
+  if (!_ready) {
+    return false;
+  }
+  const uint32_t now = millis();
+  // Unsigned subtraction stays correct across the 49.7-day millis() rollover.
+  if (now - _lastMs < _intervalMs) {
+    return false;
+  }
+  _lastMs += _intervalMs;
+  if (now - _lastMs >= _intervalMs) {
+    // A long stall would otherwise make update() fire repeatedly to catch up.
+    _lastMs = now;
+  }
+  _count++;
+  return true;
+}

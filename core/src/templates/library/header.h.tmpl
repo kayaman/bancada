@@ -1,0 +1,44 @@
+/*
+ * {{NAME}} — {{SENTENCE}}
+ *
+ * Scaffolded by Bancada. The stub below is a working interval timer: it needs
+ * nothing but millis(), so it compiles for every architecture
+ * (architectures={{ARCH}}). Replace it with your own implementation.
+ */
+
+#ifndef {{GUARD}}
+#define {{GUARD}}
+
+#include <Arduino.h>
+
+class {{CLASS}} {
+ public:
+  /// @param intervalMs how often update() should report an elapsed interval.
+  explicit {{CLASS}}(uint32_t intervalMs = 1000);
+
+  /// Call once from setup(). Returns false if the interval is zero.
+  bool begin();
+
+  /// Call from loop(). Returns true exactly once per elapsed interval.
+  bool update();
+
+  /// Number of intervals counted since begin().
+  uint32_t count() const { return _count; }
+
+  /// Restart counting from now.
+  void reset();
+
+  uint32_t interval() const { return _intervalMs; }
+  void setInterval(uint32_t ms);
+
+  /// Version string, kept in step with library.properties.
+  static const char *version() { return "{{VERSION}}"; }
+
+ private:
+  uint32_t _intervalMs;
+  uint32_t _lastMs;
+  uint32_t _count;
+  bool _ready;
+};
+
+#endif  // {{GUARD}}

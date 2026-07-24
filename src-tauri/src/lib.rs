@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use bancada_core::cli::ArduinoCli;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
-use bancada_core::sketch::{SketchProject, SketchYaml};
+use bancada_core::sketch::{PathStyle, SketchProject, SketchYaml};
 use bancada_core::types::{DetectedPort, IndexedLibrary, InstalledLibrary, RunResult};
 use base64::Engine as _;
 use serialport::SerialPort;
@@ -216,6 +216,72 @@ async fn uninstall_library(state: State<'_, AppState>, name: String) -> Result<(
     tauri::async_runtime::spawn_blocking(move || cli.lib_uninstall(&name).map_err(err_str))
         .await
         .map_err(err_str)?
+}
+
+/// Where a newly created library will land, for the create form's preview.
+#[tauri::command]
+async fn sketchbook_libraries_dir(state: State<'_, AppState>) -> Result<String, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cli.sketchbook_libraries_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[derive(serde::Serialize)]
+struct CreatedLibrary {
+    dir: String,
+    files: Vec<String>,
+    warnings: Vec<String>,
+    /// The rewritten sketch.yaml, when the `dir:` entry was added.
+    yaml: Option<SketchYaml>,
+    /// Set when the library was created but pinning it to the profile failed.
+    profile_error: Option<String>,
+}
+
+/// Scaffold an empty library in `<sketchbook>/libraries/<Name>` and, when a
+/// sketch profile is active, pin it there with an **absolute** `dir:` entry.
+///
+/// The pin is not optional bookkeeping: profile builds are hermetic — globally
+/// installed libraries are excluded from them — so without it a sketchbook
+/// library is invisible to every profile-based compile.
+#[tauri::command]
+async fn create_library(
+    state: State<'_, AppState>,
+    spec: bancada_core::library::LibrarySpec,
+    sketch_dir: Option<String>,
+    profile: Option<String>,
+) -> Result<CreatedLibrary, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let libs_dir = cli.sketchbook_libraries_dir().map_err(err_str)?;
+        let made = bancada_core::library::create_library(&libs_dir, &spec).map_err(err_str)?;
+
+        let mut out = CreatedLibrary {
+            dir: made.dir.to_string_lossy().into_owned(),
+            files: made.files,
+            warnings: made.warnings,
+            yaml: None,
+            profile_error: None,
+        };
+
+        // Deliberately non-fatal: the folder exists either way, and failing the
+        // whole command would tell the user nothing was created.
+        if let (Some(dir), Some(prof)) = (sketch_dir, profile) {
+            match SketchProject::open(&dir).and_then(|p| {
+                p.add_local_library_with(&prof, &made.dir, PathStyle::Absolute)
+            }) {
+                Ok(y) => out.yaml = Some(y),
+                Err(e) => out.profile_error = Some(e.to_string()),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(err_str)?
 }
 
 // ---------- build & flash ----------
@@ -629,6 +695,28 @@ fn save_binary_file(path: String, contents_b64: String) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(err_str)
 }
 
+// ---------- app settings ----------
+
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("settings.json"))
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn load_settings(app: AppHandle) -> Result<bancada_core::settings::AppSettings, String> {
+    Ok(bancada_core::settings::load(&settings_path(&app)?))
+}
+
+#[tauri::command]
+fn save_settings(
+    app: AppHandle,
+    settings: bancada_core::settings::AppSettings,
+) -> Result<(), String> {
+    bancada_core::settings::save(&settings_path(&app)?, &settings).map_err(err_str)
+}
+
 // ---------- board utilities ----------
 
 #[tauri::command]
@@ -666,6 +754,8 @@ pub fn run() {
             list_installed_libraries,
             install_library,
             uninstall_library,
+            sketchbook_libraries_dir,
+            create_library,
             compile_sketch,
             upload_sketch,
             start_monitor,
@@ -679,6 +769,8 @@ pub fn run() {
             scope_install_firmware,
             save_text_file,
             save_binary_file,
+            load_settings,
+            save_settings,
             read_board_mac
         ])
         .build(tauri::generate_context!())

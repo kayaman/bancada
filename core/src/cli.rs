@@ -5,6 +5,7 @@
 //! callback so the UI can show live progress.
 
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
@@ -150,6 +151,27 @@ impl ArduinoCli {
     pub fn core_list(&self) -> Result<Vec<Platform>> {
         let r: CoreListResponse = self.run_json(&["core", "list"])?;
         Ok(r.platforms)
+    }
+
+    /// The sketchbook root (`directories.user`).
+    ///
+    /// `config get` rather than `config dump`: dump omits every key left at its
+    /// default, so on a stock install it does not report `directories` at all.
+    /// With `--json` the value comes back as a quoted JSON string.
+    pub fn sketchbook_dir(&self) -> Result<PathBuf> {
+        let raw: String = self.run_json(&["config", "get", "directories.user"])?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(Error::Other(
+                "arduino-cli reported an empty sketchbook path (directories.user)".into(),
+            ));
+        }
+        Ok(PathBuf::from(trimmed))
+    }
+
+    /// Where globally installed (sketchbook) libraries live.
+    pub fn sketchbook_libraries_dir(&self) -> Result<PathBuf> {
+        Ok(self.sketchbook_dir()?.join("libraries"))
     }
 
     // ---------- libraries ----------

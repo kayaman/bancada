@@ -1,0 +1,29 @@
+/*
+ * {{NAME}} — minimal example.
+ *
+ * Prints a tick once per second to the serial monitor at 115200 baud.
+ */
+
+#include <{{FOLDER}}.h>
+
+{{CLASS}} lib(1000);
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 3000) {
+    // Give a native-USB port a moment to enumerate, then carry on regardless.
+  }
+  Serial.print(F("{{NAME}} "));
+  Serial.println({{CLASS}}::version());
+
+  if (!lib.begin()) {
+    Serial.println(F("begin() failed"));
+  }
+}
+
+void loop() {
+  if (lib.update()) {
+    Serial.print(F("tick "));
+    Serial.println(lib.count());
+  }
+}

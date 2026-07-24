@@ -13,8 +13,15 @@ import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 
 type SideTab = "files" | "libraries";
-type BottomTab = "build" | "serial";
-type MainView = "editor" | "scope";
+type BottomTab = "build" | "serial" | "scope";
+
+// Bottom panel sizing: layout preference, so it lives in localStorage (per
+// machine, not part of the app settings file).
+const BOTTOM_HEIGHT_KEY = "bancada.bottomHeight";
+const BOTTOM_MIN = 120;
+const BOTTOM_DEFAULT = 220;
+const clampBottomHeight = (h: number) =>
+  Math.min(Math.max(h, BOTTOM_MIN), Math.round(window.innerHeight * 0.8));
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
@@ -46,13 +53,24 @@ export default function App() {
   const [serialLines, setSerialLines] = useState<OutputLine[]>([]);
   const [monitorOn, setMonitorOn] = useState(false);
   const [baudrate, setBaudrate] = useState(115200);
+  // Live mirror of monitorOn for callbacks captured by timers (post-upload
+  // auto-resume fires from a closure created while the monitor was still on).
+  const monitorOnRef = useRef(false);
+  monitorOnRef.current = monitorOn;
 
   // ui
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [bottomTab, setBottomTab] = useState<BottomTab>("build");
-  const [mainView, setMainView] = useState<MainView>("editor");
+  // Bottom panel expanded over the whole main area (editor stays mounted).
+  const [bottomMax, setBottomMax] = useState(false);
+  const [bottomHeight, setBottomHeight] = useState(() => {
+    const saved = Number(localStorage.getItem(BOTTOM_HEIGHT_KEY));
+    return Number.isFinite(saved) && saved >= BOTTOM_MIN
+      ? clampBottomHeight(saved)
+      : BOTTOM_DEFAULT;
+  });
   // ScopeView stays mounted once opened so streams/subscriptions survive
-  // toggling back to the editor.
+  // switching to another bottom tab.
   const [scopeMounted, setScopeMounted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
@@ -62,6 +80,26 @@ export default function App() {
     setStatus(msg);
     setStatusIsError(isError);
   }, []);
+
+  /** Drag the handle above the bottom panel to resize it (dbl-click resets). */
+  const startPanelResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    const startY = e.clientY;
+    const startH = bottomHeight;
+    const el = e.currentTarget;
+    let h = startH;
+    el.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      h = clampBottomHeight(startH + (startY - ev.clientY));
+      setBottomHeight(h);
+    };
+    const onUp = () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      localStorage.setItem(BOTTOM_HEIGHT_KEY, String(h));
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+  };
 
   // ---------- event subscriptions ----------
 
@@ -81,6 +119,15 @@ export default function App() {
         ),
       );
     refreshPorts();
+    // Restore the last session's sketch and open file, if they still exist.
+    api
+      .loadSettings()
+      .then(async (s) => {
+        if (!s.last_sketch_dir) return;
+        const ok = await loadSketch(s.last_sketch_dir, s.last_open_file ?? undefined);
+        if (!ok) notify("Last sketch no longer available — open a sketch folder.");
+      })
+      .catch(() => {});
     return () => {
       subs.forEach((p) => p.then((un) => un()));
     };
@@ -90,7 +137,20 @@ export default function App() {
   // ---------- project ----------
 
   const refreshPorts = () =>
-    api.listBoards().then(setPorts).catch((e) => notify(String(e), true));
+    api
+      .listBoards()
+      .then((ps) => {
+        setPorts(ps);
+        // Auto-select the first serial port so the monitor can start capturing
+        // by default (a profile-pinned or user-chosen port is never overridden).
+        setSelectedPort(
+          (cur) =>
+            cur ??
+            ps.find((p) => p.port.protocol === "serial")?.port.address ??
+            null,
+        );
+      })
+      .catch((e) => notify(String(e), true));
 
   /** Switch profile; if it pins a port in sketch.yaml, select that port too. */
   const selectProfile = (p: string) => {
@@ -102,6 +162,11 @@ export default function App() {
   const openSketch = async () => {
     const dir = await open({ directory: true, title: "Open sketch folder" });
     if (typeof dir !== "string") return;
+    await loadSketch(dir);
+  };
+
+  /** Load a sketch folder; opens `restoreFile` when present, else the main .ino. */
+  const loadSketch = async (dir: string, restoreFile?: string): Promise<boolean> => {
     try {
       const [fs, yaml] = await Promise.all([
         api.listSketchFiles(dir),
@@ -119,13 +184,22 @@ export default function App() {
       setDirtyFiles(new Set());
       setOpenFile(null);
       setContent("");
-      // auto-open the main .ino
       const name = dir.split("/").pop();
-      const main = fs.find((f) => f.rel_path === `${name}.ino`);
-      if (main) await openFileInEditor(dir, main.rel_path);
+      const target =
+        (restoreFile && fs.find((f) => f.rel_path === restoreFile)) ||
+        fs.find((f) => f.rel_path === `${name}.ino`);
+      if (target) {
+        await openFileInEditor(dir, target.rel_path);
+      } else {
+        api
+          .saveSettings({ last_sketch_dir: dir, last_open_file: null })
+          .catch(() => {});
+      }
       notify(`Opened ${dir}`);
+      return true;
     } catch (e) {
       notify(String(e), true);
+      return false;
     }
   };
 
@@ -136,6 +210,9 @@ export default function App() {
         (await api.readSketchFile(dir, relPath));
       setOpenFile(relPath);
       setContent(text);
+      api
+        .saveSettings({ last_sketch_dir: dir, last_open_file: relPath })
+        .catch(() => {});
     } catch (e) {
       notify(String(e), true);
     }
@@ -237,6 +314,9 @@ export default function App() {
         target.fqbn,
       );
       notify(r.success ? `✓ Flashed via ${selectedPort}` : "Upload failed", !r.success);
+      // Resume capturing (native-USB boards re-enumerate after flashing,
+      // so give the port a moment to come back).
+      if (r.success) setTimeout(() => startMonitorQuiet(), 1200);
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -259,6 +339,7 @@ export default function App() {
           .map((line) => ({ stream: "stdout" as const, line })),
       ]);
       setBottomTab("build");
+      setTimeout(() => startMonitorQuiet(), 800); // resume after ROM-bootloader reset
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -267,6 +348,24 @@ export default function App() {
   };
 
   // ---------- serial monitor ----------
+
+  /** Best-effort monitor start (auto-capture); errors stay off the status bar. */
+  const startMonitorQuiet = useCallback(async () => {
+    if (monitorOnRef.current || !selectedPort) return;
+    try {
+      setSerialLines([]);
+      await api.startMonitor(selectedPort, baudrate);
+      setMonitorOn(true);
+    } catch {
+      /* port busy or gone — user can start manually */
+    }
+  }, [selectedPort, baudrate]);
+
+  // Capture by default: start the monitor whenever a port is (auto-)selected.
+  useEffect(() => {
+    startMonitorQuiet();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPort]);
 
   const toggleMonitor = async () => {
     try {
@@ -290,9 +389,9 @@ export default function App() {
 
   // ---------- scope ----------
 
-  const toggleScope = () => {
+  const openScopeTab = () => {
     setScopeMounted(true);
-    setMainView((v) => (v === "scope" ? "editor" : "scope"));
+    setBottomTab("scope");
   };
 
   /** Start the serial monitor if it is off (plotter source needs it). */
@@ -370,11 +469,9 @@ export default function App() {
         onVerify={verify}
         onUpload={upload}
         onReadMac={readMac}
-        scopeOn={mainView === "scope"}
-        onToggleScope={toggleScope}
       />
 
-      <div className="main">
+      <div className="main" style={bottomMax ? { display: "none" } : undefined}>
         <aside className="sidebar">
           <div className="panel-tabs">
             <button
@@ -407,10 +504,7 @@ export default function App() {
           )}
         </aside>
 
-        <section
-          className="editor-area"
-          style={mainView === "scope" ? { display: "none" } : undefined}
-        >
+        <section className="editor-area">
           <div className="editor-title">
             {openFile ?? "no file open"}
             {openFile && dirtyFiles.has(openFile) ? " ● unsaved (Ctrl+S)" : ""}
@@ -430,23 +524,26 @@ export default function App() {
             editable={!!openFile}
           />
         </section>
-
-        {scopeMounted && (
-          <ScopeView
-            active={mainView === "scope"}
-            selectedPort={selectedPort}
-            busy={busy}
-            monitorOn={monitorOn}
-            baudrate={baudrate}
-            notify={notify}
-            onEnsureMonitor={ensureMonitor}
-            onStopMonitor={stopMonitorIfOn}
-            onFlashFirmware={flashScopeFirmware}
-          />
-        )}
       </div>
 
-      <section className="bottom">
+      <section
+        className={bottomMax ? "bottom maximized" : "bottom"}
+        style={bottomMax ? undefined : { height: bottomHeight }}
+      >
+        {!bottomMax && (
+          <div
+            className="panel-resize-handle"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize bottom panel"
+            title="Drag to resize — double-click to reset"
+            onPointerDown={startPanelResize}
+            onDoubleClick={() => {
+              setBottomHeight(BOTTOM_DEFAULT);
+              localStorage.setItem(BOTTOM_HEIGHT_KEY, String(BOTTOM_DEFAULT));
+            }}
+          />
+        )}
         <div className="panel-tabs">
           <button
             className={bottomTab === "build" ? "tab active" : "tab"}
@@ -459,6 +556,12 @@ export default function App() {
             onClick={() => setBottomTab("serial")}
           >
             Serial Monitor {monitorOn ? "●" : ""}
+          </button>
+          <button
+            className={bottomTab === "scope" ? "tab active" : "tab"}
+            onClick={openScopeTab}
+          >
+            ∿ Oscilloscope
           </button>
           <div className="spacer" />
           {bottomTab === "serial" && (
@@ -480,14 +583,35 @@ export default function App() {
               </button>
             </>
           )}
+          <button
+            className="btn small icon"
+            onClick={() => setBottomMax((m) => !m)}
+            title={bottomMax ? "Restore panel" : "Maximize panel"}
+          >
+            {bottomMax ? "❐" : "⛶"}
+          </button>
         </div>
-        {bottomTab === "build" ? (
+        {bottomTab === "build" && (
           <Console lines={buildLines} onClear={() => setBuildLines([])} />
-        ) : (
+        )}
+        {bottomTab === "serial" && (
           <Console
             lines={serialLines}
             onClear={() => setSerialLines([])}
             onSend={(d) => api.monitorSend(d).catch((e) => notify(String(e), true))}
+          />
+        )}
+        {scopeMounted && (
+          <ScopeView
+            active={bottomTab === "scope"}
+            selectedPort={selectedPort}
+            busy={busy}
+            monitorOn={monitorOn}
+            baudrate={baudrate}
+            notify={notify}
+            onEnsureMonitor={ensureMonitor}
+            onStopMonitor={stopMonitorIfOn}
+            onFlashFirmware={flashScopeFirmware}
           />
         )}
       </section>
