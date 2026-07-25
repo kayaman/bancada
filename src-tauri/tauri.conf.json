@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Bancada",
-  "version": "0.1.0",
-  "identifier": "sh.rco.bancada",
+  "version": "0.2.0",
+  "identifier": "dev.magj.bancada",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
