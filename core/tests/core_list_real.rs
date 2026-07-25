@@ -42,7 +42,11 @@ fn core_list_parses_and_derives_a_sane_view() {
             "{} is installed, so its status must not be NotInstalled",
             p.id
         );
-        assert!(!v.name.is_empty(), "{} produced an empty display name", p.id);
+        assert!(
+            !v.name.is_empty(),
+            "{} produced an empty display name",
+            p.id
+        );
 
         // `releases` is the field most likely to be restructured upstream, and
         // the version picker is built entirely from its keys.
@@ -85,7 +89,10 @@ fn core_search_parses_uninstalled_platforms() {
     let cli = ArduinoCli::default();
     // "esp32" matches several platforms across indexes on any normal install.
     let platforms = cli.core_search("esp32").expect("core search --json");
-    assert!(!platforms.is_empty(), "`core search esp32` returned nothing");
+    assert!(
+        !platforms.is_empty(),
+        "`core search esp32` returned nothing"
+    );
 
     // The point of this test: search reports platforms that are *not* installed,
     // which is signalled by an empty `installed_version` rather than a missing

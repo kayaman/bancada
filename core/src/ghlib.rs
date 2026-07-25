@@ -520,10 +520,22 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
     #[test]
     fn sorts_newest_first_and_treats_1_1_as_1_1_0() {
         let tags = vec![
-            RemoteTag { name: "Lib/v1.0.0".into(), commit: "a".into() },
-            RemoteTag { name: "Lib/v1.10.0".into(), commit: "b".into() },
-            RemoteTag { name: "Lib/v1.2.0".into(), commit: "c".into() },
-            RemoteTag { name: "Lib/v1.2".into(), commit: "d".into() },
+            RemoteTag {
+                name: "Lib/v1.0.0".into(),
+                commit: "a".into(),
+            },
+            RemoteTag {
+                name: "Lib/v1.10.0".into(),
+                commit: "b".into(),
+            },
+            RemoteTag {
+                name: "Lib/v1.2.0".into(),
+                commit: "c".into(),
+            },
+            RemoteTag {
+                name: "Lib/v1.2".into(),
+                commit: "d".into(),
+            },
         ];
         let ranked = rank_versions(&tags, "Lib");
         let names: Vec<&str> = ranked.iter().map(|t| t.name.as_str()).collect();
@@ -537,8 +549,14 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
     #[test]
     fn unversioned_tags_sort_last_but_are_kept() {
         let tags = vec![
-            RemoteTag { name: "Lib/nightly".into(), commit: "a".into() },
-            RemoteTag { name: "Lib/v1.0.0".into(), commit: "b".into() },
+            RemoteTag {
+                name: "Lib/nightly".into(),
+                commit: "a".into(),
+            },
+            RemoteTag {
+                name: "Lib/v1.0.0".into(),
+                commit: "b".into(),
+            },
         ];
         let ranked = rank_versions(&tags, "Lib");
         assert_eq!(ranked[0].name, "Lib/v1.0.0");
@@ -548,8 +566,14 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
     #[test]
     fn prerelease_suffix_does_not_break_parsing() {
         let tags = vec![
-            RemoteTag { name: "v1.0.0-rc1".into(), commit: "a".into() },
-            RemoteTag { name: "v0.9.0".into(), commit: "b".into() },
+            RemoteTag {
+                name: "v1.0.0-rc1".into(),
+                commit: "a".into(),
+            },
+            RemoteTag {
+                name: "v0.9.0".into(),
+                commit: "b".into(),
+            },
         ];
         let ranked = rank_versions(&tags, "whatever");
         assert_eq!(ranked[0].name, "v1.0.0-rc1");
@@ -578,7 +602,11 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
     fn manifest_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let mut m = Manifest::load(tmp.path()).unwrap();
-        m.upsert(entry("@kayaman/Arduino/libraries/HomeNode", "HomeNode/v1.1.0", "ef11f73"));
+        m.upsert(entry(
+            "@kayaman/Arduino/libraries/HomeNode",
+            "HomeNode/v1.1.0",
+            "ef11f73",
+        ));
         m.save(tmp.path()).unwrap();
 
         let back = Manifest::load(tmp.path()).unwrap();

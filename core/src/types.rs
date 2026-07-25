@@ -34,6 +34,19 @@ pub struct Port {
     pub protocol: String,
     #[serde(default)]
     pub protocol_label: String,
+    /// USB descriptor fields, typically `vid`, `pid` and `serialNumber`.
+    ///
+    /// Kept as a map rather than a struct because the keys are camelCase and
+    /// vary by protocol — a network port has none of them. On an ESP32 with
+    /// native USB, `serialNumber` is the chip's MAC address, which is how
+    /// [`crate::fleet`] identifies a board without touching it.
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+    /// arduino-cli's own identity string for the port. Usually mirrors
+    /// `properties.serialNumber`, but for a USB-serial bridge it is the
+    /// *bridge's* serial (often `"0001"`) and so is not unique per board.
+    #[serde(default)]
+    pub hardware_id: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -42,6 +55,10 @@ pub struct MatchingBoard {
     pub name: String,
     #[serde(default)]
     pub fqbn: String,
+    /// arduino-cli marks umbrella entries like `esp32:esp32:esp32_family`
+    /// hidden; they are real matches but not something to show as *the* board.
+    #[serde(default)]
+    pub is_hidden: bool,
 }
 
 // ---------- `arduino-cli lib search <q> --json` ----------
@@ -291,6 +308,89 @@ mod tests {
             p.matching_boards.is_empty(),
             "a missing key must not fail the parse"
         );
+        // The bridge exposes no serialNumber at all, and `hardware_id` is the
+        // bridge's own — `0001` is not unique across boards. This is why the
+        // fleet registry cannot key on hardware_id alone.
+        assert!(!p.port.properties.contains_key("serialNumber"));
+        assert_eq!(p.port.properties.get("vid").unwrap(), "0x10C4");
+        assert_eq!(p.port.hardware_id, "0001");
+    }
+
+    #[test]
+    fn board_list_reports_an_esp32_mac_as_the_usb_serial_number() {
+        // Captured from a native-USB ESP32 (vid 0x303A = Espressif, pid 0x1001
+        // = USB-Serial/JTAG). `serialNumber` *is* the MAC, burned into the USB
+        // descriptor, so the fleet registry can identify this board passively —
+        // no esptool, no port takeover, no bootloader reset.
+        let json = r#"{
+          "detected_ports": [
+            {
+              "matching_boards": [
+                {
+                  "name": "ESP32 Family Device",
+                  "fqbn": "esp32:esp32:esp32_family",
+                  "is_hidden": true
+                },
+                { "name": "Ozobot DRVKit", "fqbn": "esp32:esp32:ozobot_drvkit" }
+              ],
+              "port": {
+                "address": "/dev/ttyACM0",
+                "label": "/dev/ttyACM0",
+                "protocol": "serial",
+                "protocol_label": "Serial Port (USB)",
+                "properties": {
+                  "pid": "0x1001",
+                  "serialNumber": "44:1B:F6:CE:A3:B8",
+                  "vid": "0x303A"
+                },
+                "hardware_id": "44:1B:F6:CE:A3:B8"
+              }
+            }
+          ]
+        }"#;
+        let r: BoardListResponse = serde_json::from_str(json).unwrap();
+        let p = &r.detected_ports[0];
+        assert_eq!(
+            p.port.properties.get("serialNumber").unwrap(),
+            "44:1B:F6:CE:A3:B8"
+        );
+        assert_eq!(p.port.hardware_id, "44:1B:F6:CE:A3:B8");
+        // The first match is an umbrella entry flagged hidden; naming the board
+        // from it would show every ESP32 as "ESP32 Family Device".
+        assert!(p.matching_boards[0].is_hidden);
+        assert!(!p.matching_boards[1].is_hidden);
+    }
+
+    #[test]
+    fn board_list_reports_a_plain_usb_serial_that_is_not_a_mac() {
+        // An Arduino UNO Q: a genuine per-unit USB serial, but not a MAC, so it
+        // identifies the board without being an ESP-style hardware address.
+        let json = r#"{
+          "detected_ports": [
+            {
+              "port": {
+                "address": "/dev/ttyACM0",
+                "protocol": "serial",
+                "properties": {
+                  "pid": "0x0078",
+                  "serialNumber": "3477325620",
+                  "vid": "0x2341"
+                },
+                "hardware_id": "3477325620"
+              },
+              "matching_boards": [
+                { "name": "Arduino UNO Q", "fqbn": "arduino:zephyr:unoq" }
+              ]
+            }
+          ]
+        }"#;
+        let r: BoardListResponse = serde_json::from_str(json).unwrap();
+        let p = &r.detected_ports[0];
+        assert_eq!(
+            p.port.properties.get("serialNumber").unwrap(),
+            "3477325620"
+        );
+        assert_eq!(p.matching_boards[0].fqbn, "arduino:zephyr:unoq");
     }
 
     #[test]
@@ -306,7 +406,10 @@ mod tests {
           ]
         }"#;
         let r: BoardListResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(r.detected_ports[0].matching_boards[0].fqbn, "arduino:avr:uno");
+        assert_eq!(
+            r.detected_ports[0].matching_boards[0].fqbn,
+            "arduino:avr:uno"
+        );
     }
 
     #[test]

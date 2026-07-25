@@ -1,0 +1,22 @@
+// {name} — starts life as Blink, the hardware hello-world: one upload
+// proves the toolchain, the serial port and the board all work.
+
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2  // most ESP32 dev boards; change if your LED is wired elsewhere
+#endif
+
+const uint32_t BLINK_INTERVAL_MS = 500;
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.println("blink: on");
+  delay(BLINK_INTERVAL_MS);
+  digitalWrite(LED_BUILTIN, LOW);
+  Serial.println("blink: off");
+  delay(BLINK_INTERVAL_MS);
+}

@@ -194,12 +194,7 @@ impl SketchProject {
     /// contradictory, not duplicates, and arduino-cli would resolve one of them
     /// arbitrarily. Any `platform_index_url` on the replaced entry is carried
     /// over — it describes where the platform comes from, not which version.
-    pub fn add_platform(
-        &self,
-        profile_name: &str,
-        id: &str,
-        version: &str,
-    ) -> Result<SketchYaml> {
+    pub fn add_platform(&self, profile_name: &str, id: &str, version: &str) -> Result<SketchYaml> {
         let mut y = self.load_yaml()?;
         let profile = y
             .profiles
@@ -425,9 +420,9 @@ profiles:
         // the one we added rather than the first local entry.
         let want = lib_dir.to_string_lossy().into_owned();
         assert!(
-            y.profiles["esp32s3"].libraries.contains(&LibraryDep::Local {
-                dir: want.clone()
-            }),
+            y.profiles["esp32s3"]
+                .libraries
+                .contains(&LibraryDep::Local { dir: want.clone() }),
             "absolute entry missing from {:?}",
             y.profiles["esp32s3"].libraries
         );
@@ -535,7 +530,9 @@ profiles:
         let tmp = tempfile::tempdir().unwrap();
         let proj = sample_project(&tmp);
 
-        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let y = proj
+            .add_platform("esp32s3", "esp32:esp32", "3.3.11")
+            .unwrap();
         let platforms = &y.profiles["esp32s3"].platforms;
         assert_eq!(
             platforms.len(),
@@ -552,9 +549,13 @@ profiles:
         let tmp = tempfile::tempdir().unwrap();
         let proj = sample_project(&tmp);
 
-        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let y = proj
+            .add_platform("esp32s3", "esp32:esp32", "3.3.11")
+            .unwrap();
         assert_eq!(
-            y.profiles["esp32s3"].platforms[0].platform_index_url.as_deref(),
+            y.profiles["esp32s3"].platforms[0]
+                .platform_index_url
+                .as_deref(),
             Some("https://espressif.github.io/arduino-esp32/package_esp32_index.json")
         );
     }
@@ -564,7 +565,9 @@ profiles:
         let tmp = tempfile::tempdir().unwrap();
         let proj = sample_project(&tmp);
 
-        let y = proj.add_platform("esp32s3", "arduino:avr", "1.8.8").unwrap();
+        let y = proj
+            .add_platform("esp32s3", "arduino:avr", "1.8.8")
+            .unwrap();
         let entries: Vec<&str> = y.profiles["esp32s3"]
             .platforms
             .iter()
@@ -578,9 +581,13 @@ profiles:
         let tmp = tempfile::tempdir().unwrap();
         let proj = sample_project(&tmp);
 
-        proj.add_platform("esp32s3", "esp32:esp32", "3.2.0").unwrap();
-        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
-        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        proj.add_platform("esp32s3", "esp32:esp32", "3.2.0")
+            .unwrap();
+        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11")
+            .unwrap();
+        let y = proj
+            .add_platform("esp32s3", "esp32:esp32", "3.3.11")
+            .unwrap();
         let platforms = &y.profiles["esp32s3"].platforms;
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].platform, "esp32:esp32 (3.3.11)");
@@ -591,7 +598,8 @@ profiles:
         let tmp = tempfile::tempdir().unwrap();
         let proj = sample_project(&tmp);
 
-        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11")
+            .unwrap();
         let reloaded = proj.load_yaml().unwrap();
         assert_eq!(
             reloaded.profiles["esp32s3"].platforms[0].platform,

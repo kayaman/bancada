@@ -12,8 +12,10 @@
 pub mod boards;
 pub mod cli;
 pub mod esptool;
+pub mod fleet;
 pub mod ghlib;
 pub mod library;
+pub mod mqtt;
 pub mod project;
 pub mod scope;
 pub mod settings;

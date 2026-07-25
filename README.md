@@ -132,13 +132,29 @@ scaffolded library, a fetched library and a newly created project actually
     carrying one is not portable to a collaborator
 - Serial monitor via `arduino-cli monitor` (start/stop, baudrate, TX input)
 - Utilities: **read board MAC address** via esptool (shows chip type too)
+- **Boards** panel — the platform (core) manager: search every index arduino-cli
+  already knows, install/update/remove a platform with live progress in the
+  build console, pick a specific version, and pin the installed version into the
+  active profile's `platforms:` list. Bancada never edits your global
+  `board_manager.additional_urls`; a platform you have no index for simply will
+  not appear, and the empty state names the `arduino-cli config add` command
+- **Fleet** panel — the physical boards Bancada has seen, remembered across runs
+  in `fleet.json` and keyed by MAC address. A native-USB ESP32 reports its MAC as
+  its USB serial number, so plugging one in enrols it with no esptool, no port
+  takeover and no reset. Boards behind a USB-serial bridge expose only the
+  bridge's serial, so they are listed as unidentified with an **Identify** button
+  that reads the real MAC via esptool and migrates the record — nickname and
+  history included. Each board carries a nickname you set, its chip type, the
+  FQBNs it has been built for, and when it was first and last seen
+- Sidebar split into **Software** (files, libraries) and **Hardware** (boards,
+  fleet) groups, drag-resizable and collapsible to a rail
 
 ## Roadmap ideas
 
 - `clangd` integration for real C++ completion/diagnostics (CodeMirror LSP client)
 - Profile editor UI (create/edit `sketch.yaml` platforms visually)
 - More esptool utilities: flash erase, flash size, filesystem image upload
-- Core/board manager panel (`arduino-cli core install`)
+- Board options in the FQBN (`CDCOnBoot=cdc`) chosen from a picker
 - Git integration; multi-sketch workspaces
 
 ## Repo layout

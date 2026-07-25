@@ -324,10 +324,7 @@ pub fn create_library(libraries_dir: &Path, spec: &LibrarySpec) -> Result<NewLib
     let version = non_empty(&spec.version, "0.1.0");
     let author = non_empty(&spec.author, "Unknown");
     let maintainer = non_empty(&spec.maintainer, &author);
-    let sentence = non_empty(
-        &spec.sentence,
-        &format!("{} library.", ident.display_name),
-    );
+    let sentence = non_empty(&spec.sentence, &format!("{} library.", ident.display_name));
     let paragraph = non_empty(&spec.paragraph, &sentence);
     let category = non_empty(&spec.category, "Other");
     let architectures = non_empty(&spec.architectures, "*");
@@ -618,7 +615,10 @@ mod tests {
         };
         create_library(&libs, &s).unwrap();
         let props = std::fs::read_to_string(libs.join("Foo/library.properties")).unwrap();
-        assert!(props.contains("maintainer=Ada <ada@example.com>"), "{props}");
+        assert!(
+            props.contains("maintainer=Ada <ada@example.com>"),
+            "{props}"
+        );
     }
 
     #[test]
@@ -748,7 +748,10 @@ mod tests {
         std::fs::write(libs.join(".bancada-new-Foo"), "in the way").unwrap();
 
         assert!(create_library(&libs, &spec("Foo")).is_err());
-        assert!(!libs.join("Foo").exists(), "destination must not be created");
+        assert!(
+            !libs.join("Foo").exists(),
+            "destination must not be created"
+        );
         assert_eq!(
             std::fs::read_to_string(libs.join(".bancada-new-Foo")).unwrap(),
             "in the way",

@@ -228,7 +228,9 @@ mod tests {
 
     #[test]
     fn rejects_an_fqbn_with_a_message_that_says_what_to_do() {
-        let err = parse_core_id("esp32:esp32:esp32s3").unwrap_err().to_string();
+        let err = parse_core_id("esp32:esp32:esp32s3")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("FQBN"), "got: {err}");
     }
 

@@ -5,10 +5,14 @@
 //! validating a project name against Arduino's sketch-folder rules, and deriving
 //! a sensible profile name from an FQBN.
 
+use std::path::Path;
+
 use crate::{Error, Result};
 
 /// arduino-lint's limit on a sketch folder name.
 const MAX_NAME_LEN: usize = 63;
+
+const TMPL_BLINK: &str = include_str!("templates/sketch/blink.ino.tmpl");
 
 fn is_allowed(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'
@@ -54,7 +58,11 @@ pub fn validate_project_name(raw: &str) -> Result<String> {
             "project name may only contain letters, digits, '_', '.' and '-' — found '{bad}'{hint}"
         )));
     }
-    if !name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
         return Err(Error::Other(
             "project name must start with a letter or a digit".into(),
         ));
@@ -96,6 +104,20 @@ pub fn profile_name_for_fqbn(fqbn: &str) -> String {
     } else {
         candidate
     }
+}
+
+/// The starter sketch for a new project: the canonical Blink, so the very
+/// first Verify + Upload proves the whole toolchain with a visible result.
+pub fn blink_sketch(name: &str) -> String {
+    TMPL_BLINK.replace("{name}", name)
+}
+
+/// Replace the main `.ino` that `arduino-cli sketch new` stubbed out with the
+/// Blink starter. Callers guarantee `dir` was created by us moments ago, so
+/// this never clobbers user content.
+pub fn write_main_ino(dir: &Path, name: &str) -> Result<()> {
+    std::fs::write(dir.join(format!("{name}.ino")), blink_sketch(name))?;
+    Ok(())
 }
 
 // ---------- tests ----------
@@ -146,7 +168,10 @@ mod tests {
         // `.` is caught earlier with a more specific message; `-` and `_` here.
         for bad in ["-lead", "_lead"] {
             let err = validate_project_name(bad).unwrap_err().to_string();
-            assert!(err.contains("start with a letter or a digit"), "{bad}: {err}");
+            assert!(
+                err.contains("start with a letter or a digit"),
+                "{bad}: {err}"
+            );
         }
     }
 
@@ -177,6 +202,30 @@ mod tests {
             profile_name_for_fqbn("esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M"),
             "esp32s3"
         );
+    }
+
+    #[test]
+    fn blink_sketch_is_a_complete_named_program() {
+        let s = blink_sketch("BlinkNode");
+        assert!(s.starts_with("// BlinkNode — "));
+        assert!(!s.contains("{name}"));
+        assert!(s.contains("void setup()"));
+        assert!(s.contains("void loop()"));
+        // must compile on cores that don't define LED_BUILTIN
+        assert!(s.contains("#ifndef LED_BUILTIN"));
+    }
+
+    #[test]
+    fn write_main_ino_lands_where_main_ino_looks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Pisca");
+        std::fs::create_dir(&dir).unwrap();
+        write_main_ino(&dir, "Pisca").unwrap();
+
+        let proj = crate::sketch::SketchProject::open(&dir).unwrap();
+        let main = proj.main_ino().expect("main ino must be found");
+        let text = std::fs::read_to_string(main).unwrap();
+        assert!(text.contains("// Pisca — "));
     }
 
     #[test]

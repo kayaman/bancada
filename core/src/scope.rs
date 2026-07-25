@@ -330,7 +330,13 @@ mod tests {
     #[test]
     fn garbage_prefix_resync() {
         let mut stream = b"boot noise \xA5 not-a-frame\n".to_vec();
-        stream.extend_from_slice(&build_frame(ScopeFrame::TYPE_SAMPLES, 0, 3, 8, &sample_payload()));
+        stream.extend_from_slice(&build_frame(
+            ScopeFrame::TYPE_SAMPLES,
+            0,
+            3,
+            8,
+            &sample_payload(),
+        ));
         let mut sc = FrameScanner::new();
         let frames = sc.push(&stream);
         assert_eq!(frames.len(), 1);
@@ -370,7 +376,13 @@ mod tests {
     fn contiguous_seq_drops_nothing() {
         let mut sc = FrameScanner::new();
         for seq in [41u16, 42, 43] {
-            sc.push(&build_frame(ScopeFrame::TYPE_SAMPLES, 0, seq, 0, &sample_payload()));
+            sc.push(&build_frame(
+                ScopeFrame::TYPE_SAMPLES,
+                0,
+                seq,
+                0,
+                &sample_payload(),
+            ));
         }
         assert_eq!(sc.take_dropped(), 0);
     }
@@ -380,7 +392,13 @@ mod tests {
         // Sync pair followed by a header claiming a 3000-byte payload, then a
         // real frame: the scanner must skip the impostor and find the frame.
         let mut stream = vec![0xA5, 0x5A, 0x01, 0x00, 0x00, 0x00, 0xB8, 0x0B, 0, 0, 0, 0];
-        stream.extend_from_slice(&build_frame(ScopeFrame::TYPE_ERROR, 0, 9, 0, br#"{"ev":"err","msg":"x"}"#));
+        stream.extend_from_slice(&build_frame(
+            ScopeFrame::TYPE_ERROR,
+            0,
+            9,
+            0,
+            br#"{"ev":"err","msg":"x"}"#,
+        ));
         let mut sc = FrameScanner::new();
         let frames = sc.push(&stream);
         assert_eq!(frames.len(), 1);

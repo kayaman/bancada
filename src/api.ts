@@ -10,11 +10,23 @@ export interface Port {
   label: string;
   protocol: string;
   protocol_label: string;
+  /**
+   * USB descriptor fields — typically `vid`, `pid` and `serialNumber`. On an
+   * ESP32 with native USB, `serialNumber` is the chip's MAC address.
+   */
+  properties: Record<string, string>;
+  /**
+   * arduino-cli's identity string for the port. For a USB-serial bridge this is
+   * the *bridge's* serial (often "0001"), so it is not unique per board.
+   */
+  hardware_id: string;
 }
 
 export interface MatchingBoard {
   name: string;
   fqbn: string;
+  /** Umbrella entries like `esp32:esp32:esp32_family` are flagged hidden. */
+  is_hidden: boolean;
 }
 
 export interface DetectedPort {
@@ -187,6 +199,27 @@ export interface InstalledCore {
   yaml?: SketchYaml | null;
   /** Set when the platform installed but pinning it to the profile failed. */
   profile_error?: string | null;
+}
+
+/** How confidently a port identifies one specific physical board. */
+export type BoardIdKind = "mac" | "serial";
+
+/** A remembered physical board. */
+export interface FleetEntry {
+  /** Normalised MAC (lower case, colon-separated), or the USB serial. */
+  id: string;
+  id_kind: BoardIdKind;
+  nickname?: string | null;
+  chip_type?: string | null;
+  board_name?: string | null;
+  /** Every FQBN this board has been built for, in first-seen order. */
+  fqbns: string[];
+  last_port?: string | null;
+  vid?: string | null;
+  pid?: string | null;
+  /** Epoch seconds. */
+  first_seen: number;
+  last_seen: number;
 }
 
 /** One selectable board, flattened from `board listall`. */
@@ -420,6 +453,47 @@ export const monitorSend = (data: string) =>
 export const readBoardMac = (port: string) =>
   invoke<ChipInfo>("read_board_mac", { port });
 
+// ---------- fleet (remembered physical boards) ----------
+
+/** The Fleet panel's whole state, derived in Rust so the identity rules aren't
+ * duplicated here. */
+export interface FleetSnapshot {
+  boards: FleetEntry[];
+  /** Ids currently plugged in. */
+  online: string[];
+  /** Attached serial ports with no board-specific identity (bridges). */
+  unidentified: DetectedPort[];
+}
+
+/**
+ * Record every identifiable port from a scan and return the updated snapshot.
+ * Ports with no board-specific identity (a bare USB-serial bridge) are skipped,
+ * not recorded under the bridge's shared id.
+ */
+export const fleetSync = (ports: DetectedPort[]) =>
+  invoke<FleetSnapshot>("fleet_sync", { ports });
+export const setBoardNickname = (id: string, nickname?: string | null) =>
+  invoke<FleetEntry[]>("set_board_nickname", { id, nickname: nickname ?? null });
+/**
+ * Record that the board on `port` was built for `fqbn`. The port is resolved to
+ * a fleet id in Rust; an unknown or unidentifiable port is a silent no-op, so an
+ * upload never fails over bookkeeping.
+ */
+export const noteBoardFqbn = (port: string, fqbn: string) =>
+  invoke<void>("note_board_fqbn", { port, fqbn });
+/**
+ * Ask esptool for a board's real MAC and fold it into the registry. Takes the
+ * serial port and resets the board. `previousId` migrates an existing
+ * serial-keyed record — nickname and history included — onto the MAC.
+ */
+export const identifyBoard = (port: string, previousId?: string | null) =>
+  invoke<FleetEntry[]>("identify_board", {
+    port,
+    previousId: previousId ?? null,
+  });
+export const forgetBoard = (id: string) =>
+  invoke<FleetEntry[]>("forget_board", { id });
+
 export const loadSettings = () => invoke<AppSettings>("load_settings");
 export const saveSettings = (settings: AppSettings) =>
   invoke<void>("save_settings", { settings });
@@ -452,6 +526,58 @@ export const saveTextFile = (path: string, contents: string) =>
   invoke<void>("save_text_file", { path, contents });
 export const saveBinaryFile = (path: string, contentsB64: string) =>
   invoke<void>("save_binary_file", { path, contentsB64 });
+
+// ---------- mqtt (observability) ----------
+
+export interface MqttBrokerCfg {
+  name: string;
+  url: string;
+}
+
+export interface MqttConfig {
+  brokers: MqttBrokerCfg[];
+}
+
+export type MqttStage = "parse" | "tcp" | "connack" | "suback";
+
+export type MqttEvent =
+  | { ev: "stage"; stage: MqttStage; ok: boolean; detail: string; elapsed_ms: number }
+  | {
+      ev: "msg";
+      topic: string;
+      payload: string;
+      b64: boolean;
+      retain: boolean;
+      qos: number;
+      ts: number;
+    }
+  | { ev: "closed"; reason: string };
+
+/** Connects to a broker; JSON envelope events arrive on `onEvent`. */
+export const mqttConnect = (
+  url: string,
+  subscribeFilter: string | null,
+  onEvent: (e: MqttEvent) => void,
+) => {
+  const channel = new Channel<MqttEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("mqtt_connect", {
+    url,
+    subscribeFilter,
+    onMessage: channel,
+  });
+};
+
+export const mqttPublish = (topic: string, payload: string, retain: boolean) =>
+  invoke<void>("mqtt_publish", { topic, payload, retain });
+export const mqttSubscribe = (filter: string) =>
+  invoke<void>("mqtt_subscribe", { filter });
+export const mqttUnsubscribe = (filter: string) =>
+  invoke<void>("mqtt_unsubscribe", { filter });
+export const mqttDisconnect = () => invoke<void>("mqtt_disconnect");
+export const loadMqttConfig = () => invoke<MqttConfig>("load_mqtt_config");
+export const saveMqttConfig = (cfg: MqttConfig) =>
+  invoke<void>("save_mqtt_config", { cfg });
 
 // ---------- events ----------
 

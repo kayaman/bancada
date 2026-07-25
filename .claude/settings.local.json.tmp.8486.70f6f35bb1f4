@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lsusb *)",
+      "Read(//dev/**)",
+      "Read(//dev/serial/by-id/**)",
+      "Bash(arduino-cli board *)",
+      "Bash(arduino-cli core *)",
+      "Bash(find . *)",
+      "Bash(echo *)",
+      "Bash(grep *)",
+      "Bash(node *)",
+      "Bash(awk NR>=70 && NR<=340 *)",
+      "Read(//home/kayaman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/muda-0.19.3/src/platform_impl/gtk/**)",
+      "Bash(cd *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Read(//home/kayaman/.config/sh.rco.bancada/**)",
+      "Bash(timeout 150 npm run tauri dev)",
+      "Read(//home/kayaman/.config/dev.magj.bancada/**)",
+      "Bash(npx vitest *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo test *)",
+      "Bash(sort -t' ' -k2 -rn)",
+      "Bash(git add *)"
+    ]
+  }
+}

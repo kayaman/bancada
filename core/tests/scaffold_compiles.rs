@@ -17,8 +17,7 @@ use bancada_core::library::{create_library, LibrarySpec};
 #[test]
 #[ignore = "needs arduino-cli and an installed core"]
 fn scaffolded_example_compiles() {
-    let fqbn =
-        std::env::var("BANCADA_TEST_FQBN").unwrap_or_else(|_| "arduino:avr:uno".to_string());
+    let fqbn = std::env::var("BANCADA_TEST_FQBN").unwrap_or_else(|_| "arduino:avr:uno".to_string());
 
     let tmp = tempfile::tempdir().unwrap();
     let libs = tmp.path().join("libraries");

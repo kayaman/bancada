@@ -5,17 +5,31 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
+import { nextSelectedPort } from "./ports";
 import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
 import BoardsManager from "./components/BoardsManager";
+import FleetManager from "./components/FleetManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
+import MqttPanel from "./components/MqttPanel";
+import WsPanel from "./components/WsPanel";
+import {
+  GROUP_LABEL,
+  GROUP_OF,
+  GROUP_TABS,
+  TAB_LABEL,
+  groupHasUnseen,
+  type BottomGroup,
+  type BottomTab,
+} from "./bottomTabs";
 
-type SideTab = "files" | "libraries" | "boards";
-type BottomTab = "build" | "serial" | "scope";
+type SideGroup = "software" | "hardware";
+type SoftwareTab = "files" | "libraries";
+type HardwareTab = "boards" | "fleet";
 
 // Bottom panel sizing: layout preference, so it lives in localStorage (per
 // machine, not part of the app settings file).
@@ -24,6 +38,16 @@ const BOTTOM_MIN = 120;
 const BOTTOM_DEFAULT = 220;
 const clampBottomHeight = (h: number) =>
   Math.min(Math.max(h, BOTTOM_MIN), Math.round(window.innerHeight * 0.8));
+
+// Sidebar width, same story as the bottom panel: a layout preference, so
+// localStorage rather than the settings file. Capped at half the window — the
+// editor is the point of the app and must not be squeezed out.
+const SIDEBAR_WIDTH_KEY = "bancada.sidebarWidth";
+const SIDEBAR_COLLAPSED_KEY = "bancada.sidebarCollapsed";
+const SIDEBAR_MIN = 220;
+const SIDEBAR_DEFAULT = 280;
+const clampSidebarWidth = (w: number) =>
+  Math.min(Math.max(w, SIDEBAR_MIN), Math.round(window.innerWidth * 0.5));
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
@@ -62,16 +86,30 @@ export default function App() {
   const monitorOnRef = useRef(false);
   monitorOnRef.current = monitorOn;
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
-  // tab, cleared when that tab is opened. After flashing, the first serial
-  // line inside the auto-open window pulls the Serial Monitor tab forward.
-  const [unseenBuild, setUnseenBuild] = useState(false);
-  const [unseenSerial, setUnseenSerial] = useState(false);
+  // tab, cleared when that tab is opened; a group button carries the dot for
+  // its hidden tabs. After flashing, the first serial line inside the
+  // auto-open window pulls the Serial Monitor tab forward.
+  const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
   const bottomTabRef = useRef<BottomTab>("build");
   const autoOpenSerialUntilRef = useRef(0);
 
-  // ui
-  const [sideTab, setSideTab] = useState<SideTab>("files");
-  const [bottomTab, setBottomTab] = useState<BottomTab>("build");
+  // ui — sidebar hierarchy: a Software/Hardware group switcher over per-group
+  // sub-tabs; each group remembers its last-used tab.
+  const [sideGroup, setSideGroup] = useState<SideGroup>("software");
+  const [softwareTab, setSoftwareTab] = useState<SoftwareTab>("files");
+  const [hardwareTab, setHardwareTab] = useState<HardwareTab>("boards");
+  const sideTab = sideGroup === "software" ? softwareTab : hardwareTab;
+  // Bottom panel hierarchy: Console | Debugging | Observability groups over
+  // per-group sub-tabs, same memory pattern as the sidebar.
+  const [bottomGroup, setBottomGroup] = useState<BottomGroup>("console");
+  const [debugTab, setDebugTab] = useState<"serial" | "scope">("serial");
+  const [obsTab, setObsTab] = useState<"mqtt" | "ws">("mqtt");
+  const bottomTab: BottomTab =
+    bottomGroup === "console"
+      ? "build"
+      : bottomGroup === "debug"
+        ? debugTab
+        : obsTab;
   // Bottom panel expanded over the whole main area (editor stays mounted).
   const [bottomMax, setBottomMax] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(() => {
@@ -80,9 +118,20 @@ export default function App() {
       ? clampBottomHeight(saved)
       : BOTTOM_DEFAULT;
   });
-  // ScopeView stays mounted once opened so streams/subscriptions survive
-  // switching to another bottom tab.
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(saved) && saved >= SIDEBAR_MIN
+      ? clampSidebarWidth(saved)
+      : SIDEBAR_DEFAULT;
+  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1",
+  );
+  // Live-connection panels stay mounted once opened so streams/subscriptions
+  // survive switching to another bottom tab.
   const [scopeMounted, setScopeMounted] = useState(false);
+  const [mqttMounted, setMqttMounted] = useState(false);
+  const [wsMounted, setWsMounted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
@@ -95,9 +144,45 @@ export default function App() {
   // Opening a tab marks its content as seen.
   useEffect(() => {
     bottomTabRef.current = bottomTab;
-    if (bottomTab === "build") setUnseenBuild(false);
-    if (bottomTab === "serial") setUnseenSerial(false);
+    setUnseen((u) => (u[bottomTab] ? { ...u, [bottomTab]: false } : u));
   }, [bottomTab]);
+
+  /** Open a bottom tab: routes to its group, remembers it there, mounts
+   *  live panels on first open. Every former setBottomTab caller uses this. */
+  const openBottomTab = useCallback((tab: BottomTab) => {
+    const g = GROUP_OF[tab];
+    setBottomGroup(g);
+    if (g === "debug") setDebugTab(tab as "serial" | "scope");
+    if (g === "obs") setObsTab(tab as "mqtt" | "ws");
+    if (tab === "scope") setScopeMounted(true);
+    if (tab === "mqtt") setMqttMounted(true);
+    if (tab === "ws") setWsMounted(true);
+  }, []);
+
+  /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
+  const startSidebarResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    const el = e.currentTarget;
+    let w = startW;
+    el.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      w = clampSidebarWidth(startW + (ev.clientX - startX));
+      setSidebarWidth(w);
+    };
+    const onUp = () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+  };
+
+  const setCollapsed = (next: boolean) => {
+    setSidebarCollapsed(next);
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+  };
 
   /** Drag the handle above the bottom panel to resize it (dbl-click resets). */
   const startPanelResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -125,16 +210,17 @@ export default function App() {
     const subs = [
       api.onBuildLine((l) => {
         setBuildLines((prev) => appendCapped(prev, l));
-        if (bottomTabRef.current !== "build") setUnseenBuild(true);
+        if (bottomTabRef.current !== "build")
+          setUnseen((u) => ({ ...u, build: true }));
       }),
       api.onSerialLine((l) => {
         setSerialLines((prev) => appendCapped(prev, l));
         if (Date.now() < autoOpenSerialUntilRef.current) {
           // fresh output from a just-flashed sketch — bring the monitor forward
           autoOpenSerialUntilRef.current = 0;
-          setBottomTab("serial");
+          openBottomTab("serial");
         } else if (bottomTabRef.current !== "serial") {
-          setUnseenSerial(true);
+          setUnseen((u) => ({ ...u, serial: true }));
         }
       }),
       api.onSerialClosed(() => setMonitorOn(false)),
@@ -171,14 +257,14 @@ export default function App() {
       .listBoards()
       .then((ps) => {
         setPorts(ps);
-        // Auto-select the first serial port so the monitor can start capturing
-        // by default (a profile-pinned or user-chosen port is never overridden).
-        setSelectedPort(
-          (cur) =>
-            cur ??
-            ps.find((p) => p.port.protocol === "serial")?.port.address ??
-            null,
-        );
+        // Keep a still-attached choice, but drop one whose port has gone: a
+        // rescan that leaves a vanished port selected looks like it did nothing
+        // and aims the next upload at a device that is no longer there.
+        setSelectedPort((cur) => nextSelectedPort(ps, cur));
+        // Enrol whatever is attached into the fleet, whether or not its panel is
+        // open — plugging a board in is what should record it. Fire-and-forget:
+        // a fleet write must never break port detection.
+        api.fleetSync(ps).catch(() => {});
       })
       .catch((e) => notify(String(e), true));
 
@@ -313,7 +399,7 @@ export default function App() {
     if (!target) return;
     await saveAll();
     setBuildLines([]);
-    setBottomTab("build");
+    openBottomTab("build");
     setBusy(true);
     notify("Compiling…");
     try {
@@ -333,7 +419,7 @@ export default function App() {
     await saveAll();
     if (monitorOn) await toggleMonitor(); // free the serial port
     setBuildLines([]);
-    setBottomTab("build");
+    openBottomTab("build");
     setBusy(true);
     notify(`Uploading to ${selectedPort}…`);
     try {
@@ -349,31 +435,22 @@ export default function App() {
       // anything within the window, the Serial Monitor tab opens itself.
       if (r.success) {
         autoOpenSerialUntilRef.current = Date.now() + 15000;
-        setTimeout(() => startMonitorQuiet(), 1200);
+        // The FQBN this board was actually built for, for its fleet record.
+        const usedFqbn =
+          target.fqbn ??
+          (target.profile
+            ? sketchYaml?.profiles?.[target.profile]?.fqbn
+            : undefined);
+        setTimeout(() => {
+          startMonitorQuiet();
+          // Recorded after the re-enumeration wait for the same reason the
+          // monitor is: the port has to be back before it can be resolved to a
+          // board. Fire-and-forget — a good flash must not fail over this.
+          if (usedFqbn) {
+            api.noteBoardFqbn(selectedPort, usedFqbn).catch(() => {});
+          }
+        }, 1200);
       }
-    } catch (e) {
-      notify(String(e), true);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const readMac = async () => {
-    if (!selectedPort) return;
-    if (monitorOn) await toggleMonitor();
-    setBusy(true);
-    notify("Reading MAC via esptool…");
-    try {
-      const info = await api.readBoardMac(selectedPort);
-      notify(`MAC ${info.mac}${info.chip_type ? ` — ${info.chip_type}` : ""}`);
-      setBuildLines((prev) => [
-        ...prev,
-        ...info.raw_output
-          .split("\n")
-          .map((line) => ({ stream: "stdout" as const, line })),
-      ]);
-      setBottomTab("build");
-      setTimeout(() => startMonitorQuiet(), 800); // resume after ROM-bootloader reset
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -414,7 +491,7 @@ export default function App() {
         setSerialLines([]);
         await api.startMonitor(selectedPort, baudrate);
         setMonitorOn(true);
-        setBottomTab("serial");
+        openBottomTab("serial");
       }
     } catch (e) {
       notify(String(e), true);
@@ -422,11 +499,6 @@ export default function App() {
   };
 
   // ---------- scope ----------
-
-  const openScopeTab = () => {
-    setScopeMounted(true);
-    setBottomTab("scope");
-  };
 
   /** Start the serial monitor if it is off (plotter source needs it). */
   const ensureMonitor = useCallback(async () => {
@@ -438,7 +510,7 @@ export default function App() {
     setSerialLines([]);
     await api.startMonitor(selectedPort, baudrate);
     setMonitorOn(true);
-    setBottomTab("serial");
+    openBottomTab("serial");
   }, [monitorOn, selectedPort, baudrate, notify]);
 
   /** Stop the serial monitor if it is on (ADC streaming needs the port). */
@@ -457,7 +529,7 @@ export default function App() {
       }
       await stopMonitorIfOn().catch(() => {});
       setBuildLines([]);
-      setBottomTab("build");
+      openBottomTab("build");
       setBusy(true);
       notify("Compiling companion firmware…");
       try {
@@ -503,31 +575,84 @@ export default function App() {
         onRefreshPorts={refreshPorts}
         onVerify={verify}
         onUpload={upload}
-        onReadMac={readMac}
       />
 
       <div className="main" style={bottomMax ? { display: "none" } : undefined}>
-        <aside className="sidebar">
+        {/* Collapsed by `display: none` rather than unmounted — the same trick
+            `.main` uses when the bottom panel is maximized — so a search, a
+            fleet list or a half-filled form survives hiding the pane. */}
+        <aside
+          className="sidebar"
+          style={
+            sidebarCollapsed ? { display: "none" } : { width: sidebarWidth }
+          }
+        >
+          <div className="side-groups">
+            <button
+              className={
+                sideGroup === "software"
+                  ? "side-group-btn active"
+                  : "side-group-btn"
+              }
+              onClick={() => setSideGroup("software")}
+              title="The sketch: files and libraries"
+            >
+              ▦ Software
+            </button>
+            <button
+              className={
+                sideGroup === "hardware"
+                  ? "side-group-btn active"
+                  : "side-group-btn"
+              }
+              onClick={() => setSideGroup("hardware")}
+              title="The bench: board platforms and your device fleet"
+            >
+              ⚙ Hardware
+            </button>
+            <button
+              className="side-collapse-btn"
+              onClick={() => setCollapsed(true)}
+              title="Collapse the sidebar"
+              aria-label="Collapse the sidebar"
+            >
+              ‹
+            </button>
+          </div>
           <div className="panel-tabs">
-            <button
-              className={sideTab === "files" ? "tab active" : "tab"}
-              onClick={() => setSideTab("files")}
-            >
-              Files
-            </button>
-            <button
-              className={sideTab === "libraries" ? "tab active" : "tab"}
-              onClick={() => setSideTab("libraries")}
-            >
-              Libraries
-            </button>
-            <button
-              className={sideTab === "boards" ? "tab active" : "tab"}
-              onClick={() => setSideTab("boards")}
-              title="Install and update board platforms (arduino-cli cores)"
-            >
-              Boards
-            </button>
+            {sideGroup === "software" ? (
+              <>
+                <button
+                  className={sideTab === "files" ? "tab active" : "tab"}
+                  onClick={() => setSoftwareTab("files")}
+                >
+                  Files
+                </button>
+                <button
+                  className={sideTab === "libraries" ? "tab active" : "tab"}
+                  onClick={() => setSoftwareTab("libraries")}
+                >
+                  Libraries
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className={sideTab === "boards" ? "tab active" : "tab"}
+                  onClick={() => setHardwareTab("boards")}
+                  title="Install and update board platforms (arduino-cli cores)"
+                >
+                  Boards
+                </button>
+                <button
+                  className={sideTab === "fleet" ? "tab active" : "tab"}
+                  onClick={() => setHardwareTab("fleet")}
+                  title="The physical boards Bancada has seen, remembered by MAC address"
+                >
+                  Fleet
+                </button>
+              </>
+            )}
           </div>
           {sideTab === "files" && (
             <FileTree
@@ -553,12 +678,46 @@ export default function App() {
               onYamlChanged={setSketchYaml}
               onStreamStart={() => {
                 setBuildLines([]);
-                setBottomTab("build");
+                openBottomTab("build");
+              }}
+              notify={notify}
+            />
+          )}
+          {sideTab === "fleet" && (
+            <FleetManager
+              ports={ports}
+              onStreamStart={() => {
+                setBuildLines([]);
+                openBottomTab("build");
               }}
               notify={notify}
             />
           )}
         </aside>
+
+        {sidebarCollapsed ? (
+          <button
+            className="sidebar-rail"
+            onClick={() => setCollapsed(false)}
+            title="Show sidebar"
+            aria-label="Show sidebar"
+          >
+            ›
+          </button>
+        ) : (
+          <div
+            className="sidebar-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            title="Drag to resize — double-click to reset"
+            onPointerDown={startSidebarResize}
+            onDoubleClick={() => {
+              setSidebarWidth(SIDEBAR_DEFAULT);
+              localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT));
+            }}
+          />
+        )}
 
         <section className="editor-area">
           {creatingProject ? (
@@ -615,24 +774,41 @@ export default function App() {
           />
         )}
         <div className="panel-tabs">
-          <button
-            className={bottomTab === "build" ? "tab active" : "tab"}
-            onClick={() => setBottomTab("build")}
-          >
-            ⚙ Output{unseenBuild && <span className="tab-dot">●</span>}
-          </button>
-          <button
-            className={bottomTab === "serial" ? "tab active" : "tab"}
-            onClick={() => setBottomTab("serial")}
-          >
-            ❯ Serial Monitor{unseenSerial && <span className="tab-dot">●</span>}
-          </button>
-          <button
-            className={bottomTab === "scope" ? "tab active" : "tab"}
-            onClick={openScopeTab}
-          >
-            ∿ Oscilloscope
-          </button>
+          {(Object.keys(GROUP_TABS) as BottomGroup[]).map((g) => (
+            <button
+              key={g}
+              className={
+                bottomGroup === g
+                  ? "bottom-group-btn active"
+                  : "bottom-group-btn"
+              }
+              onClick={() =>
+                openBottomTab(
+                  g === "console" ? "build" : g === "debug" ? debugTab : obsTab,
+                )
+              }
+            >
+              {GROUP_LABEL[g]}
+              {groupHasUnseen(g, bottomGroup, unseen) && (
+                <span className="tab-dot">●</span>
+              )}
+            </button>
+          ))}
+          {GROUP_TABS[bottomGroup].length > 1 && (
+            <>
+              <div className="tab-sep" />
+              {GROUP_TABS[bottomGroup].map((t) => (
+                <button
+                  key={t}
+                  className={bottomTab === t ? "tab active" : "tab"}
+                  onClick={() => openBottomTab(t)}
+                >
+                  {TAB_LABEL[t]}
+                  {unseen[t] && <span className="tab-dot">●</span>}
+                </button>
+              ))}
+            </>
+          )}
           <div className="spacer" />
           {bottomTab === "serial" && (
             <>
@@ -671,6 +847,10 @@ export default function App() {
             onSend={(d) => api.monitorSend(d).catch((e) => notify(String(e), true))}
           />
         )}
+        {mqttMounted && (
+          <MqttPanel active={bottomTab === "mqtt"} notify={notify} />
+        )}
+        {wsMounted && <WsPanel active={bottomTab === "ws"} notify={notify} />}
         {scopeMounted && (
           <ScopeView
             active={bottomTab === "scope"}

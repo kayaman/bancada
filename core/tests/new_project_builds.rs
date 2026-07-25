@@ -18,8 +18,7 @@ use bancada_core::project::{profile_name_for_fqbn, validate_project_name};
 #[test]
 #[ignore = "needs arduino-cli and an installed core"]
 fn a_created_project_compiles_through_its_profile() {
-    let fqbn =
-        std::env::var("BANCADA_TEST_FQBN").unwrap_or_else(|_| "arduino:avr:uno".to_string());
+    let fqbn = std::env::var("BANCADA_TEST_FQBN").unwrap_or_else(|_| "arduino:avr:uno".to_string());
     let cli = ArduinoCli::default();
 
     let tmp = tempfile::tempdir().unwrap();
@@ -57,13 +56,9 @@ fn a_created_project_compiles_through_its_profile() {
     // The real assertion: it builds through the profile, with no --fqbn.
     let mut lines = Vec::new();
     let result = cli
-        .compile(
-            &dir.to_string_lossy(),
-            Some(&profile),
-            None,
-            &[],
-            |l| lines.push(l.line),
-        )
+        .compile(&dir.to_string_lossy(), Some(&profile), None, &[], |l| {
+            lines.push(l.line)
+        })
         .expect("compile");
     assert!(
         result.success,

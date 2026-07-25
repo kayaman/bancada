@@ -263,7 +263,10 @@ impl ArduinoCli {
 
     pub fn lib_list(&self) -> Result<Vec<InstalledLibrary>> {
         let r: LibListResponse = self.run_json(&["lib", "list"])?;
-        Ok(r.installed_libraries.into_iter().map(|e| e.library).collect())
+        Ok(r.installed_libraries
+            .into_iter()
+            .map(|e| e.library)
+            .collect())
     }
 
     /// Install from the registry; `version: None` installs the latest.
@@ -442,7 +445,15 @@ fn profile_create_args(
 ///
 /// The sketch **must** go through `--sketch-path`; see the note above.
 fn profile_lib_add_args(sketch_dir: &Path, profile: &str, spec: &str) -> Vec<String> {
-    let mut args = owned(&["profile", "lib", "add", spec, "-m", profile, "--sketch-path"]);
+    let mut args = owned(&[
+        "profile",
+        "lib",
+        "add",
+        spec,
+        "-m",
+        profile,
+        "--sketch-path",
+    ]);
     args.push(sketch_dir.to_string_lossy().into_owned());
     args
 }
@@ -500,7 +511,14 @@ mod tests {
         assert_eq!(
             args,
             [
-                "compile", "--profile", "p", "--library", "/a/Lib1", "--library", "/b/Lib2", "/s",
+                "compile",
+                "--profile",
+                "p",
+                "--library",
+                "/a/Lib1",
+                "--library",
+                "/b/Lib2",
+                "/s",
             ]
         );
         // The sketch path is positional and must stay at the end.

@@ -13,6 +13,15 @@
 //! events) over a `tauri::ipc::Channel` instead of events. The serial port
 //! has a single owner at a time — monitor child process or scope session —
 //! and acquiring it for one evicts the other.
+//!
+//! MQTT commands (Observability panel): `mqtt_connect` streams JSON envelopes
+//! over a `tauri::ipc::Channel` — `{"ev":"stage"|"msg"|"closed"}` per the
+//! `bancada_core::mqtt` contract — plus `mqtt_publish`, `mqtt_subscribe`,
+//! `mqtt_unsubscribe`, `mqtt_disconnect` and `load_mqtt_config` /
+//! `save_mqtt_config` (`mqtt.json`). The MQTT session lives in its own slot
+//! beside the serial owner: monitor/scope never evict it and vice versa. The
+//! connection thread never retries — on any error it emits `closed` and
+//! exits; reconnecting is the frontend's job.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
+use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
 use bancada_core::sketch::{PathStyle, SketchProject, SketchYaml};
@@ -51,6 +61,8 @@ enum SerialOwner {
 struct AppState {
     cli: ArduinoCli,
     serial: Mutex<Option<SerialOwner>>,
+    /// MQTT broker session — a sibling of `serial`, never coupled to it.
+    mqtt: Mutex<Option<MqttSession>>,
 }
 
 /// Convert any core error into the string Tauri sends to JS.
@@ -107,9 +119,7 @@ async fn list_boards(state: State<'_, AppState>) -> Result<Vec<DetectedPort>, St
 // ---------- sketch / files ----------
 
 #[tauri::command]
-fn list_sketch_files(
-    sketch_dir: String,
-) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
+fn list_sketch_files(sketch_dir: String) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
     let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
     proj.list_files().map_err(err_str)
 }
@@ -121,11 +131,7 @@ fn read_sketch_file(sketch_dir: String, rel_path: String) -> Result<String, Stri
 }
 
 #[tauri::command]
-fn write_sketch_file(
-    sketch_dir: String,
-    rel_path: String,
-    content: String,
-) -> Result<(), String> {
+fn write_sketch_file(sketch_dir: String, rel_path: String, content: String) -> Result<(), String> {
     let full = safe_join(&sketch_dir, &rel_path)?;
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).map_err(err_str)?;
@@ -291,9 +297,9 @@ async fn create_library(
         // Deliberately non-fatal: the folder exists either way, and failing the
         // whole command would tell the user nothing was created.
         if let (Some(dir), Some(prof)) = (sketch_dir, profile) {
-            match SketchProject::open(&dir).and_then(|p| {
-                p.add_local_library_with(&prof, &made.dir, PathStyle::Absolute)
-            }) {
+            match SketchProject::open(&dir)
+                .and_then(|p| p.add_local_library_with(&prof, &made.dir, PathStyle::Absolute))
+            {
                 Ok(y) => out.yaml = Some(y),
                 Err(e) => out.profile_error = Some(e.to_string()),
             }
@@ -324,10 +330,7 @@ async fn list_cores(state: State<'_, AppState>) -> Result<Vec<CoreView>, String>
 /// Bancada does not add index URLs of its own, so a platform the user has not
 /// configured an index for simply will not appear here.
 #[tauri::command]
-async fn search_cores(
-    state: State<'_, AppState>,
-    query: String,
-) -> Result<Vec<CoreView>, String> {
+async fn search_cores(state: State<'_, AppState>, query: String) -> Result<Vec<CoreView>, String> {
     let cli = state.cli.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let platforms = cli.core_search(&query).map_err(err_str)?;
@@ -515,6 +518,8 @@ async fn create_project(
         }
 
         cli.sketch_new(&dir).map_err(err_str)?;
+        // Swap the empty setup/loop stub for a real Blink starter.
+        bancada_core::project::write_main_ino(&dir, &name).map_err(err_str)?;
         cli.profile_create(&dir, &profile, &fqbn, true)
             .map_err(err_str)?;
 
@@ -638,10 +643,7 @@ struct GhRestored {
 /// Re-materialise every manifest entry at its recorded commit. This is what
 /// makes a fresh clone buildable, since the vendored bytes are gitignored.
 #[tauri::command]
-async fn gh_restore(
-    sketch_dir: String,
-    profile: Option<String>,
-) -> Result<GhRestored, String> {
+async fn gh_restore(sketch_dir: String, profile: Option<String>) -> Result<GhRestored, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let sketch = Path::new(&sketch_dir);
         let manifest = ghlib::Manifest::load(sketch).map_err(err_str)?;
@@ -721,9 +723,15 @@ async fn upload_sketch(
     let cli = state.cli.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = cli
-            .upload(&sketch_dir, profile.as_deref(), fqbn.as_deref(), &port, |line| {
-                let _ = app.emit("build://line", &line);
-            })
+            .upload(
+                &sketch_dir,
+                profile.as_deref(),
+                fqbn.as_deref(),
+                &port,
+                |line| {
+                    let _ = app.emit("build://line", &line);
+                },
+            )
             .map_err(err_str)?;
         Ok(result)
     })
@@ -1115,13 +1123,444 @@ fn save_settings(
 
 // ---------- board utilities ----------
 
+/// Read a board's MAC with esptool.
+///
+/// Takes the serial port from whoever holds it first: esptool drives the ROM
+/// bootloader, so a running monitor or scope session would both fight it for the
+/// device and be left reading a rebooting chip.
 #[tauri::command]
-async fn read_board_mac(port: String) -> Result<bancada_core::esptool::ChipInfo, String> {
+async fn read_board_mac(
+    state: State<'_, AppState>,
+    port: String,
+) -> Result<bancada_core::esptool::ChipInfo, String> {
+    evict_owner(&mut state.serial.lock().unwrap());
     tauri::async_runtime::spawn_blocking(move || {
         bancada_core::esptool::read_mac(&port).map_err(err_str)
     })
     .await
     .map_err(err_str)?
+}
+
+// ---------- fleet (remembered physical boards) ----------
+
+/// How stale a board's `last_seen` may get before a rescan rewrites the file.
+/// "When did I last have this board plugged in" needs minutes, not seconds.
+const LAST_SEEN_RESOLUTION: u64 = 60;
+
+fn fleet_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("fleet.json"))
+        .map_err(err_str)
+}
+
+/// Epoch seconds. The `fleet` module takes `now` as a parameter so it stays
+/// pure and deterministic under test; this is the only place a clock is read.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn load_fleet(app: &AppHandle) -> Result<(PathBuf, Fleet), String> {
+    let path = fleet_path(app)?;
+    let fleet = Fleet::load(&path).map_err(err_str)?;
+    Ok((path, fleet))
+}
+
+/// The whole panel's data in one round trip: the remembered boards, which of
+/// them are plugged in, and which attached ports we cannot name.
+#[derive(serde::Serialize)]
+struct FleetSnapshot {
+    boards: Vec<fleet::FleetEntry>,
+    online: Vec<String>,
+    unidentified: Vec<DetectedPort>,
+}
+
+/// Record every identifiable port from a scan and return the updated snapshot.
+///
+/// Called when the Fleet panel opens and after each port rescan, so plugging a
+/// board in enrols it. Ports with no board-specific identity (a bare USB-serial
+/// bridge) are skipped rather than recorded under the bridge's shared id.
+#[tauri::command]
+fn fleet_sync(app: AppHandle, ports: Vec<DetectedPort>) -> Result<FleetSnapshot, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    let a = fleet::attached(&ports);
+    let now = now_secs();
+
+    // Ports are rescanned often — on mount, on every manual refresh, and each
+    // time the Fleet panel re-renders. Writing on every one of those would churn
+    // the file for no new information and widen the window in which a concurrent
+    // rename could be lost to this load-modify-save. So only write when a board
+    // is genuinely new or its `last_seen` has gone stale.
+    let stale = f
+        .boards
+        .iter()
+        .any(|b| a.online.contains(&b.id) && now.saturating_sub(b.last_seen) > LAST_SEEN_RESOLUTION);
+    let added = fleet::sight_all(&mut f, &ports, now);
+    if added > 0 || stale {
+        f.save(&path).map_err(err_str)?;
+    }
+    Ok(FleetSnapshot {
+        boards: f.boards,
+        online: a.online,
+        unidentified: a.unidentified,
+    })
+}
+
+#[tauri::command]
+fn set_board_nickname(
+    app: AppHandle,
+    id: String,
+    nickname: Option<String>,
+) -> Result<Vec<fleet::FleetEntry>, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    f.set_nickname(&id, nickname.as_deref()).map_err(err_str)?;
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
+/// Record that the board on `port` was built for `fqbn`.
+///
+/// Resolving the port to a fleet id happens here so the frontend never needs a
+/// copy of the identity rules. Called opportunistically after a successful
+/// upload, so anything unknown — an unidentifiable bridge, a port that has since
+/// vanished — is a silent no-op: bookkeeping must not turn a good flash into an
+/// error.
+#[tauri::command]
+async fn note_board_fqbn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    port: String,
+    fqbn: String,
+) -> Result<(), String> {
+    let cli = state.cli.clone();
+    let ports = tauri::async_runtime::spawn_blocking(move || cli.board_list().map_err(err_str))
+        .await
+        .map_err(err_str)??;
+
+    let Some(id) = ports
+        .iter()
+        .find(|dp| dp.port.address == port)
+        .and_then(|dp| fleet::identify(&dp.port))
+    else {
+        return Ok(());
+    };
+
+    let (path, mut f) = load_fleet(&app)?;
+    if f.get(&id.value).is_none() {
+        return Ok(());
+    }
+    f.note_fqbn(&id.value, &fqbn).map_err(err_str)?;
+    f.save(&path).map_err(err_str)
+}
+
+/// Ask esptool for a board's real MAC and fold it into the registry.
+///
+/// `previous_id` is the id the board is currently filed under, if any, so a
+/// serial-keyed record — nickname and history included — is migrated to the MAC
+/// rather than orphaned beside it.
+#[tauri::command]
+async fn identify_board(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    port: String,
+    previous_id: Option<String>,
+) -> Result<Vec<fleet::FleetEntry>, String> {
+    evict_owner(&mut state.serial.lock().unwrap());
+    let info = tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::esptool::read_mac(&port).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)??;
+
+    let (path, mut f) = load_fleet(&app)?;
+    f.merge_identified(
+        previous_id.as_deref(),
+        &info.mac,
+        info.chip_type.as_deref(),
+        now_secs(),
+    )
+    .map_err(err_str)?;
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
+#[tauri::command]
+fn forget_board(app: AppHandle, id: String) -> Result<Vec<fleet::FleetEntry>, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    f.forget(&id);
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
+// ---------- mqtt ----------
+
+use bancada_core::mqtt;
+use bancada_core::mqtt::rumqttc::{
+    Client as MqttClient, Connection as MqttConnection, ConnectReturnCode, Event as MqttNetEvent,
+    MqttOptions, Packet as MqttPacket, QoS, SubscribeReasonCode,
+};
+
+/// A live broker connection: the `Client` request handle lives under the
+/// state mutex; the `Connection` is owned by a dedicated thread that never
+/// touches the mutex (same discipline as the scope reader).
+struct MqttSession {
+    client: MqttClient,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+/// Stop an MQTT session: flag the thread down, then `disconnect()` — which
+/// unblocks the connection iterator — and join.
+fn stop_mqtt_session(mut session: MqttSession) {
+    session.stop.store(true, Ordering::Relaxed);
+    let _ = session.client.disconnect();
+    if let Some(handle) = session.join.take() {
+        let _ = handle.join();
+    }
+}
+
+/// Send one JSON envelope, reporting whether the frontend is still there.
+fn mqtt_send(on_message: &Channel<InvokeResponseBody>, event: &mqtt::MqttEvent) -> bool {
+    let json = serde_json::to_string(event).expect("MqttEvent always serializes");
+    on_message.send(InvokeResponseBody::Json(json)).is_ok()
+}
+
+/// Epoch milliseconds for `msg` envelope timestamps.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Connection-thread body: rumqttc events → JSON envelopes on the channel.
+///
+/// Never retries (decision D4): rumqttc's iterator would happily reconnect if
+/// kept looping, so any `Err` — and any refused CONNACK — emits `closed` and
+/// breaks; the frontend owns the backoff/reconnect policy.
+fn mqtt_reader_loop(
+    mut connection: MqttConnection,
+    stop: Arc<AtomicBool>,
+    on_message: Channel<InvokeResponseBody>,
+    started: Instant,
+) {
+    let mut reason = "disconnected".to_string();
+    for event in connection.iter() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match event {
+            Ok(MqttNetEvent::Incoming(MqttPacket::ConnAck(ack))) => {
+                let detail = mqtt::connack_text(ack.code).to_string();
+                if ack.code == ConnectReturnCode::Success {
+                    // The socket demonstrably connected for a CONNACK to
+                    // arrive, so the tcp stage folds into this moment.
+                    let tcp = mqtt::MqttEvent::Stage {
+                        stage: mqtt::MqttStage::Tcp,
+                        ok: true,
+                        detail: "socket connected".to_string(),
+                        elapsed_ms,
+                    };
+                    let connack = mqtt::MqttEvent::Stage {
+                        stage: mqtt::MqttStage::Connack,
+                        ok: true,
+                        detail,
+                        elapsed_ms,
+                    };
+                    if !mqtt_send(&on_message, &tcp) || !mqtt_send(&on_message, &connack) {
+                        return; // frontend gone; die quietly
+                    }
+                } else {
+                    let _ = mqtt_send(
+                        &on_message,
+                        &mqtt::MqttEvent::Stage {
+                            stage: mqtt::MqttStage::Connack,
+                            ok: false,
+                            detail: detail.clone(),
+                            elapsed_ms,
+                        },
+                    );
+                    reason = format!("connection refused: {detail}");
+                    break;
+                }
+            }
+            Ok(MqttNetEvent::Incoming(MqttPacket::SubAck(ack))) => {
+                let rejected = ack
+                    .return_codes
+                    .iter()
+                    .any(|c| matches!(c, SubscribeReasonCode::Failure));
+                let ev = mqtt::MqttEvent::Stage {
+                    stage: mqtt::MqttStage::Suback,
+                    ok: !rejected,
+                    detail: if rejected {
+                        "broker rejected the subscription".to_string()
+                    } else {
+                        "subscription acknowledged".to_string()
+                    },
+                    elapsed_ms,
+                };
+                if !mqtt_send(&on_message, &ev) {
+                    return;
+                }
+            }
+            Ok(MqttNetEvent::Incoming(MqttPacket::Publish(p))) => {
+                let ev = mqtt::MqttEvent::msg_from_parts(
+                    &p.topic,
+                    &p.payload,
+                    p.retain,
+                    p.qos as u8,
+                    now_millis(),
+                );
+                if !mqtt_send(&on_message, &ev) {
+                    return;
+                }
+            }
+            Ok(_) => {} // other incoming packets and all outgoing echoes
+            Err(e) => {
+                reason = e.to_string();
+                break;
+            }
+        }
+    }
+    let _ = mqtt_send(&on_message, &mqtt::MqttEvent::Closed { reason });
+}
+
+/// Connect to a broker; JSON envelopes flow on `on_message`. Passing a
+/// `subscribe_filter` subscribes immediately (QoS 0); `None` observes nothing
+/// until `mqtt_subscribe` is called. An existing session is replaced.
+#[tauri::command]
+fn mqtt_connect(
+    state: State<'_, AppState>,
+    url: String,
+    subscribe_filter: Option<String>,
+    on_message: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    let mut guard = state.mqtt.lock().unwrap();
+    if let Some(old) = guard.take() {
+        stop_mqtt_session(old);
+    }
+
+    let started = Instant::now();
+    let addr = match mqtt::parse_url(&url) {
+        Ok(addr) => {
+            let _ = mqtt_send(
+                &on_message,
+                &mqtt::MqttEvent::Stage {
+                    stage: mqtt::MqttStage::Parse,
+                    ok: true,
+                    detail: mqtt::redact_password(&url),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                },
+            );
+            addr
+        }
+        Err(e) => {
+            let _ = mqtt_send(
+                &on_message,
+                &mqtt::MqttEvent::Stage {
+                    stage: mqtt::MqttStage::Parse,
+                    ok: false,
+                    detail: e.clone(),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                },
+            );
+            let _ = mqtt_send(&on_message, &mqtt::MqttEvent::Closed { reason: e.clone() });
+            return Err(e);
+        }
+    };
+
+    let mut opts = MqttOptions::new(mqtt::client_id(), addr.host, addr.port);
+    opts.set_keep_alive(Duration::from_secs(15));
+    if let Some(user) = addr.username {
+        opts.set_credentials(user, addr.password.unwrap_or_default());
+    }
+
+    let (client, connection) = MqttClient::new(opts, 100);
+    // Queued now, delivered after CONNACK — the SUBACK stage confirms it.
+    if let Some(filter) = subscribe_filter.filter(|f| !f.is_empty()) {
+        client.subscribe(filter, QoS::AtMostOnce).map_err(err_str)?;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_reader = stop.clone();
+    let join =
+        std::thread::spawn(move || mqtt_reader_loop(connection, stop_reader, on_message, started));
+
+    *guard = Some(MqttSession {
+        client,
+        stop,
+        join: Some(join),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn mqtt_publish(
+    state: State<'_, AppState>,
+    topic: String,
+    payload: String,
+    retain: bool,
+) -> Result<(), String> {
+    let guard = state.mqtt.lock().unwrap();
+    let Some(session) = guard.as_ref() else {
+        return Err("mqtt is not connected".to_string());
+    };
+    session
+        .client
+        .publish(topic, QoS::AtMostOnce, retain, payload.into_bytes())
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn mqtt_subscribe(state: State<'_, AppState>, filter: String) -> Result<(), String> {
+    let guard = state.mqtt.lock().unwrap();
+    let Some(session) = guard.as_ref() else {
+        return Err("mqtt is not connected".to_string());
+    };
+    session
+        .client
+        .subscribe(filter, QoS::AtMostOnce)
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn mqtt_unsubscribe(state: State<'_, AppState>, filter: String) -> Result<(), String> {
+    let guard = state.mqtt.lock().unwrap();
+    let Some(session) = guard.as_ref() else {
+        return Err("mqtt is not connected".to_string());
+    };
+    session.client.unsubscribe(filter).map_err(err_str)
+}
+
+#[tauri::command]
+fn mqtt_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.mqtt.lock().unwrap();
+    let Some(session) = guard.take() else {
+        return Err("mqtt is not connected".to_string());
+    };
+    stop_mqtt_session(session);
+    Ok(())
+}
+
+fn mqtt_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("mqtt.json"))
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn load_mqtt_config(app: AppHandle) -> Result<mqtt::MqttConfig, String> {
+    Ok(mqtt::load(&mqtt_config_path(&app)?))
+}
+
+#[tauri::command]
+fn save_mqtt_config(app: AppHandle, cfg: mqtt::MqttConfig) -> Result<(), String> {
+    mqtt::save(&mqtt_config_path(&app)?, &cfg).map_err(err_str)
 }
 
 // ---------- entry point ----------
@@ -1134,6 +1573,7 @@ pub fn run() {
             app.manage(AppState {
                 cli: ArduinoCli::default(),
                 serial: Mutex::new(None),
+                mqtt: Mutex::new(None),
             });
             Ok(())
         })
@@ -1180,7 +1620,19 @@ pub fn run() {
             save_binary_file,
             load_settings,
             save_settings,
-            read_board_mac
+            read_board_mac,
+            fleet_sync,
+            set_board_nickname,
+            note_board_fqbn,
+            identify_board,
+            forget_board,
+            mqtt_connect,
+            mqtt_publish,
+            mqtt_subscribe,
+            mqtt_unsubscribe,
+            mqtt_disconnect,
+            load_mqtt_config,
+            save_mqtt_config
         ])
         .build(tauri::generate_context!())
         .expect("error while building Bancada")
@@ -1190,6 +1642,11 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
                 evict_owner(&mut state.serial.lock().unwrap());
+                // ---------- mqtt ---------- send the broker a clean DISCONNECT.
+                let mqtt_session = state.mqtt.lock().unwrap().take();
+                if let Some(session) = mqtt_session {
+                    stop_mqtt_session(session);
+                }
             }
         });
 }

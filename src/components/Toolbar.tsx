@@ -14,7 +14,6 @@ interface Props {
   onRefreshPorts: () => void;
   onVerify: () => void;
   onUpload: () => void;
-  onReadMac: () => void;
 }
 
 export default function Toolbar(props: Props) {
@@ -87,15 +86,7 @@ export default function Toolbar(props: Props) {
         disabled={props.busy || !props.sketchDir || !props.selectedPort}
         title="Compile and flash to the board"
       >
-        → Upload
-      </button>
-      <button
-        className="btn action"
-        onClick={props.onReadMac}
-        disabled={props.busy || !props.selectedPort}
-        title="Read the board MAC address via esptool"
-      >
-        # MAC
+        → Flash
       </button>
     </div>
   );
