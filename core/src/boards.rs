@@ -5,6 +5,8 @@
 //! matters because the interesting logic is version ordering, and arduino-cli's
 //! version strings are not plain semver (`2.0.18-arduino.5`).
 
+use serde::Serialize;
+
 use crate::ghlib::version_key;
 use crate::types::Platform;
 use crate::{Error, Result};
@@ -41,7 +43,8 @@ pub fn parse_core_id(raw: &str) -> Result<CoreId> {
 }
 
 /// Where a platform stands relative to its newest published release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CoreStatus {
     NotInstalled,
     UpToDate,
@@ -106,6 +109,61 @@ pub fn board_names(p: &Platform, version: &str) -> Vec<String> {
         .get(version)
         .map(|rel| rel.boards.iter().map(|b| b.name.clone()).collect())
         .unwrap_or_default()
+}
+
+/// Everything the UI needs about one platform, flattened.
+///
+/// Derived here rather than in the frontend so that version ordering — the one
+/// genuinely tricky part — has a single tested implementation instead of a
+/// duplicate in TypeScript.
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreView {
+    pub id: String,
+    /// Human name of the displayed release, e.g. `Arduino AVR Boards`. Falls
+    /// back to the id, which is all `core search` gives for some platforms.
+    pub name: String,
+    pub maintainer: String,
+    pub website: String,
+    /// Empty when not installed.
+    pub installed_version: String,
+    pub latest_version: String,
+    pub status: CoreStatus,
+    /// Installable versions, newest first.
+    pub versions: Vec<String>,
+    /// Board names of the displayed release.
+    pub boards: Vec<String>,
+}
+
+/// The release a card describes: what is installed, or else the newest.
+fn display_version(p: &Platform) -> String {
+    if !p.installed_version.is_empty() {
+        return p.installed_version.clone();
+    }
+    if !p.latest_version.is_empty() {
+        return p.latest_version.clone();
+    }
+    sorted_versions(p).first().cloned().unwrap_or_default()
+}
+
+pub fn view(p: &Platform) -> CoreView {
+    let shown = display_version(p);
+    let name = p
+        .releases
+        .get(&shown)
+        .map(|r| r.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| p.id.clone());
+    CoreView {
+        id: p.id.clone(),
+        name,
+        maintainer: p.maintainer.clone(),
+        website: p.website.clone(),
+        installed_version: p.installed_version.clone(),
+        latest_version: p.latest_version.clone(),
+        status: status(p),
+        versions: sorted_versions(p),
+        boards: board_names(p, &shown),
+    }
 }
 
 /// The `platform:` value for a `sketch.yaml` profile, e.g.
@@ -245,6 +303,36 @@ mod tests {
         let p = platform("", "2.0.0", &[("1.0.0", true), ("2.0.0", true)]);
         assert_eq!(board_names(&p, "1.0.0"), ["Board for 1.0.0"]);
         assert!(board_names(&p, "nope").is_empty());
+    }
+
+    #[test]
+    fn view_describes_the_installed_release_when_installed() {
+        let p = platform("1.0.0", "2.0.0", &[("1.0.0", true), ("2.0.0", true)]);
+        let v = view(&p);
+        assert_eq!(v.status, CoreStatus::UpdateAvailable);
+        assert_eq!(v.name, "Test Boards");
+        // Boards shown are the installed release's, not the newest one's.
+        assert_eq!(v.boards, ["Board for 1.0.0"]);
+        assert_eq!(v.versions, ["2.0.0", "1.0.0"]);
+    }
+
+    #[test]
+    fn view_describes_the_latest_release_when_not_installed() {
+        let p = platform("", "2.0.0", &[("1.0.0", true), ("2.0.0", true)]);
+        let v = view(&p);
+        assert_eq!(v.status, CoreStatus::NotInstalled);
+        assert_eq!(v.boards, ["Board for 2.0.0"]);
+    }
+
+    #[test]
+    fn view_falls_back_to_the_id_when_a_release_has_no_name() {
+        // `core search` returns some platforms with no release metadata at all.
+        let p = Platform {
+            id: "vendor:arch".into(),
+            ..Default::default()
+        };
+        assert_eq!(view(&p).name, "vendor:arch");
+        assert!(view(&p).versions.is_empty());
     }
 
     #[test]

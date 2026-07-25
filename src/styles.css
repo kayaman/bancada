@@ -392,6 +392,110 @@ body {
   flex-wrap: wrap;
 }
 
+/* ---------- boards (core/platform) manager ---------- */
+
+.boards-manager,
+.core-search {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.core-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 4px 8px;
+}
+
+.core-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--bg-raised);
+}
+
+.core-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.core-name {
+  font-weight: 600;
+}
+
+.core-version {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.core-badge {
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* An available update is the one thing worth pulling the eye. */
+.core-badge.update {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.core-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.core-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Board lists run to dozens of entries, so they stay collapsed by default. */
+.core-boards {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.core-boards summary {
+  cursor: pointer;
+}
+
+.core-boards ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.core-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* The hint naming the `config add` command carries a literal command line. */
+.boards-manager .empty-hint code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text);
+  word-break: break-all;
+}
+
 /* ---------- new project ---------- */
 
 /* Replaces the editor area, so it gets room a 280px sidebar cannot give. */

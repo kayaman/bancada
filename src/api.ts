@@ -158,6 +158,37 @@ export interface AppSettings {
   last_new_project_parent?: string | null;
 }
 
+/** Where an installed platform stands relative to its newest release. */
+export type CoreStatus = "not_installed" | "up_to_date" | "update_available";
+
+/**
+ * One platform (core), already flattened by the backend.
+ *
+ * `versions` is newest-first and excludes releases arduino-cli cannot build on
+ * this host, so it can feed a version picker directly. `boards` carries names
+ * only — `core list`/`core search` do not expose FQBNs.
+ */
+export interface CoreView {
+  id: string;
+  name: string;
+  maintainer: string;
+  website: string;
+  /** Empty when not installed. */
+  installed_version: string;
+  latest_version: string;
+  status: CoreStatus;
+  versions: string[];
+  boards: string[];
+}
+
+export interface InstalledCore {
+  result: RunResult;
+  /** Rewritten sketch.yaml, when the platform was pinned to a profile. */
+  yaml?: SketchYaml | null;
+  /** Set when the platform installed but pinning it to the profile failed. */
+  profile_error?: string | null;
+}
+
 /** One selectable board, flattened from `board listall`. */
 export interface BoardOption {
   fqbn: string;
@@ -261,6 +292,51 @@ export const createLibrary = (
     spec,
     sketchDir: sketchDir ?? null,
     profile: profile ?? null,
+  });
+
+// ---------- cores (platforms) ----------
+
+export const listCores = () => invoke<CoreView[]>("list_cores");
+/**
+ * Search the indexes arduino-cli already knows about. Bancada never adds index
+ * URLs of its own, so a platform with no configured index will not appear.
+ */
+export const searchCores = (query: string) =>
+  invoke<CoreView[]>("search_cores", { query });
+/**
+ * Install or upgrade a platform. Progress arrives on `build://line`.
+ *
+ * With `sketchDir`/`profile` and a concrete `version`, the platform is also
+ * pinned into that profile — a profile build is hermetic, so an unpinned
+ * platform is invisible to it.
+ */
+export const installCore = (
+  id: string,
+  version?: string | null,
+  sketchDir?: string | null,
+  profile?: string | null,
+) =>
+  invoke<InstalledCore>("install_core", {
+    id,
+    version: version ?? null,
+    sketchDir: sketchDir ?? null,
+    profile: profile ?? null,
+  });
+export const uninstallCore = (id: string) =>
+  invoke<RunResult>("uninstall_core", { id });
+export const updateCoreIndex = () => invoke<RunResult>("update_core_index");
+/** Pin an already-installed platform into a profile without reinstalling. */
+export const addPlatformToProfile = (
+  sketchDir: string,
+  profile: string,
+  id: string,
+  version: string,
+) =>
+  invoke<SketchYaml>("add_platform_to_profile", {
+    sketchDir,
+    profile,
+    id,
+    version,
   });
 
 // ---------- new projects ----------

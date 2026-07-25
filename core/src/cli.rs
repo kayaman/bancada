@@ -633,4 +633,292 @@ mod tests {
         assert_eq!(ArduinoCli::default().bin, "arduino-cli");
         assert_eq!(ArduinoCli::new("/opt/arduino-cli").bin, "/opt/arduino-cli");
     }
+
+    // ---------- subprocess plumbing ----------
+    //
+    // `bin` is just a path, so pointing it at a stub script exercises the real
+    // spawn/parse/error paths with no fixtures and no arduino-cli. That covers
+    // the error taxonomy users actually see — "is it installed?", "the tool
+    // failed", "the output made no sense" — which is otherwise only reachable by
+    // breaking someone's machine.
+
+    /// Serialises everything that writes-then-executes a script.
+    ///
+    /// Without it these tests fail intermittently with ETXTBSY ("Text file
+    /// busy"): while one thread still has the stub open for writing, another
+    /// thread's `fork` inherits that write descriptor, and the exec of the script
+    /// is refused until the forked child execs and drops it. The files are
+    /// distinct — the hazard is the *concurrency*, not a shared path — so the
+    /// only reliable fix is to keep one write-then-exec in flight at a time.
+    /// Measured before the guard: 7 failures in 12 parallel runs, 0 in 12 serial.
+    #[cfg(unix)]
+    static STUB_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    struct Stub {
+        // Held for the stub's lifetime; released on drop.
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        cli: ArduinoCli,
+        argv_log: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Stub {
+        fn argv(&self) -> String {
+            std::fs::read_to_string(&self.argv_log).unwrap_or_default()
+        }
+    }
+
+    /// Run `f` against a fake arduino-cli whose body is `sh` source.
+    ///
+    /// Scoped rather than returned so the guard is always released — two live
+    /// stubs in one test would deadlock on `STUB_GUARD`.
+    #[cfg(unix)]
+    fn with_stub<T>(body: &str, f: impl FnOnce(&Stub) -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+        // Ignore poisoning: a panicking test must not cascade into the rest.
+        let guard = STUB_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-arduino-cli");
+        let argv_log = dir.path().join("argv");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nARGV_LOG='{}'\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\n{body}\n",
+                argv_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let s = Stub {
+            cli: ArduinoCli::new(script.to_string_lossy().into_owned()),
+            argv_log,
+            _dir: dir,
+            _guard: guard,
+        };
+        f(&s)
+    }
+
+    #[test]
+    fn a_missing_binary_reports_tool_missing_not_an_io_error() {
+        // The UI turns this into "is arduino-cli installed?", so the variant
+        // matters, not just the failure.
+        let cli = ArduinoCli::new("bancada-definitely-no-such-binary");
+        match cli.version() {
+            Err(Error::ToolMissing(name)) => {
+                assert!(name.contains("bancada-definitely-no-such-binary"), "{name}")
+            }
+            other => panic!("expected ToolMissing, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_zero_exit_reports_tool_failed_with_the_stderr() {
+        with_stub("echo 'boom happened' >&2; exit 3", |s| {
+            match s.cli.board_list() {
+                Err(Error::ToolFailed { status, stderr, .. }) => {
+                    assert_eq!(status, 3);
+                    assert!(stderr.contains("boom happened"), "{stderr}");
+                }
+                other => panic!("expected ToolFailed, got {other:?}"),
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_output_reports_a_json_error_naming_the_command() {
+        with_stub("echo 'this is not json'", |s| match s.cli.board_list() {
+            Err(Error::Json { what, .. }) => {
+                assert!(what.contains("board list"), "{what}")
+            }
+            other => panic!("expected Json, got {other:?}"),
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_json_appends_the_json_flag() {
+        with_stub("echo '{}'", |s| {
+            let _ = s.cli.board_list();
+            assert!(s.argv().contains("board list --json"), "{}", s.argv());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_ok_does_not_append_the_json_flag() {
+        // `sketch new` and `profile create` print prose; passing --json to them
+        // is wrong, so the two runners must differ here.
+        with_stub("exit 0", |s| {
+            s.cli.sketch_new(Path::new("/tmp/Demo")).unwrap();
+            let argv = s.argv();
+            assert!(argv.contains("sketch new /tmp/Demo"), "{argv}");
+            assert!(!argv.contains("--json"), "{argv}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_prefers_versionstring_then_falls_back() {
+        with_stub(r#"echo '{"VersionString":"1.5.0"}'"#, |s| {
+            assert_eq!(s.cli.version().unwrap(), "1.5.0")
+        });
+        with_stub(r#"echo '{"version":"9.9.9"}'"#, |s| {
+            assert_eq!(s.cli.version().unwrap(), "9.9.9")
+        });
+        with_stub("echo '{}'", |s| {
+            assert_eq!(s.cli.version().unwrap(), "unknown")
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_list_returns_the_detected_ports() {
+        with_stub(
+            r#"echo '{"detected_ports":[{"port":{"address":"/dev/ttyUSB0","protocol":"serial"}}]}'"#,
+            |s| {
+                let ports = s.cli.board_list().unwrap();
+                assert_eq!(ports.len(), 1);
+                assert_eq!(ports[0].port.address, "/dev/ttyUSB0");
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_listall_drops_uninstalled_and_fqbn_less_entries() {
+        // The flattening is where a picker could silently offer a board that
+        // `profile create` then refuses, so the filter is worth pinning.
+        with_stub(
+            r#"echo '{"boards":[
+              {"name":"Installed","fqbn":"a:b:c","platform":{"metadata":{"id":"a:b"},"release":{"name":"Plat A","installed":true}}},
+              {"name":"NotInstalled","fqbn":"x:y:z","platform":{"metadata":{"id":"x:y"},"release":{"name":"Plat X","installed":false}}},
+              {"name":"NoFqbn","fqbn":"","platform":{"metadata":{"id":"a:b"},"release":{"name":"Plat A","installed":true}}}
+            ]}'"#,
+            |s| {
+                let boards = s.cli.board_listall().unwrap();
+                assert_eq!(boards.len(), 1, "{boards:?}");
+                assert_eq!(boards[0].fqbn, "a:b:c");
+                assert_eq!(boards[0].platform_name, "Plat A");
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_listall_sorts_by_platform_then_board_and_dedupes_fqbns() {
+        with_stub(
+            r#"echo '{"boards":[
+              {"name":"Zeta","fqbn":"p:1:z","platform":{"metadata":{"id":"p"},"release":{"name":"Plat B","installed":true}}},
+              {"name":"Alpha","fqbn":"p:1:a","platform":{"metadata":{"id":"p"},"release":{"name":"Plat B","installed":true}}},
+              {"name":"Solo","fqbn":"q:1:s","platform":{"metadata":{"id":"q"},"release":{"name":"Plat A","installed":true}}},
+              {"name":"Solo","fqbn":"q:1:s","platform":{"metadata":{"id":"q"},"release":{"name":"Plat A","installed":true}}}
+            ]}'"#,
+            |s| {
+                let boards = s.cli.board_listall().unwrap();
+                let names: Vec<&str> = boards.iter().map(|b| b.name.as_str()).collect();
+                // Plat A first; Alpha before Zeta inside Plat B; the repeat gone.
+                assert_eq!(names, ["Solo", "Alpha", "Zeta"]);
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sketchbook_dir_unquotes_the_json_string() {
+        with_stub(r#"echo '"/home/me/Arduino"'"#, |s| {
+            assert_eq!(
+                s.cli.sketchbook_dir().unwrap(),
+                PathBuf::from("/home/me/Arduino")
+            );
+            assert_eq!(
+                s.cli.sketchbook_libraries_dir().unwrap(),
+                PathBuf::from("/home/me/Arduino/libraries")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_sketchbook_path_is_an_error_not_a_root_directory() {
+        // Returning PathBuf::from("") would make every project land at "/".
+        with_stub(r#"echo '"   "'"#, |s| {
+            assert!(s.cli.sketchbook_dir().is_err())
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_and_core_queries_unwrap_their_envelopes() {
+        with_stub(
+            r#"echo '{"libraries":[{"name":"ArduinoJson","latest":{"version":"7.4.3"}}]}'"#,
+            |s| assert_eq!(s.cli.lib_search("json").unwrap()[0].name, "ArduinoJson"),
+        );
+        with_stub(
+            r#"echo '{"installed_libraries":[{"library":{"name":"L","location":"user"}}]}'"#,
+            |s| assert_eq!(s.cli.lib_list().unwrap()[0].location, "user"),
+        );
+        with_stub(r#"echo '{"platforms":[{"id":"esp32:esp32"}]}'"#, |s| {
+            assert_eq!(s.cli.core_list().unwrap()[0].id, "esp32:esp32")
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lib_install_sends_name_at_version() {
+        with_stub("echo '{}'", |s| {
+            s.cli.lib_install("ArduinoJson", Some("7.4.2")).unwrap();
+            assert!(
+                s.argv().contains("lib install ArduinoJson@7.4.2"),
+                "{}",
+                s.argv()
+            );
+        });
+        with_stub("echo '{}'", |s| {
+            s.cli.lib_install("ArduinoJson", None).unwrap();
+            let argv = s.argv();
+            assert!(argv.contains("lib install ArduinoJson"), "{argv}");
+            assert!(!argv.contains('@'), "{argv}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_tags_stdout_and_stderr_separately() {
+        with_stub("echo out-line; echo err-line >&2; exit 0", |s| {
+            let mut seen = Vec::new();
+            let result = s
+                .cli
+                .compile("/sketch", Some("p"), None, &[], |l| seen.push(l))
+                .unwrap();
+            assert!(result.success);
+            assert_eq!(result.exit_code, 0);
+
+            let of = |want: OutputStream| -> Vec<String> {
+                seen.iter()
+                    .filter(|l| l.stream == want)
+                    .map(|l| l.line.clone())
+                    .collect()
+            };
+            assert!(of(OutputStream::Stdout).contains(&"out-line".to_string()));
+            assert!(of(OutputStream::Stderr).contains(&"err-line".to_string()));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_streaming_reports_a_failing_exit_code_without_erroring() {
+        // A failed compile is a normal outcome the UI renders, not an Err.
+        with_stub("echo 'error: expected ;' >&2; exit 1", |s| {
+            let result = s
+                .cli
+                .compile("/sketch", None, Some("a:b:c"), &[], |_| {})
+                .unwrap();
+            assert!(!result.success);
+            assert_eq!(result.exit_code, 1);
+        });
+    }
 }

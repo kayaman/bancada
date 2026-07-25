@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
@@ -305,23 +306,35 @@ async fn create_library(
 
 // ---------- cores (platforms) ----------
 
+/// Installed platforms. The view is derived in `bancada_core::boards` so the
+/// frontend never re-implements version ordering.
 #[tauri::command]
-async fn list_cores(state: State<'_, AppState>) -> Result<Vec<Platform>, String> {
+async fn list_cores(state: State<'_, AppState>) -> Result<Vec<CoreView>, String> {
     let cli = state.cli.clone();
-    tauri::async_runtime::spawn_blocking(move || cli.core_list().map_err(err_str))
-        .await
-        .map_err(err_str)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let platforms = cli.core_list().map_err(err_str)?;
+        Ok(platforms.iter().map(boards::view).collect())
+    })
+    .await
+    .map_err(err_str)?
 }
 
+/// Search every index arduino-cli already knows about.
+///
+/// Bancada does not add index URLs of its own, so a platform the user has not
+/// configured an index for simply will not appear here.
 #[tauri::command]
 async fn search_cores(
     state: State<'_, AppState>,
     query: String,
-) -> Result<Vec<Platform>, String> {
+) -> Result<Vec<CoreView>, String> {
     let cli = state.cli.clone();
-    tauri::async_runtime::spawn_blocking(move || cli.core_search(&query).map_err(err_str))
-        .await
-        .map_err(err_str)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let platforms = cli.core_search(&query).map_err(err_str)?;
+        Ok(platforms.iter().map(boards::view).collect())
+    })
+    .await
+    .map_err(err_str)?
 }
 
 /// A core install that may have succeeded while failing to pin itself.
@@ -1139,6 +1152,12 @@ pub fn run() {
             uninstall_library,
             sketchbook_libraries_dir,
             create_library,
+            list_cores,
+            search_cores,
+            install_core,
+            uninstall_core,
+            update_core_index,
+            add_platform_to_profile,
             sketchbook_dir,
             list_all_boards,
             create_project,

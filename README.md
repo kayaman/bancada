@@ -61,6 +61,36 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## Tests and coverage
+
+```bash
+cargo test --workspace     # Rust unit tests
+npm test                   # frontend (vitest)
+npm run coverage           # Rust line coverage, per file
+npm run coverage:html      # same, as a browsable report
+```
+
+Coverage needs `cargo-llvm-cov` and the LLVM tools:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov   # or grab the prebuilt binary from its releases
+```
+
+Some tests are **opt-in** because they need network, `git`, an installed core, or
+a board, so a plain `cargo test` skips them:
+
+```bash
+cargo test -p bancada-core --test gh_fetch            -- --ignored  # network + git
+cargo test -p bancada-core --test scaffold_compiles   -- --ignored  # installed core
+cargo test -p bancada-core --test new_project_builds  -- --ignored  # installed core
+npm run coverage:full                                              # coverage incl. those
+```
+
+They are worth running before a release: they are the only tests that prove a
+scaffolded library, a fetched library and a newly created project actually
+*compile*, rather than merely producing the expected text.
+
 ## What works in this scaffold
 
 - **New Project** — name it, pick a board from the installed platforms (the

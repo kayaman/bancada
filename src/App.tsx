@@ -9,11 +9,12 @@ import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
+import BoardsManager from "./components/BoardsManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 
-type SideTab = "files" | "libraries";
+type SideTab = "files" | "libraries" | "boards";
 type BottomTab = "build" | "serial" | "scope";
 
 // Bottom panel sizing: layout preference, so it lives in localStorage (per
@@ -520,19 +521,40 @@ export default function App() {
             >
               Libraries
             </button>
+            <button
+              className={sideTab === "boards" ? "tab active" : "tab"}
+              onClick={() => setSideTab("boards")}
+              title="Install and update board platforms (arduino-cli cores)"
+            >
+              Boards
+            </button>
           </div>
-          {sideTab === "files" ? (
+          {sideTab === "files" && (
             <FileTree
               files={files}
               openFile={openFile}
               dirtyFiles={dirtyFiles}
               onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
             />
-          ) : (
+          )}
+          {sideTab === "libraries" && (
             <LibraryManager
               sketchDir={sketchDir}
               profile={profile}
               onYamlChanged={setSketchYaml}
+              notify={notify}
+            />
+          )}
+          {sideTab === "boards" && (
+            <BoardsManager
+              sketchDir={sketchDir}
+              profile={profile}
+              sketchYaml={sketchYaml}
+              onYamlChanged={setSketchYaml}
+              onStreamStart={() => {
+                setBuildLines([]);
+                setBottomTab("build");
+              }}
               notify={notify}
             />
           )}

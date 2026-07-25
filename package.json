@@ -8,7 +8,10 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "coverage": "cargo llvm-cov -p bancada-core --summary-only",
+    "coverage:html": "cargo llvm-cov -p bancada-core --html --open",
+    "coverage:full": "cargo llvm-cov -p bancada-core --summary-only -- --include-ignored"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.2",
