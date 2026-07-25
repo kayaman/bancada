@@ -185,7 +185,7 @@ pub fn parse_ls_remote(out: &str) -> Vec<RemoteTag> {
 ///
 /// Handles the `HomeNode/v1.1.0` convention by looking only at the segment after
 /// the last `/`, and pads so `1.1` and `1.1.0` compare equal.
-fn version_key(tag: &str) -> Option<Vec<u64>> {
+pub(crate) fn version_key(tag: &str) -> Option<Vec<u64>> {
     let last = tag.rsplit('/').next().unwrap_or(tag);
     let stripped = last.trim_start_matches(['v', 'V']);
     let core = stripped.split(['-', '+']).next().unwrap_or(stripped);

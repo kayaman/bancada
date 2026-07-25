@@ -268,6 +268,14 @@ body {
   background: var(--bg-raised);
 }
 
+/* unseen-content indicator on bottom tabs */
+.tab-dot {
+  color: var(--accent);
+  font-size: 9px;
+  margin-left: 5px;
+  vertical-align: 1px;
+}
+
 /* ---------- file tree ---------- */
 
 .file-tree {

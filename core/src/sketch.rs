@@ -175,6 +175,55 @@ impl SketchProject {
     // hand, so that dependencies are resolved too. Local `dir:` entries stay
     // here: `profile lib add` has no equivalent for them.
 
+    /// Pin a platform version into a profile's `platforms:` list.
+    ///
+    /// Written by hand, unlike registry library pins, because arduino-cli offers
+    /// nothing that edits an existing profile. `profile create` advertises
+    /// "Create or update" but refuses on a second run — verified against 1.5.0:
+    ///
+    /// ```text
+    /// $ arduino-cli profile create -m uno -b arduino:avr:uno ./demo
+    /// Error initializing the project file: Profile 'uno' already exists
+    /// ```
+    ///
+    /// and there is no `profile platform add`. So this is the only route, and it
+    /// is not the same situation as the registry pins above.
+    ///
+    /// Replaces any existing pin of the *same platform* rather than skipping
+    /// when absent: two entries for one platform at different versions are
+    /// contradictory, not duplicates, and arduino-cli would resolve one of them
+    /// arbitrarily. Any `platform_index_url` on the replaced entry is carried
+    /// over — it describes where the platform comes from, not which version.
+    pub fn add_platform(
+        &self,
+        profile_name: &str,
+        id: &str,
+        version: &str,
+    ) -> Result<SketchYaml> {
+        let mut y = self.load_yaml()?;
+        let profile = y
+            .profiles
+            .get_mut(profile_name)
+            .ok_or_else(|| Error::Other(format!("no profile named `{profile_name}`")))?;
+
+        let entry = crate::boards::platform_dep_entry(id, version);
+        let existing = profile
+            .platforms
+            .iter()
+            .position(|p| crate::boards::platform_dep_id(&p.platform) == id);
+        match existing {
+            Some(i) => {
+                profile.platforms[i].platform = entry;
+            }
+            None => profile.platforms.push(PlatformDep {
+                platform: entry,
+                platform_index_url: None,
+            }),
+        }
+        self.save_yaml(&y)?;
+        Ok(y)
+    }
+
     /// All local `dir:` library paths of a profile, resolved to absolute paths.
     pub fn local_library_paths(&self, profile_name: &str) -> Result<Vec<PathBuf>> {
         let y = self.load_yaml()?;
@@ -472,5 +521,95 @@ profiles:
         assert!(names.contains(&"a.ino"));
         assert!(names.contains(&"src/x.cpp"));
         assert!(!names.iter().any(|n| n.starts_with("build")));
+    }
+
+    // ---------- add_platform ----------
+
+    fn sample_project(tmp: &tempfile::TempDir) -> SketchProject {
+        std::fs::write(tmp.path().join("sketch.yaml"), SAMPLE).unwrap();
+        SketchProject::open(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn add_platform_replaces_the_same_platform_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let platforms = &y.profiles["esp32s3"].platforms;
+        assert_eq!(
+            platforms.len(),
+            1,
+            "one platform must not be pinned twice at two versions"
+        );
+        assert_eq!(platforms[0].platform, "esp32:esp32 (3.3.11)");
+    }
+
+    #[test]
+    fn add_platform_keeps_the_index_url_of_the_entry_it_replaces() {
+        // The index URL says where the platform comes from, not which version;
+        // losing it would break resolution for a third-party core.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        assert_eq!(
+            y.profiles["esp32s3"].platforms[0].platform_index_url.as_deref(),
+            Some("https://espressif.github.io/arduino-esp32/package_esp32_index.json")
+        );
+    }
+
+    #[test]
+    fn add_platform_appends_a_different_platform() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        let y = proj.add_platform("esp32s3", "arduino:avr", "1.8.8").unwrap();
+        let entries: Vec<&str> = y.profiles["esp32s3"]
+            .platforms
+            .iter()
+            .map(|p| p.platform.as_str())
+            .collect();
+        assert_eq!(entries, ["esp32:esp32 (3.3.0)", "arduino:avr (1.8.8)"]);
+    }
+
+    #[test]
+    fn add_platform_is_idempotent_and_converges_on_the_last_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        proj.add_platform("esp32s3", "esp32:esp32", "3.2.0").unwrap();
+        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let y = proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let platforms = &y.profiles["esp32s3"].platforms;
+        assert_eq!(platforms.len(), 1);
+        assert_eq!(platforms[0].platform, "esp32:esp32 (3.3.11)");
+    }
+
+    #[test]
+    fn add_platform_survives_a_reload_from_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        proj.add_platform("esp32s3", "esp32:esp32", "3.3.11").unwrap();
+        let reloaded = proj.load_yaml().unwrap();
+        assert_eq!(
+            reloaded.profiles["esp32s3"].platforms[0].platform,
+            "esp32:esp32 (3.3.11)"
+        );
+        // The rest of the profile is untouched.
+        assert_eq!(reloaded.profiles["esp32s3"].libraries.len(), 2);
+    }
+
+    #[test]
+    fn add_platform_errors_on_unknown_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = sample_project(&tmp);
+
+        let err = proj
+            .add_platform("nope", "esp32:esp32", "3.3.11")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no profile named `nope`"), "got: {err}");
     }
 }

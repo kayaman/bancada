@@ -239,33 +239,18 @@ impl ArduinoCli {
         fqbn: &str,
         set_default: bool,
     ) -> Result<()> {
-        let dir = sketch_dir.to_string_lossy().into_owned();
-        let mut args = vec!["profile", "create", "-m", profile, "-b", fqbn];
-        if set_default {
-            args.push("--set-default");
-        }
-        args.push(&dir);
-        self.run_ok(&args)?;
+        let args = profile_create_args(sketch_dir, profile, fqbn, set_default);
+        self.run_ok(&as_str_slice(&args))?;
         Ok(())
     }
 
     /// `arduino-cli profile lib add` — pins a registry library into a profile,
     /// resolving its dependencies.
     ///
-    /// `spec` is `Name` or `Name@version`. The sketch goes through
-    /// `--sketch-path`: passed positionally, arduino-cli looks for
-    /// `<cwd>.ino` and fails confusingly.
+    /// `spec` is `Name` or `Name@version`.
     pub fn profile_lib_add(&self, sketch_dir: &Path, profile: &str, spec: &str) -> Result<()> {
-        self.run_ok(&[
-            "profile",
-            "lib",
-            "add",
-            spec,
-            "-m",
-            profile,
-            "--sketch-path",
-            &sketch_dir.to_string_lossy(),
-        ])?;
+        let args = profile_lib_add_args(sketch_dir, profile, spec);
+        self.run_ok(&as_str_slice(&args))?;
         Ok(())
     }
 
@@ -283,10 +268,7 @@ impl ArduinoCli {
 
     /// Install from the registry; `version: None` installs the latest.
     pub fn lib_install(&self, name: &str, version: Option<&str>) -> Result<()> {
-        let spec = match version {
-            Some(v) => format!("{name}@{v}"),
-            None => name.to_string(),
-        };
+        let spec = lib_spec(name, version);
         let _: serde_json::Value = self.run_json(&["lib", "install", &spec])?;
         Ok(())
     }
@@ -299,6 +281,45 @@ impl ArduinoCli {
     pub fn lib_update_index(&self) -> Result<()> {
         let _: serde_json::Value = self.run_json(&["lib", "update-index"])?;
         Ok(())
+    }
+
+    // ---------- cores (platforms) ----------
+    //
+    // Installs, removals and index updates stream their output instead of
+    // returning JSON: a platform is a multi-hundred-megabyte download, and
+    // `run_json` would sit silent until it finished. `run_streaming` also does
+    // not append `--json`, so what reaches the console is arduino-cli's own
+    // human-readable progress.
+    //
+    // Third-party index URLs are deliberately not plumbed here. Bancada reads
+    // whatever the user's arduino-cli config already knows and never edits
+    // `board_manager.additional_urls` — same principle as refusing to flip
+    // `library.enable_unsafe_install` for git installs.
+
+    pub fn core_search(&self, query: &str) -> Result<Vec<Platform>> {
+        let r: CoreListResponse = self.run_json(&["core", "search", query])?;
+        Ok(r.platforms)
+    }
+
+    /// Install a platform; `version: None` installs the latest.
+    pub fn core_install(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        on_line: impl FnMut(OutputLine),
+    ) -> Result<RunResult> {
+        let args = core_install_args(id, version);
+        self.run_streaming(&as_str_slice(&args), on_line)
+    }
+
+    pub fn core_uninstall(&self, id: &str, on_line: impl FnMut(OutputLine)) -> Result<RunResult> {
+        let args = owned(&["core", "uninstall", id]);
+        self.run_streaming(&as_str_slice(&args), on_line)
+    }
+
+    pub fn core_update_index(&self, on_line: impl FnMut(OutputLine)) -> Result<RunResult> {
+        let args = owned(&["core", "update-index"]);
+        self.run_streaming(&as_str_slice(&args), on_line)
     }
 
     // ---------- build & flash ----------
@@ -314,17 +335,8 @@ impl ArduinoCli {
         extra_lib_paths: &[String],
         on_line: impl FnMut(OutputLine),
     ) -> Result<RunResult> {
-        let mut args: Vec<&str> = vec!["compile"];
-        if let Some(p) = profile {
-            args.extend_from_slice(&["--profile", p]);
-        } else if let Some(f) = fqbn {
-            args.extend_from_slice(&["--fqbn", f]);
-        }
-        for p in extra_lib_paths {
-            args.extend_from_slice(&["--library", p]);
-        }
-        args.push(sketch_dir);
-        self.run_streaming(&args, on_line)
+        let args = compile_args(sketch_dir, profile, fqbn, extra_lib_paths);
+        self.run_streaming(&as_str_slice(&args), on_line)
     }
 
     pub fn upload(
@@ -335,19 +347,290 @@ impl ArduinoCli {
         port: &str,
         on_line: impl FnMut(OutputLine),
     ) -> Result<RunResult> {
-        let mut args: Vec<&str> = vec!["upload", "-p", port];
-        if let Some(p) = profile {
-            args.extend_from_slice(&["--profile", p]);
-        } else if let Some(f) = fqbn {
-            args.extend_from_slice(&["--fqbn", f]);
-        }
-        args.push(sketch_dir);
-        self.run_streaming(&args, on_line)
+        let args = upload_args(sketch_dir, profile, fqbn, port);
+        self.run_streaming(&as_str_slice(&args), on_line)
     }
 
     /// Spawn `arduino-cli monitor` as a long-lived child process.
     pub fn monitor(&self, port: &str, baudrate: u32) -> Result<Child> {
-        let cfg = format!("baudrate={baudrate}");
-        self.spawn_raw(&["monitor", "-p", port, "-c", &cfg])
+        let args = monitor_args(port, baudrate);
+        self.spawn_raw(&as_str_slice(&args))
+    }
+}
+
+// ---------- argument construction ----------
+//
+// Built as pure functions so the exact command line is unit-testable. These are
+// not cosmetic: arduino-cli's flags are easy to get subtly wrong in ways that
+// fail at runtime with a misleading message rather than at compile time. The
+// `profile lib add` shape below is a real example — passing the sketch
+// positionally makes arduino-cli look for `<cwd>.ino` and report a missing main
+// file, which says nothing about the actual mistake.
+
+fn as_str_slice(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+fn owned(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| s.to_string()).collect()
+}
+
+/// A library spec for the registry: `Name` or `Name@version`.
+fn lib_spec(name: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) if !v.trim().is_empty() => format!("{name}@{}", v.trim()),
+        _ => name.to_string(),
+    }
+}
+
+/// `compile [--profile P | --fqbn F] [--library P]… <sketch>`
+///
+/// A profile wins over an FQBN: a profile build is hermetic and already names
+/// its board, so passing both would be contradictory.
+fn compile_args(
+    sketch_dir: &str,
+    profile: Option<&str>,
+    fqbn: Option<&str>,
+    extra_lib_paths: &[String],
+) -> Vec<String> {
+    let mut args = owned(&["compile"]);
+    if let Some(p) = profile {
+        args.extend(owned(&["--profile", p]));
+    } else if let Some(f) = fqbn {
+        args.extend(owned(&["--fqbn", f]));
+    }
+    for p in extra_lib_paths {
+        args.extend(owned(&["--library", p]));
+    }
+    args.push(sketch_dir.to_string());
+    args
+}
+
+/// `upload -p <port> [--profile P | --fqbn F] <sketch>`
+fn upload_args(
+    sketch_dir: &str,
+    profile: Option<&str>,
+    fqbn: Option<&str>,
+    port: &str,
+) -> Vec<String> {
+    let mut args = owned(&["upload", "-p", port]);
+    if let Some(p) = profile {
+        args.extend(owned(&["--profile", p]));
+    } else if let Some(f) = fqbn {
+        args.extend(owned(&["--fqbn", f]));
+    }
+    args.push(sketch_dir.to_string());
+    args
+}
+
+/// `profile create -m <profile> -b <fqbn> [--set-default] <sketch>`
+fn profile_create_args(
+    sketch_dir: &Path,
+    profile: &str,
+    fqbn: &str,
+    set_default: bool,
+) -> Vec<String> {
+    let mut args = owned(&["profile", "create", "-m", profile, "-b", fqbn]);
+    if set_default {
+        args.push("--set-default".to_string());
+    }
+    args.push(sketch_dir.to_string_lossy().into_owned());
+    args
+}
+
+/// `profile lib add <spec> -m <profile> --sketch-path <sketch>`
+///
+/// The sketch **must** go through `--sketch-path`; see the note above.
+fn profile_lib_add_args(sketch_dir: &Path, profile: &str, spec: &str) -> Vec<String> {
+    let mut args = owned(&["profile", "lib", "add", spec, "-m", profile, "--sketch-path"]);
+    args.push(sketch_dir.to_string_lossy().into_owned());
+    args
+}
+
+/// `core install <id>[@version]`
+///
+/// A platform spec uses the same `name@version` grammar as a library, so
+/// [`lib_spec`] builds it rather than a second near-identical helper.
+fn core_install_args(id: &str, version: Option<&str>) -> Vec<String> {
+    let mut args = owned(&["core", "install"]);
+    args.push(lib_spec(id, version));
+    args
+}
+
+/// `monitor -p <port> -c baudrate=<n>`
+fn monitor_args(port: &str, baudrate: u32) -> Vec<String> {
+    let mut args = owned(&["monitor", "-p", port, "-c"]);
+    args.push(format!("baudrate={baudrate}"));
+    args
+}
+
+// ---------- tests ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_prefers_the_profile_over_an_fqbn() {
+        // Both supplied: the profile wins and --fqbn must not appear, or
+        // arduino-cli would be told two contradictory things.
+        let args = compile_args("/s", Some("esp32s3"), Some("arduino:avr:uno"), &[]);
+        assert_eq!(args, ["compile", "--profile", "esp32s3", "/s"]);
+        assert!(!args.iter().any(|a| a == "--fqbn"));
+    }
+
+    #[test]
+    fn compile_falls_back_to_fqbn() {
+        assert_eq!(
+            compile_args("/s", None, Some("arduino:avr:uno"), &[]),
+            ["compile", "--fqbn", "arduino:avr:uno", "/s"]
+        );
+    }
+
+    #[test]
+    fn compile_with_neither_target_still_names_the_sketch() {
+        // arduino-cli then uses the sketch's default profile, so this is valid.
+        assert_eq!(compile_args("/s", None, None, &[]), ["compile", "/s"]);
+    }
+
+    #[test]
+    fn compile_repeats_library_for_each_path_and_keeps_sketch_last() {
+        let libs = vec!["/a/Lib1".to_string(), "/b/Lib2".to_string()];
+        let args = compile_args("/s", Some("p"), None, &libs);
+        assert_eq!(
+            args,
+            [
+                "compile", "--profile", "p", "--library", "/a/Lib1", "--library", "/b/Lib2", "/s",
+            ]
+        );
+        // The sketch path is positional and must stay at the end.
+        assert_eq!(args.last().unwrap(), "/s");
+    }
+
+    #[test]
+    fn upload_always_passes_the_port_and_ends_with_the_sketch() {
+        let args = upload_args("/s", Some("p"), None, "/dev/ttyUSB0");
+        assert_eq!(
+            args,
+            ["upload", "-p", "/dev/ttyUSB0", "--profile", "p", "/s"]
+        );
+        assert_eq!(args.last().unwrap(), "/s");
+    }
+
+    #[test]
+    fn upload_falls_back_to_fqbn_like_compile() {
+        let args = upload_args("/s", None, Some("a:b:c"), "/dev/x");
+        assert_eq!(args, ["upload", "-p", "/dev/x", "--fqbn", "a:b:c", "/s"]);
+    }
+
+    #[test]
+    fn profile_create_appends_set_default_before_the_sketch() {
+        let args = profile_create_args(Path::new("/s"), "esp32s3", "esp32:esp32:esp32s3", true);
+        assert_eq!(
+            args,
+            [
+                "profile",
+                "create",
+                "-m",
+                "esp32s3",
+                "-b",
+                "esp32:esp32:esp32s3",
+                "--set-default",
+                "/s",
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_create_omits_set_default_when_not_wanted() {
+        let args = profile_create_args(Path::new("/s"), "p", "a:b:c", false);
+        assert!(!args.iter().any(|a| a == "--set-default"));
+        assert_eq!(args.last().unwrap(), "/s");
+    }
+
+    #[test]
+    fn profile_lib_add_passes_the_sketch_via_sketch_path_not_positionally() {
+        // Regression guard for a real bug: passing the sketch positionally makes
+        // arduino-cli look for `<cwd>.ino` and fail with "main file missing".
+        let args = profile_lib_add_args(Path::new("/s"), "esp32s3", "ArduinoJson@7.4.2");
+        assert_eq!(
+            args,
+            [
+                "profile",
+                "lib",
+                "add",
+                "ArduinoJson@7.4.2",
+                "-m",
+                "esp32s3",
+                "--sketch-path",
+                "/s",
+            ]
+        );
+        // The library is the positional argument; the sketch never is.
+        assert_eq!(args[3], "ArduinoJson@7.4.2");
+        let sketch_at = args.iter().position(|a| a == "/s").unwrap();
+        assert_eq!(args[sketch_at - 1], "--sketch-path");
+    }
+
+    #[test]
+    fn core_install_pins_the_version_when_given() {
+        assert_eq!(
+            core_install_args("esp32:esp32", Some("3.3.11")),
+            ["core", "install", "esp32:esp32@3.3.11"]
+        );
+    }
+
+    #[test]
+    fn core_install_without_a_version_takes_the_latest() {
+        // No trailing `@`: arduino-cli reads that as an empty version constraint
+        // and refuses the install.
+        assert_eq!(
+            core_install_args("esp32:esp32", None),
+            ["core", "install", "esp32:esp32"]
+        );
+        assert_eq!(
+            core_install_args("esp32:esp32", Some("")),
+            ["core", "install", "esp32:esp32"]
+        );
+    }
+
+    #[test]
+    fn lib_spec_appends_a_version_only_when_present() {
+        assert_eq!(lib_spec("ArduinoJson", Some("7.4.2")), "ArduinoJson@7.4.2");
+        assert_eq!(lib_spec("ArduinoJson", None), "ArduinoJson");
+        // A blank version must not produce a trailing `@`, which arduino-cli
+        // reads as an empty version constraint.
+        assert_eq!(lib_spec("ArduinoJson", Some("")), "ArduinoJson");
+        assert_eq!(lib_spec("ArduinoJson", Some("  ")), "ArduinoJson");
+    }
+
+    #[test]
+    fn lib_spec_keeps_names_with_spaces_intact() {
+        // Registry names really do contain spaces, e.g. "Adafruit GFX Library";
+        // they are one argv entry, not shell-quoted.
+        assert_eq!(
+            lib_spec("Adafruit GFX Library", Some("1.12.6")),
+            "Adafruit GFX Library@1.12.6"
+        );
+    }
+
+    #[test]
+    fn monitor_encodes_the_baudrate_as_a_config_pair() {
+        assert_eq!(
+            monitor_args("/dev/ttyUSB0", 115200),
+            ["monitor", "-p", "/dev/ttyUSB0", "-c", "baudrate=115200"]
+        );
+    }
+
+    #[test]
+    fn as_str_slice_preserves_order_and_content() {
+        let owned_args = owned(&["a", "b b", "c"]);
+        assert_eq!(as_str_slice(&owned_args), ["a", "b b", "c"]);
+    }
+
+    #[test]
+    fn default_binary_is_arduino_cli_from_path() {
+        assert_eq!(ArduinoCli::default().bin, "arduino-cli");
+        assert_eq!(ArduinoCli::new("/opt/arduino-cli").bin, "/opt/arduino-cli");
     }
 }

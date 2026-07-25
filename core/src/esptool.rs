@@ -68,17 +68,37 @@ pub fn read_mac(port: &str) -> Result<ChipInfo> {
     })
 }
 
+/// The MAC address, tolerating both output generations.
+///
+/// esptool ≤4 prints `MAC: aa:bb:…`. esptool 5 prints the label padded to 20
+/// columns (`f"{label + ':':<20}{mac}"`), and on some targets the only label is
+/// `BASE MAC` — the C6/H2/H4 families print `BASE MAC`, `EUI64 MAC` and
+/// `EXT_MAC` and no bare `MAC` line at all. A plain `MAC:` is preferred when
+/// present; `BASE MAC:` is the fallback, since it is the same factory address.
 fn parse_mac(output: &str) -> Option<String> {
-    output.lines().find_map(|l| {
-        let l = l.trim();
-        l.strip_prefix("MAC:").map(|m| m.trim().to_string())
-    })
+    let labelled = |label: &str| -> Option<String> {
+        output.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix(label)
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+        })
+    };
+    labelled("MAC:").or_else(|| labelled("BASE MAC:"))
 }
 
+/// The chip description.
+///
+/// esptool ≤4 prints `Chip is ESP32-S3 (…)`; esptool 5 prints
+/// `Chip type:          ESP32-S3 (…)`. Only matching the older spelling meant
+/// the chip type silently vanished from the UI on any modern install.
 fn parse_chip_type(output: &str) -> Option<String> {
     output.lines().find_map(|l| {
         let l = l.trim();
-        l.strip_prefix("Chip is").map(|c| c.trim().to_string())
+        l.strip_prefix("Chip type:")
+            .or_else(|| l.strip_prefix("Chip is"))
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
     })
 }
 
@@ -97,6 +117,26 @@ MAC: 68:b6:b3:2d:f0:1c
 Hard resetting via RTS pin...
 ";
 
+    /// esptool 5 pads the label to 20 columns: `f"{label + ':':<20}{value}"`.
+    const SAMPLE_V5: &str = "\
+esptool v5.2.0
+Connected to ESP32-S3 on /dev/ttyUSB0:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BLE, Embedded PSRAM 8MB
+Crystal frequency:  40MHz
+MAC:                68:b6:b3:2d:f0:1c
+Hard resetting via RTS pin...
+";
+
+    /// C6/H2/H4 report several MACs and no bare `MAC:` line.
+    const SAMPLE_V5_BASE_MAC: &str = "\
+esptool v5.2.0
+Chip type:          ESP32-C6 (QFN40) (revision v0.1)
+BASE MAC:           60:55:f9:f7:2c:a2
+EUI64 MAC:          60:55:f9:ff:fe:f7:2c:a2
+EXT_MAC:            ff:fe
+";
+
     #[test]
     fn parses_mac_and_chip() {
         assert_eq!(parse_mac(SAMPLE).as_deref(), Some("68:b6:b3:2d:f0:1c"));
@@ -107,7 +147,64 @@ Hard resetting via RTS pin...
     }
 
     #[test]
+    fn parses_esptool_v5_output() {
+        // Regression guard: v5 renamed `Chip is` to `Chip type:`, so matching
+        // only the old spelling silently dropped the chip type on every modern
+        // install (v5.2.0 is what is on this machine).
+        assert_eq!(parse_mac(SAMPLE_V5).as_deref(), Some("68:b6:b3:2d:f0:1c"));
+        assert_eq!(
+            parse_chip_type(SAMPLE_V5).as_deref(),
+            Some("ESP32-S3 (QFN56) (revision v0.2)")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_base_mac_when_there_is_no_bare_mac_line() {
+        assert_eq!(
+            parse_mac(SAMPLE_V5_BASE_MAC).as_deref(),
+            Some("60:55:f9:f7:2c:a2")
+        );
+        assert_eq!(
+            parse_chip_type(SAMPLE_V5_BASE_MAC).as_deref(),
+            Some("ESP32-C6 (QFN40) (revision v0.1)")
+        );
+    }
+
+    #[test]
+    fn prefers_a_bare_mac_over_base_mac() {
+        // Both present: the bare MAC is the one esptool considers primary.
+        let both = "BASE MAC:  aa:aa:aa:aa:aa:aa\nMAC:  bb:bb:bb:bb:bb:bb\n";
+        assert_eq!(parse_mac(both).as_deref(), Some("bb:bb:bb:bb:bb:bb"));
+    }
+
+    #[test]
+    fn does_not_match_eui64_or_ext_mac_as_the_address() {
+        // `EUI64 MAC:` and `EXT_MAC:` must not be mistaken for the factory MAC.
+        let only_derived = "EUI64 MAC:  60:55:f9:ff:fe:f7:2c:a2\nEXT_MAC:  ff:fe\n";
+        assert_eq!(parse_mac(only_derived), None);
+    }
+
+    #[test]
     fn no_mac_returns_none() {
         assert_eq!(parse_mac("Connecting...\nerror"), None);
+    }
+
+    #[test]
+    fn empty_values_are_not_accepted() {
+        // A label with nothing after it is not a MAC.
+        assert_eq!(parse_mac("MAC:\n"), None);
+        assert_eq!(parse_chip_type("Chip type:   \n"), None);
+    }
+
+    #[test]
+    fn tolerates_crlf_line_endings() {
+        let crlf = "Chip type:  ESP32\r\nMAC:  aa:bb:cc:dd:ee:ff\r\n";
+        assert_eq!(parse_mac(crlf).as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(parse_chip_type(crlf).as_deref(), Some("ESP32"));
+    }
+
+    #[test]
+    fn chip_type_missing_is_none_not_a_panic() {
+        assert_eq!(parse_chip_type("MAC: aa:bb:cc:dd:ee:ff"), None);
     }
 }

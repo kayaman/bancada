@@ -303,6 +303,134 @@ async fn create_library(
     .map_err(err_str)?
 }
 
+// ---------- cores (platforms) ----------
+
+#[tauri::command]
+async fn list_cores(state: State<'_, AppState>) -> Result<Vec<Platform>, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || cli.core_list().map_err(err_str))
+        .await
+        .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn search_cores(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<Platform>, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || cli.core_search(&query).map_err(err_str))
+        .await
+        .map_err(err_str)?
+}
+
+/// A core install that may have succeeded while failing to pin itself.
+///
+/// Mirrors `CreatedLibrary`: the platform is installed either way, so failing
+/// the whole command would wrongly suggest nothing happened.
+#[derive(serde::Serialize)]
+struct InstalledCore {
+    result: RunResult,
+    /// The rewritten sketch.yaml, when the profile pin was updated.
+    yaml: Option<SketchYaml>,
+    /// Set when the platform installed but pinning it to the profile failed.
+    profile_error: Option<String>,
+}
+
+/// Install (or upgrade) a platform, streaming progress to the build console.
+///
+/// When a sketch profile is active the platform is pinned into it afterwards,
+/// mirroring how installing a library also pins it — a profile build is
+/// hermetic, so an unpinned platform is invisible to it.
+///
+/// `version: None` installs the latest. The pin needs a concrete version, so it
+/// is skipped unless one was named; the caller passes the version it chose.
+#[tauri::command]
+async fn install_core(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    version: Option<String>,
+    sketch_dir: Option<String>,
+    profile: Option<String>,
+) -> Result<InstalledCore, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::boards::parse_core_id(&id).map_err(err_str)?;
+        let result = cli
+            .core_install(&id, version.as_deref(), |line| {
+                let _ = app.emit("build://line", &line);
+            })
+            .map_err(err_str)?;
+
+        let mut out = InstalledCore {
+            result,
+            yaml: None,
+            profile_error: None,
+        };
+        if !out.result.success {
+            return Ok(out);
+        }
+
+        if let (Some(dir), Some(prof), Some(v)) = (sketch_dir, profile, version) {
+            match SketchProject::open(&dir).and_then(|p| p.add_platform(&prof, &id, &v)) {
+                Ok(y) => out.yaml = Some(y),
+                Err(e) => out.profile_error = Some(e.to_string()),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn uninstall_core(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<RunResult, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::boards::parse_core_id(&id).map_err(err_str)?;
+        cli.core_uninstall(&id, |line| {
+            let _ = app.emit("build://line", &line);
+        })
+        .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Refresh the platform indexes so `search_cores` sees new releases.
+#[tauri::command]
+async fn update_core_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RunResult, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cli.core_update_index(|line| {
+            let _ = app.emit("build://line", &line);
+        })
+        .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Pin an already-installed platform into a profile, without reinstalling.
+#[tauri::command]
+fn add_platform_to_profile(
+    sketch_dir: String,
+    profile: String,
+    id: String,
+    version: String,
+) -> Result<SketchYaml, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.add_platform(&profile, &id, &version).map_err(err_str)
+}
+
 // ---------- new projects ----------
 
 /// Sketchbook root — the default place to create a new project.

@@ -9,6 +9,7 @@
 //! address. This crate shells out to them, parses their output into typed
 //! structs, and manages the project-level `sketch.yaml` file.
 
+pub mod boards;
 pub mod cli;
 pub mod esptool;
 pub mod ghlib;

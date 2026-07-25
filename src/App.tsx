@@ -60,6 +60,13 @@ export default function App() {
   // auto-resume fires from a closure created while the monitor was still on).
   const monitorOnRef = useRef(false);
   monitorOnRef.current = monitorOn;
+  // New-content dots on the bottom tabs: set when lines arrive for a hidden
+  // tab, cleared when that tab is opened. After flashing, the first serial
+  // line inside the auto-open window pulls the Serial Monitor tab forward.
+  const [unseenBuild, setUnseenBuild] = useState(false);
+  const [unseenSerial, setUnseenSerial] = useState(false);
+  const bottomTabRef = useRef<BottomTab>("build");
+  const autoOpenSerialUntilRef = useRef(0);
 
   // ui
   const [sideTab, setSideTab] = useState<SideTab>("files");
@@ -83,6 +90,13 @@ export default function App() {
     setStatus(msg);
     setStatusIsError(isError);
   }, []);
+
+  // Opening a tab marks its content as seen.
+  useEffect(() => {
+    bottomTabRef.current = bottomTab;
+    if (bottomTab === "build") setUnseenBuild(false);
+    if (bottomTab === "serial") setUnseenSerial(false);
+  }, [bottomTab]);
 
   /** Drag the handle above the bottom panel to resize it (dbl-click resets). */
   const startPanelResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -108,8 +122,20 @@ export default function App() {
 
   useEffect(() => {
     const subs = [
-      api.onBuildLine((l) => setBuildLines((prev) => appendCapped(prev, l))),
-      api.onSerialLine((l) => setSerialLines((prev) => appendCapped(prev, l))),
+      api.onBuildLine((l) => {
+        setBuildLines((prev) => appendCapped(prev, l));
+        if (bottomTabRef.current !== "build") setUnseenBuild(true);
+      }),
+      api.onSerialLine((l) => {
+        setSerialLines((prev) => appendCapped(prev, l));
+        if (Date.now() < autoOpenSerialUntilRef.current) {
+          // fresh output from a just-flashed sketch — bring the monitor forward
+          autoOpenSerialUntilRef.current = 0;
+          setBottomTab("serial");
+        } else if (bottomTabRef.current !== "serial") {
+          setUnseenSerial(true);
+        }
+      }),
       api.onSerialClosed(() => setMonitorOn(false)),
     ];
     api
@@ -318,8 +344,12 @@ export default function App() {
       );
       notify(r.success ? `✓ Flashed via ${selectedPort}` : "Upload failed", !r.success);
       // Resume capturing (native-USB boards re-enumerate after flashing,
-      // so give the port a moment to come back).
-      if (r.success) setTimeout(() => startMonitorQuiet(), 1200);
+      // so give the port a moment to come back). If the fresh sketch prints
+      // anything within the window, the Serial Monitor tab opens itself.
+      if (r.success) {
+        autoOpenSerialUntilRef.current = Date.now() + 15000;
+        setTimeout(() => startMonitorQuiet(), 1200);
+      }
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -567,13 +597,13 @@ export default function App() {
             className={bottomTab === "build" ? "tab active" : "tab"}
             onClick={() => setBottomTab("build")}
           >
-            Build Output
+            ⚙ Output{unseenBuild && <span className="tab-dot">●</span>}
           </button>
           <button
             className={bottomTab === "serial" ? "tab active" : "tab"}
             onClick={() => setBottomTab("serial")}
           >
-            Serial Monitor {monitorOn ? "●" : ""}
+            ❯ Serial Monitor{unseenSerial && <span className="tab-dot">●</span>}
           </button>
           <button
             className={bottomTab === "scope" ? "tab active" : "tab"}
