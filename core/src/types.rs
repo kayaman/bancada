@@ -147,3 +147,59 @@ pub struct RunResult {
     pub success: bool,
     pub exit_code: i32,
 }
+
+// ---------- board listall ----------
+//
+// `board listall --json` nests the entire platform — including every one of its
+// boards — inside each board entry. Only the fields below are read; the rest is
+// ignored, and `ArduinoCli::board_listall` flattens the result into
+// [`BoardOption`] before it reaches the frontend.
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BoardListAllResponse {
+    #[serde(default)]
+    pub boards: Vec<BoardListAllEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BoardListAllEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub fqbn: String,
+    #[serde(default)]
+    pub platform: BoardListAllPlatform,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BoardListAllPlatform {
+    #[serde(default)]
+    pub metadata: BoardListAllPlatformMeta,
+    #[serde(default)]
+    pub release: BoardListAllPlatformRelease,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BoardListAllPlatformMeta {
+    #[serde(default)]
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BoardListAllPlatformRelease {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub installed: bool,
+}
+
+/// One selectable board, flattened for the New Project picker.
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardOption {
+    pub fqbn: String,
+    pub name: String,
+    /// e.g. `esp32:esp32`
+    pub platform_id: String,
+    /// e.g. `esp32` — used to group the picker.
+    pub platform_name: String,
+}

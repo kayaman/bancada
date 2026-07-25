@@ -17,6 +17,11 @@ pub struct AppSettings {
     pub last_sketch_dir: Option<String>,
     #[serde(default)]
     pub last_open_file: Option<String>,
+    /// Parent directory the last new project was created in, so the New Project
+    /// form follows where the user actually keeps sketches rather than always
+    /// defaulting to the sketchbook.
+    #[serde(default)]
+    pub last_new_project_parent: Option<String>,
 }
 
 pub fn load(path: &Path) -> AppSettings {
@@ -49,6 +54,7 @@ mod tests {
         let s = AppSettings {
             last_sketch_dir: Some("/home/me/sketch".into()),
             last_open_file: Some("src/x.cpp".into()),
+            last_new_project_parent: Some("/home/me/Projects".into()),
         };
         save(&p, &s).unwrap();
         assert_eq!(load(&p), s);

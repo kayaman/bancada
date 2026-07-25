@@ -162,16 +162,34 @@ fn add_local_library(
         .map_err(err_str)
 }
 
+/// Pin a registry library into a profile.
+///
+/// Delegates to `arduino-cli profile lib add`, which resolves the library's
+/// dependencies — writing the YAML entry by hand did not. Signature unchanged so
+/// the frontend is unaffected; the updated sketch.yaml is read back after.
 #[tauri::command]
-fn add_registry_library_to_profile(
+async fn add_registry_library_to_profile(
+    state: State<'_, AppState>,
     sketch_dir: String,
     profile: String,
     name: String,
     version: String,
 ) -> Result<SketchYaml, String> {
-    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
-    proj.add_registry_library(&profile, &name, &version)
-        .map_err(err_str)
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&sketch_dir);
+        let spec = if version.trim().is_empty() {
+            name
+        } else {
+            format!("{name}@{version}")
+        };
+        cli.profile_lib_add(dir, &profile, &spec).map_err(err_str)?;
+        SketchProject::open(dir)
+            .and_then(|p| p.load_yaml())
+            .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
 }
 
 // ---------- libraries (global sketchbook) ----------
@@ -280,6 +298,104 @@ async fn create_library(
             }
         }
         Ok(out)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+// ---------- new projects ----------
+
+/// Sketchbook root — the default place to create a new project.
+#[tauri::command]
+async fn sketchbook_dir(state: State<'_, AppState>) -> Result<String, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cli.sketchbook_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Every board of every installed platform, for the New Project picker.
+#[tauri::command]
+async fn list_all_boards(
+    state: State<'_, AppState>,
+) -> Result<Vec<bancada_core::types::BoardOption>, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || cli.board_listall().map_err(err_str))
+        .await
+        .map_err(err_str)?
+}
+
+#[derive(serde::Serialize)]
+struct CreatedProject {
+    dir: String,
+    name: String,
+    profile: String,
+    /// Libraries that could not be added; the project is still usable.
+    library_errors: Vec<String>,
+}
+
+/// Create a sketch, give it a profile for `fqbn`, and pin the requested
+/// libraries — each step driven by arduino-cli rather than reimplemented.
+#[tauri::command]
+async fn create_project(
+    state: State<'_, AppState>,
+    parent: String,
+    name: String,
+    fqbn: String,
+    profile: Option<String>,
+    libraries: Vec<String>,
+) -> Result<CreatedProject, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let name = bancada_core::project::validate_project_name(&name).map_err(err_str)?;
+        if fqbn.trim().is_empty() {
+            return Err("choose a board — the profile needs an FQBN".to_string());
+        }
+        let profile = profile
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| bancada_core::project::profile_name_for_fqbn(&fqbn));
+
+        let parent_path = Path::new(&parent);
+        if !parent_path.is_dir() {
+            return Err(format!("{parent} is not a directory"));
+        }
+        let dir = parent_path.join(&name);
+        // Never overwrite: `sketch new --overwrite` is deliberately not used.
+        if dir.symlink_metadata().is_ok() {
+            return Err(format!(
+                "{} already exists — choose another name or location",
+                dir.display()
+            ));
+        }
+
+        cli.sketch_new(&dir).map_err(err_str)?;
+        cli.profile_create(&dir, &profile, &fqbn, true)
+            .map_err(err_str)?;
+
+        // Non-fatal: the project exists and builds without these, so report the
+        // failures rather than abandoning a directory the user can already see.
+        let mut library_errors = Vec::new();
+        for spec in &libraries {
+            let spec = spec.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            if let Err(e) = cli.profile_lib_add(&dir, &profile, spec) {
+                library_errors.push(format!("{spec}: {e}"));
+            }
+        }
+
+        Ok(CreatedProject {
+            dir: dir.to_string_lossy().into_owned(),
+            name,
+            profile,
+            library_errors,
+        })
     })
     .await
     .map_err(err_str)?
@@ -895,6 +1011,9 @@ pub fn run() {
             uninstall_library,
             sketchbook_libraries_dir,
             create_library,
+            sketchbook_dir,
+            list_all_boards,
+            create_project,
             gh_list_versions,
             gh_manifest,
             gh_add_library,

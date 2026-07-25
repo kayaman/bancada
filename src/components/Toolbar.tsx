@@ -8,6 +8,7 @@ interface Props {
   selectedPort: string | null;
   busy: boolean;
   onOpenSketch: () => void;
+  onNewProject: () => void;
   onSelectProfile: (p: string) => void;
   onSelectPort: (p: string) => void;
   onRefreshPorts: () => void;
@@ -24,6 +25,14 @@ export default function Toolbar(props: Props) {
     <div className="toolbar">
       <button className="btn" onClick={props.onOpenSketch}>
         {sketchName ? `📁 ${sketchName}` : "📁 Open Sketch…"}
+      </button>
+
+      <button
+        className="btn"
+        onClick={props.onNewProject}
+        title="Create a sketch with a sketch.yaml profile"
+      >
+        ＋ New Project…
       </button>
 
       <select

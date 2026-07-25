@@ -5,7 +5,7 @@
 //! callback so the UI can show live progress.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 
@@ -69,6 +69,24 @@ impl ArduinoCli {
             what: format!("output of `{} {}`", self.bin, args.join(" ")),
             source,
         })
+    }
+
+    /// Run to completion and return stdout, for commands whose value is the
+    /// side effect rather than parsed output (`sketch new`, `profile create`).
+    /// `--json` is not passed: these print prose, and some reject the flag.
+    fn run_ok(&self, args: &[&str]) -> Result<String> {
+        let out = self
+            .base_command(args)
+            .output()
+            .map_err(|e| self.map_spawn_err(e))?;
+        if !out.status.success() {
+            return Err(Error::ToolFailed {
+                tool: format!("{} {}", self.bin, args.join(" ")),
+                status: out.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// Run to completion, streaming stdout+stderr lines (interleaved) into
@@ -172,6 +190,83 @@ impl ArduinoCli {
     /// Where globally installed (sketchbook) libraries live.
     pub fn sketchbook_libraries_dir(&self) -> Result<PathBuf> {
         Ok(self.sketchbook_dir()?.join("libraries"))
+    }
+
+    /// Every board of every installed platform, flattened for a picker.
+    ///
+    /// `board listall --json` repeats the whole platform (including all of its
+    /// boards) inside each entry, so it is collapsed here rather than handed to
+    /// the frontend as-is.
+    pub fn board_listall(&self) -> Result<Vec<BoardOption>> {
+        let r: BoardListAllResponse = self.run_json(&["board", "listall"])?;
+        let mut out: Vec<BoardOption> = r
+            .boards
+            .into_iter()
+            .filter(|b| !b.fqbn.is_empty() && b.platform.release.installed)
+            .map(|b| BoardOption {
+                fqbn: b.fqbn,
+                name: b.name,
+                platform_id: b.platform.metadata.id,
+                platform_name: b.platform.release.name,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.platform_name
+                .cmp(&b.platform_name)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out.dedup_by(|a, b| a.fqbn == b.fqbn);
+        Ok(out)
+    }
+
+    // ---------- new projects ----------
+
+    /// `arduino-cli sketch new <dir>` — creates the folder and its main `.ino`.
+    ///
+    /// `--overwrite` is deliberately never passed: an existing directory is
+    /// refused by the caller instead.
+    pub fn sketch_new(&self, dir: &Path) -> Result<()> {
+        self.run_ok(&["sketch", "new", &dir.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// `arduino-cli profile create` — writes `sketch.yaml`, resolving the
+    /// platform version from what is installed rather than guessing it.
+    pub fn profile_create(
+        &self,
+        sketch_dir: &Path,
+        profile: &str,
+        fqbn: &str,
+        set_default: bool,
+    ) -> Result<()> {
+        let dir = sketch_dir.to_string_lossy().into_owned();
+        let mut args = vec!["profile", "create", "-m", profile, "-b", fqbn];
+        if set_default {
+            args.push("--set-default");
+        }
+        args.push(&dir);
+        self.run_ok(&args)?;
+        Ok(())
+    }
+
+    /// `arduino-cli profile lib add` — pins a registry library into a profile,
+    /// resolving its dependencies.
+    ///
+    /// `spec` is `Name` or `Name@version`. The sketch goes through
+    /// `--sketch-path`: passed positionally, arduino-cli looks for
+    /// `<cwd>.ino` and fails confusingly.
+    pub fn profile_lib_add(&self, sketch_dir: &Path, profile: &str, spec: &str) -> Result<()> {
+        self.run_ok(&[
+            "profile",
+            "lib",
+            "add",
+            spec,
+            "-m",
+            profile,
+            "--sketch-path",
+            &sketch_dir.to_string_lossy(),
+        ])?;
+        Ok(())
     }
 
     // ---------- libraries ----------

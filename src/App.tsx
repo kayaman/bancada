@@ -11,6 +11,7 @@ import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
+import NewProject from "./components/NewProject";
 
 type SideTab = "files" | "libraries";
 type BottomTab = "build" | "serial" | "scope";
@@ -36,6 +37,8 @@ export default function App() {
   const [files, setFiles] = useState<SketchFile[]>([]);
   const [sketchYaml, setSketchYaml] = useState<SketchYaml | null>(null);
   const [profile, setProfile] = useState<string | null>(null);
+  /** When true the editor area shows the New Project form instead. */
+  const [creatingProject, setCreatingProject] = useState(false);
 
   // editor — unsaved edits live in the buffer map keyed by rel_path; disk is
   // the source of truth for clean files.
@@ -463,6 +466,7 @@ export default function App() {
         selectedPort={selectedPort}
         busy={busy}
         onOpenSketch={openSketch}
+        onNewProject={() => setCreatingProject(true)}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
         onRefreshPorts={refreshPorts}
@@ -505,6 +509,18 @@ export default function App() {
         </aside>
 
         <section className="editor-area">
+          {creatingProject ? (
+            <NewProject
+              detectedFqbn={detectedFqbn() ?? null}
+              onCreated={async (dir) => {
+                setCreatingProject(false);
+                await loadSketch(dir);
+              }}
+              onCancel={() => setCreatingProject(false)}
+              notify={notify}
+            />
+          ) : (
+            <>
           <div className="editor-title">
             {openFile ?? "no file open"}
             {openFile && dirtyFiles.has(openFile) ? " ● unsaved (Ctrl+S)" : ""}
@@ -523,6 +539,8 @@ export default function App() {
             }}
             editable={!!openFile}
           />
+            </>
+          )}
         </section>
       </div>
 

@@ -63,6 +63,13 @@ npm run tauri build
 
 ## What works in this scaffold
 
+- **New Project** — name it, pick a board from the installed platforms (the
+  attached board is preselected), optionally tick registry libraries, and get a
+  sketch with a `sketch.yaml` profile that compiles immediately. Driven entirely
+  by `arduino-cli sketch new` + `profile create` + `profile lib add`, so the
+  platform version is resolved from what is installed and library dependencies
+  are resolved by the engine. The location defaults to the sketchbook and then
+  remembers wherever you last created one
 - Open a sketch folder → file tree, main `.ino` auto-opens in the editor
   (CodeMirror 6, C++ mode, Ctrl+S to save)
 - Board/port detection with live rescan (`arduino-cli board list`)

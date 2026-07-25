@@ -155,6 +155,23 @@ export interface ChipInfo {
 export interface AppSettings {
   last_sketch_dir?: string | null;
   last_open_file?: string | null;
+  last_new_project_parent?: string | null;
+}
+
+/** One selectable board, flattened from `board listall`. */
+export interface BoardOption {
+  fqbn: string;
+  name: string;
+  platform_id: string;
+  platform_name: string;
+}
+
+export interface CreatedProject {
+  dir: string;
+  name: string;
+  profile: string;
+  /** Libraries that could not be added; the project is still usable. */
+  library_errors: string[];
 }
 
 export interface ScopeCaps {
@@ -244,6 +261,31 @@ export const createLibrary = (
     spec,
     sketchDir: sketchDir ?? null,
     profile: profile ?? null,
+  });
+
+// ---------- new projects ----------
+
+/** Sketchbook root — the default place to create a new project. */
+export const sketchbookDir = () => invoke<string>("sketchbook_dir");
+/** Every board of every installed platform, grouped-ready for a picker. */
+export const listAllBoards = () => invoke<BoardOption[]>("list_all_boards");
+/**
+ * Create a sketch with a profile for `fqbn` and the given registry libraries
+ * pinned. `libraries` entries are `Name` or `Name@version`.
+ */
+export const createProject = (
+  parent: string,
+  name: string,
+  fqbn: string,
+  profile: string | null,
+  libraries: string[],
+) =>
+  invoke<CreatedProject>("create_project", {
+    parent,
+    name,
+    fqbn,
+    profile: profile ?? null,
+    libraries,
   });
 
 // ---------- remote (git) libraries ----------

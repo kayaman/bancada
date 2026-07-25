@@ -171,26 +171,9 @@ impl SketchProject {
         Ok(y)
     }
 
-    /// Add a registry library pin like "ArduinoJson (7.4.2)" to a profile.
-    pub fn add_registry_library(
-        &self,
-        profile_name: &str,
-        name: &str,
-        version: &str,
-    ) -> Result<SketchYaml> {
-        let mut y = self.load_yaml()?;
-        let profile = y
-            .profiles
-            .get_mut(profile_name)
-            .ok_or_else(|| Error::Other(format!("no profile named `{profile_name}`")))?;
-        let entry = format!("{name} ({version})");
-        let dep = LibraryDep::Registry(entry);
-        if !profile.libraries.contains(&dep) {
-            profile.libraries.push(dep);
-        }
-        self.save_yaml(&y)?;
-        Ok(y)
-    }
+    // Registry pins are written by `arduino-cli profile lib add` rather than by
+    // hand, so that dependencies are resolved too. Local `dir:` entries stay
+    // here: `profile lib add` has no equivalent for them.
 
     /// All local `dir:` library paths of a profile, resolved to absolute paths.
     pub fn local_library_paths(&self, profile_name: &str) -> Result<Vec<PathBuf>> {

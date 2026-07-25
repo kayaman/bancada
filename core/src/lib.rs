@@ -13,6 +13,7 @@ pub mod cli;
 pub mod esptool;
 pub mod ghlib;
 pub mod library;
+pub mod project;
 pub mod scope;
 pub mod settings;
 pub mod sketch;

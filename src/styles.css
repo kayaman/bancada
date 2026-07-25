@@ -384,6 +384,97 @@ body {
   flex-wrap: wrap;
 }
 
+/* ---------- new project ---------- */
+
+/* Replaces the editor area, so it gets room a 280px sidebar cannot give. */
+.new-project {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.np-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.np-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  max-width: 620px;
+}
+
+.np-body .field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.np-body .input,
+.np-body .select {
+  width: 100%;
+  max-width: none;
+}
+
+.np-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.np-row .input {
+  flex: 1;
+}
+
+.np-libs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.np-lib-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.np-lib {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.np-lib:hover {
+  background: var(--bg-hover);
+}
+
+.np-lib .lib-sentence {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* pinned remote libraries, below the add form */
 .lib-pinned {
   display: flex;
