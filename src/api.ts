@@ -81,6 +81,41 @@ export const LIBRARY_CATEGORIES = [
   "Other",
 ] as const;
 
+/** A tag from `git ls-remote`, resolved to the commit it points at. */
+export interface RemoteTag {
+  name: string;
+  commit: string;
+}
+
+/** A pinned remote library recorded in bancada.yaml. */
+export interface ManifestEntry {
+  alias: string;
+  ref: string;
+  commit: string;
+  vendor: string;
+}
+
+export interface Manifest {
+  version: number;
+  libraries: ManifestEntry[];
+}
+
+export interface GhAdded {
+  alias: string;
+  ref: string;
+  commit: string;
+  vendor: string;
+  gitignored: boolean;
+  yaml?: SketchYaml | null;
+  profile_error?: string | null;
+}
+
+export interface GhRestored {
+  restored: string[];
+  errors: string[];
+  yaml?: SketchYaml | null;
+}
+
 export interface SketchFile {
   rel_path: string;
   is_dir: boolean;
@@ -210,6 +245,30 @@ export const createLibrary = (
     sketchDir: sketchDir ?? null,
     profile: profile ?? null,
   });
+
+// ---------- remote (git) libraries ----------
+
+/** Tags for an alias, newest first, the library's own namespace first. */
+export const ghListVersions = (alias: string) =>
+  invoke<RemoteTag[]>("gh_list_versions", { alias });
+export const ghManifest = (sketchDir: string) =>
+  invoke<Manifest>("gh_manifest", { sketchDir });
+/** Fetch, vendor, pin into the profile and record in bancada.yaml. */
+export const ghAddLibrary = (
+  sketchDir: string,
+  profile: string | null,
+  alias: string,
+  ref: string,
+) =>
+  invoke<GhAdded>("gh_add_library", {
+    sketchDir,
+    profile: profile ?? null,
+    alias,
+    gitRef: ref,
+  });
+/** Re-materialise every manifest entry at its recorded commit. */
+export const ghRestore = (sketchDir: string, profile: string | null) =>
+  invoke<GhRestored>("gh_restore", { sketchDir, profile: profile ?? null });
 
 export const compileSketch = (
   sketchDir: string,

@@ -11,6 +11,7 @@
 
 pub mod cli;
 pub mod esptool;
+pub mod ghlib;
 pub mod library;
 pub mod scope;
 pub mod settings;

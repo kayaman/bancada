@@ -384,6 +384,27 @@ body {
   flex-wrap: wrap;
 }
 
+/* pinned remote libraries, below the add form */
+.lib-pinned {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.lib-pinned .panel-tabs {
+  padding: 0;
+  border: none;
+  background: none;
+  min-height: 24px;
+}
+
+.lib-pinned .lib-card {
+  margin-bottom: 0;
+}
+
 .lib-card {
   border: 1px solid var(--border);
   border-radius: 8px;

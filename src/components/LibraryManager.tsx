@@ -3,6 +3,10 @@ import {
   addLocalLibrary,
   addRegistryLibraryToProfile,
   createLibrary,
+  ghAddLibrary,
+  ghListVersions,
+  ghManifest,
+  ghRestore,
   installLibrary,
   listInstalledLibraries,
   searchLibraries,
@@ -12,6 +16,8 @@ import {
   type IndexedLibrary,
   type InstalledLibrary,
   type LibrarySpec,
+  type ManifestEntry,
+  type RemoteTag,
   type SketchYaml,
 } from "../api";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -44,7 +50,9 @@ export default function LibraryManager({
   onYamlChanged,
   notify,
 }: Props) {
-  const [tab, setTab] = useState<"installed" | "search" | "new">("installed");
+  const [tab, setTab] = useState<"installed" | "search" | "new" | "github">(
+    "installed",
+  );
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<IndexedLibrary[]>([]);
   const [installed, setInstalled] = useState<InstalledLibrary[]>([]);
@@ -52,6 +60,10 @@ export default function LibraryManager({
   const [libsDir, setLibsDir] = useState<string | null>(null);
   const [form, setForm] = useState<LibrarySpec>(EMPTY_FORM);
   const [newWarnings, setNewWarnings] = useState<string[]>([]);
+  const [alias, setAlias] = useState("");
+  const [versions, setVersions] = useState<RemoteTag[] | null>(null);
+  const [chosenRef, setChosenRef] = useState("");
+  const [pinned, setPinned] = useState<ManifestEntry[]>([]);
 
   const refreshInstalled = () =>
     listInstalledLibraries().then(setInstalled).catch((e) => notify(String(e), true));
@@ -136,6 +148,93 @@ export default function LibraryManager({
 
   const patchForm = (p: Partial<LibrarySpec>) => setForm((f) => ({ ...f, ...p }));
 
+  // ---------- remote (git) libraries ----------
+
+  const refreshPinned = () => {
+    if (!sketchDir) {
+      setPinned([]);
+      return;
+    }
+    ghManifest(sketchDir)
+      .then((m) => setPinned(m.libraries))
+      .catch((e) => notify(String(e), true));
+  };
+
+  useEffect(() => {
+    if (tab !== "github") return;
+    refreshPinned();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, sketchDir]);
+
+  const findVersions = async () => {
+    if (!alias.trim()) return;
+    setWorking(true);
+    setVersions(null);
+    try {
+      const tags = await ghListVersions(alias.trim());
+      setVersions(tags);
+      // Newest tag in the library's own namespace comes first.
+      setChosenRef(tags[0]?.name ?? "");
+      notify(
+        tags.length ? `${tags.length} version(s) found` : "No tags in that repo",
+        tags.length === 0,
+      );
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const addRemote = async () => {
+    if (!sketchDir) {
+      notify("Open a sketch first — the library is vendored into it", true);
+      return;
+    }
+    if (!alias.trim() || !chosenRef) return;
+    setWorking(true);
+    try {
+      const res = await ghAddLibrary(sketchDir, profile, alias.trim(), chosenRef);
+      if (res.yaml) onYamlChanged(res.yaml);
+      const short = res.commit.slice(0, 7);
+      notify(
+        res.profile_error
+          ? `Vendored ${res.alias} at ${res.ref} (${short}), but the profile was not updated: ${res.profile_error}`
+          : `✓ Pinned ${res.alias} at ${res.ref} (${short})`,
+        Boolean(res.profile_error),
+      );
+      setVersions(null);
+      setAlias("");
+      setChosenRef("");
+      refreshPinned();
+      await refreshInstalled();
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const restoreRemote = async () => {
+    if (!sketchDir) return;
+    setWorking(true);
+    try {
+      const res = await ghRestore(sketchDir, profile);
+      if (res.yaml) onYamlChanged(res.yaml);
+      notify(
+        res.errors.length
+          ? `Restored ${res.restored.length}, ${res.errors.length} failed: ${res.errors.join("; ")}`
+          : `✓ Restored ${res.restored.length} pinned librar${res.restored.length === 1 ? "y" : "ies"}`,
+        res.errors.length > 0,
+      );
+      refreshPinned();
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const doCreate = async () => {
     const name = form.name.trim();
     if (!name) {
@@ -181,6 +280,13 @@ export default function LibraryManager({
           onClick={() => setTab("search")}
         >
           Registry
+        </button>
+        <button
+          className={tab === "github" ? "tab active" : "tab"}
+          onClick={() => setTab("github")}
+          title="Reference a library from a git repository, pinned to a version"
+        >
+          GitHub
         </button>
         <button
           className={tab === "new" ? "tab active" : "tab"}
@@ -264,6 +370,105 @@ export default function LibraryManager({
           {installed.length === 0 && (
             <div className="empty-hint">No libraries installed yet.</div>
           )}
+        </div>
+      )}
+
+      {tab === "github" && (
+        <div className="lib-new-form">
+          <label className="field">
+            Alias
+            <input
+              className="input mono"
+              placeholder="@owner/repo/libraries/LibName"
+              value={alias}
+              onChange={(e) => setAlias(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && findVersions()}
+            />
+          </label>
+          <div className="lib-new-actions">
+            <button
+              className="btn small"
+              onClick={findVersions}
+              disabled={working || !alias.trim()}
+            >
+              Find versions
+            </button>
+            <span className="scope-dim">via git ls-remote — no token needed</span>
+          </div>
+
+          {versions !== null && versions.length > 0 && (
+            <>
+              <label className="field">
+                Version
+                <select
+                  className="select small"
+                  value={chosenRef}
+                  onChange={(e) => setChosenRef(e.target.value)}
+                >
+                  {versions.map((t) => (
+                    <option key={t.name} value={t.name}>
+                      {t.name} · {t.commit.slice(0, 7)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="lib-new-actions">
+                <button
+                  className="btn small primary"
+                  onClick={addRemote}
+                  disabled={working || !chosenRef || !sketchDir}
+                >
+                  Add pinned
+                </button>
+              </div>
+            </>
+          )}
+
+          {!sketchDir && (
+            <div className="empty-hint">
+              Open a sketch first — the library is vendored into it and pinned in
+              its <code>bancada.yaml</code>.
+            </div>
+          )}
+          {sketchDir && !profile && (
+            <div className="empty-hint">
+              No active profile — the library will be vendored and recorded, but
+              you will need to add it to a profile for the build to see it.
+            </div>
+          )}
+
+          <div className="lib-pinned">
+            <div className="panel-tabs">
+              <span className="scope-dim">Pinned in this sketch</span>
+              <div className="spacer" />
+              <button
+                className="btn small"
+                onClick={restoreRemote}
+                disabled={working || !sketchDir || pinned.length === 0}
+                title="Re-fetch every pinned library at its recorded commit"
+              >
+                Restore
+              </button>
+            </div>
+            {pinned.map((e) => (
+              <div key={e.alias} className="lib-card">
+                <div className="lib-head">
+                  <span className="lib-name">{e.alias}</span>
+                  <span className="lib-version">{e.ref}</span>
+                </div>
+                <div className="lib-dest">
+                  {e.vendor} · {e.commit.slice(0, 7)}
+                </div>
+              </div>
+            ))}
+            {pinned.length === 0 && (
+              <div className="empty-hint">
+                Nothing pinned yet. Vendored libraries live in{" "}
+                <code>.bancada/libs</code> and are gitignored — the pins in{" "}
+                <code>bancada.yaml</code> are what you commit.
+              </div>
+            )}
+          </div>
         </div>
       )}
 

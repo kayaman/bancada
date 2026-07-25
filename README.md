@@ -41,6 +41,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # The engines Bancada drives
 curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
 pip install --user esptool
+# git (>= 2.25 for sparse checkout) — used to fetch pinned libraries from a repo
+sudo zypper install git
 
 # Serial port access
 sudo usermod -aG dialout $USER   # check group with: ls -l /dev/ttyACM0
@@ -74,6 +76,15 @@ npm run tauri build
   - **“+ Local…”** adds a local/proprietary library folder as a `dir:` entry
     in the active profile — per-project local libraries, which the official
     IDE cannot do
+  - **“GitHub”** references a library from a git repo by alias, pinned to a
+    version: `@kayaman/Arduino/libraries/HomeNode`. Versions come from
+    `git ls-remote --tags`, so no API token is needed and any git host works.
+    The chosen tag is fetched with a shallow sparse checkout, vendored into
+    `.bancada/libs/<Name>` (a copy — no nested `.git`), pinned into the active
+    profile as a relative `dir:` entry, and recorded in `bancada.yaml` with
+    **both the tag and the commit it resolved to**, because a tag can move and a
+    commit cannot. `.bancada/` is gitignored and `bancada.yaml` is committed, so
+    a fresh clone carries the pins and **Restore** re-fetches the bytes
   - **“New”** scaffolds a complete library in the sketchbook —
     `library.properties`, `src/<Name>.{h,cpp}` with a stub class, `keywords.txt`
     and an example that compiles as-is — then pins it into the active profile

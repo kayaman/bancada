@@ -23,6 +23,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bancada_core::cli::ArduinoCli;
+use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
 use bancada_core::sketch::{PathStyle, SketchProject, SketchYaml};
 use bancada_core::types::{DetectedPort, IndexedLibrary, InstalledLibrary, RunResult};
@@ -276,6 +277,144 @@ async fn create_library(
             }) {
                 Ok(y) => out.yaml = Some(y),
                 Err(e) => out.profile_error = Some(e.to_string()),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+// ---------- remote (git) libraries ----------
+
+/// Versions available for an alias, newest first, the library's own tag
+/// namespace before anything else.
+#[tauri::command]
+async fn gh_list_versions(alias: String) -> Result<Vec<ghlib::RemoteTag>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let a = ghlib::parse_alias(&alias).map_err(err_str)?;
+        ghlib::list_remote_tags(&a.url(), &a.name).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+fn gh_manifest(sketch_dir: String) -> Result<ghlib::Manifest, String> {
+    ghlib::Manifest::load(Path::new(&sketch_dir)).map_err(err_str)
+}
+
+#[derive(serde::Serialize)]
+struct GhAdded {
+    alias: String,
+    #[serde(rename = "ref")]
+    git_ref: String,
+    commit: String,
+    vendor: String,
+    gitignored: bool,
+    /// Rewritten sketch.yaml, when the `dir:` entry was added.
+    yaml: Option<SketchYaml>,
+    /// Set when the library was vendored but pinning it to the profile failed.
+    profile_error: Option<String>,
+}
+
+/// Fetch a library from a git repository at `git_ref`, vendor it into the
+/// sketch, pin it into the active profile and record it in `bancada.yaml`.
+#[tauri::command]
+async fn gh_add_library(
+    sketch_dir: String,
+    profile: Option<String>,
+    alias: String,
+    git_ref: String,
+) -> Result<GhAdded, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let a = ghlib::parse_alias(&alias).map_err(err_str)?;
+        let sketch = Path::new(&sketch_dir);
+        let vendor_rel = a.vendor_rel();
+        let dest = sketch.join(&vendor_rel);
+
+        let commit = ghlib::fetch_subtree(&a, &git_ref, &dest, None).map_err(err_str)?;
+        let gitignored = ghlib::ensure_gitignored(sketch).unwrap_or(false);
+
+        let mut manifest = ghlib::Manifest::load(sketch).map_err(err_str)?;
+        manifest.upsert(ghlib::ManifestEntry {
+            alias: a.canonical(),
+            git_ref: git_ref.clone(),
+            commit: commit.clone(),
+            vendor: vendor_rel.clone(),
+        });
+        manifest.save(sketch).map_err(err_str)?;
+
+        let mut out = GhAdded {
+            alias: a.canonical(),
+            git_ref,
+            commit,
+            vendor: vendor_rel,
+            gitignored,
+            yaml: None,
+            profile_error: None,
+        };
+
+        // Non-fatal, as in create_library: the library is on disk and recorded
+        // either way, so failing the whole call would misreport what happened.
+        if let Some(prof) = profile {
+            match SketchProject::open(sketch)
+                .and_then(|p| p.add_local_library_with(&prof, &dest, PathStyle::Relative))
+            {
+                Ok(y) => out.yaml = Some(y),
+                Err(e) => out.profile_error = Some(e.to_string()),
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[derive(serde::Serialize)]
+struct GhRestored {
+    restored: Vec<String>,
+    errors: Vec<String>,
+    yaml: Option<SketchYaml>,
+}
+
+/// Re-materialise every manifest entry at its recorded commit. This is what
+/// makes a fresh clone buildable, since the vendored bytes are gitignored.
+#[tauri::command]
+async fn gh_restore(
+    sketch_dir: String,
+    profile: Option<String>,
+) -> Result<GhRestored, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sketch = Path::new(&sketch_dir);
+        let manifest = ghlib::Manifest::load(sketch).map_err(err_str)?;
+        let mut out = GhRestored {
+            restored: Vec::new(),
+            errors: Vec::new(),
+            yaml: None,
+        };
+
+        for entry in &manifest.libraries {
+            // One bad entry must not stop the rest from being restored.
+            let result = ghlib::parse_alias(&entry.alias).and_then(|a| {
+                let dest = sketch.join(&entry.vendor);
+                ghlib::fetch_subtree(&a, &entry.git_ref, &dest, Some(&entry.commit))
+                    .map(|_| (a, dest))
+            });
+            match result {
+                Ok((_, dest)) => {
+                    out.restored.push(entry.alias.clone());
+                    if let Some(prof) = profile.as_deref() {
+                        if let Ok(p) = SketchProject::open(sketch) {
+                            if let Ok(y) =
+                                p.add_local_library_with(prof, &dest, PathStyle::Relative)
+                            {
+                                out.yaml = Some(y);
+                            }
+                        }
+                    }
+                }
+                Err(e) => out.errors.push(format!("{}: {e}", entry.alias)),
             }
         }
         Ok(out)
@@ -756,6 +895,10 @@ pub fn run() {
             uninstall_library,
             sketchbook_libraries_dir,
             create_library,
+            gh_list_versions,
+            gh_manifest,
+            gh_add_library,
+            gh_restore,
             compile_sketch,
             upload_sketch,
             start_monitor,
