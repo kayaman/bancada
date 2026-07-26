@@ -421,15 +421,22 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setBusy(true);
-    notify(`Uploading to ${selectedPort}…`);
+    notify(`Building and flashing to ${selectedPort}…`);
     try {
+      // Compiles as part of the flash — a sketch that fails to build stops
+      // here with its compiler error and never reaches the board.
       const r = await api.uploadSketch(
         sketchDir,
         selectedPort,
         target.profile,
         target.fqbn,
       );
-      notify(r.success ? `✓ Flashed via ${selectedPort}` : "Upload failed", !r.success);
+      notify(
+        r.success
+          ? `✓ Flashed via ${selectedPort}`
+          : "Build or upload failed — see the Build console",
+        !r.success,
+      );
       // Resume capturing (native-USB boards re-enumerate after flashing,
       // so give the port a moment to come back). If the fresh sketch prints
       // anything within the window, the Serial Monitor tab opens itself.

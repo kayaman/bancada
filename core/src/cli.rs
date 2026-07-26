@@ -342,6 +342,9 @@ impl ArduinoCli {
         self.run_streaming(&as_str_slice(&args), on_line)
     }
 
+    /// Build the sketch and flash the result to `port`. The build is not
+    /// optional: flashing without one sends whatever the build cache holds,
+    /// which after a failed compile is stale or absent. See `upload_args`.
     pub fn upload(
         &self,
         sketch_dir: &str,
@@ -409,14 +412,23 @@ fn compile_args(
     args
 }
 
-/// `upload -p <port> [--profile P | --fqbn F] <sketch>`
+/// `compile -u -p <port> [--profile P | --fqbn F] <sketch>`
+///
+/// Deliberately `compile -u` and not `upload`: arduino-cli's `upload` flashes
+/// the build cache without building it ("This does NOT compile the sketch prior
+/// to upload"), so a sketch that failed to compile flashes the *previous*
+/// binary — or, on a cache that never held one, makes esptool die on a missing
+/// `<sketch>.ino.partitions.bin`. Folding the build in means a broken sketch
+/// stops with its own compiler error and the board is left untouched.
+///
+/// Target selection follows `compile_args`: a profile wins over an FQBN.
 fn upload_args(
     sketch_dir: &str,
     profile: Option<&str>,
     fqbn: Option<&str>,
     port: &str,
 ) -> Vec<String> {
-    let mut args = owned(&["upload", "-p", port]);
+    let mut args = owned(&["compile", "-u", "-p", port]);
     if let Some(p) = profile {
         args.extend(owned(&["--profile", p]));
     } else if let Some(f) = fqbn {
@@ -530,7 +542,7 @@ mod tests {
         let args = upload_args("/s", Some("p"), None, "/dev/ttyUSB0");
         assert_eq!(
             args,
-            ["upload", "-p", "/dev/ttyUSB0", "--profile", "p", "/s"]
+            ["compile", "-u", "-p", "/dev/ttyUSB0", "--profile", "p", "/s"]
         );
         assert_eq!(args.last().unwrap(), "/s");
     }
@@ -538,7 +550,24 @@ mod tests {
     #[test]
     fn upload_falls_back_to_fqbn_like_compile() {
         let args = upload_args("/s", None, Some("a:b:c"), "/dev/x");
-        assert_eq!(args, ["upload", "-p", "/dev/x", "--fqbn", "a:b:c", "/s"]);
+        assert_eq!(
+            args,
+            ["compile", "-u", "-p", "/dev/x", "--fqbn", "a:b:c", "/s"]
+        );
+    }
+
+    /// Regression: `arduino-cli upload` does not build. Flashing through a bare
+    /// `upload` sends whatever the build cache happens to hold — and when the
+    /// last compile failed it holds nothing, so esptool reports a missing
+    /// `<sketch>.ino.partitions.bin` instead of the compile error that caused
+    /// it. `compile -u` makes arduino-cli refuse to flash a build it did not
+    /// just produce.
+    #[test]
+    fn upload_builds_first_so_a_failed_compile_never_reaches_the_board() {
+        let args = upload_args("/s", Some("p"), None, "/dev/x");
+        assert_eq!(args.first().unwrap(), "compile");
+        assert!(args.iter().any(|a| a == "-u"));
+        assert!(!args.iter().any(|a| a == "upload"));
     }
 
     #[test]
