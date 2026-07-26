@@ -84,7 +84,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bancada"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bancada-core",
  "base64 0.22.1",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "bancada-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.22.1",
  "rumqttc",
