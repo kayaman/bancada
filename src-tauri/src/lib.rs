@@ -15,6 +15,14 @@
 //! has a single owner at a time — monitor child process or scope session —
 //! and acquiring it for one evicts the other.
 //!
+//! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
+//! `verify` tool all drive the same arduino-cli build cache, so they share
+//! one `build_gate: Mutex<()>` in `AppState`. It is taken with `try_lock`,
+//! never blocking — a contended build fails fast with "build already in
+//! progress" instead of queueing behind a multi-minute platform build.
+//! Before the gate, the only mutual exclusion was the frontend's `busy`
+//! flag, which agent-initiated builds bypass entirely.
+//!
 //! MQTT commands (Observability panel): `mqtt_connect` streams JSON envelopes
 //! over a `tauri::ipc::Channel` — `{"ev":"stage"|"msg"|"closed"}` per the
 //! `bancada_core::mqtt` contract — plus `mqtt_publish`, `mqtt_subscribe`,
@@ -64,6 +72,30 @@ struct AppState {
     serial: Mutex<Option<SerialOwner>>,
     /// MQTT broker session — a sibling of `serial`, never coupled to it.
     mqtt: Mutex<Option<MqttSession>>,
+    /// Serialises every arduino-cli build in the process — user Verify,
+    /// user Upload, and the agent's MCP `verify` tool all share one build
+    /// cache, and nothing but the frontend's `busy` flag used to keep them
+    /// apart (which agent-initiated builds bypass entirely).
+    build_gate: Arc<Mutex<()>>,
+}
+
+/// What every build path reports when the gate is already held.
+const BUILD_BUSY: &str = "build already in progress";
+
+/// Take the build gate without waiting. `Err(BUILD_BUSY)` means another
+/// build already holds it — callers report that rather than queueing, so a
+/// second Verify click (or an agent `verify` during a user build) fails
+/// fast instead of silently stacking up behind a multi-minute platform
+/// build.
+fn try_build_gate(gate: &Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    match gate.try_lock() {
+        Ok(guard) => Ok(guard),
+        // A panicking build poisons the gate. What it guards is `()` — there
+        // is no state to have corrupted — so recover instead of wedging
+        // every future build for the lifetime of the process.
+        Err(std::sync::TryLockError::Poisoned(e)) => Ok(e.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err(BUILD_BUSY.to_string()),
+    }
 }
 
 /// Convert any core error into the string Tauri sends to JS.
@@ -711,7 +743,9 @@ async fn compile_sketch(
     fqbn: Option<String>,
 ) -> Result<RunResult, String> {
     let cli = state.cli.clone();
+    let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_build_gate(&gate)?;
         let result = cli
             .compile(
                 &sketch_dir,
@@ -739,7 +773,9 @@ async fn upload_sketch(
     port: String,
 ) -> Result<RunResult, String> {
     let cli = state.cli.clone();
+    let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_build_gate(&gate)?;
         let result = cli
             .upload(
                 &sketch_dir,
@@ -1592,6 +1628,7 @@ pub fn run() {
                 cli: ArduinoCli::default(),
                 serial: Mutex::new(None),
                 mqtt: Mutex::new(None),
+                build_gate: Arc::new(Mutex::new(())),
             });
             // Hotplug watcher: enumeration (does the port exist?) is orders of
             // magnitude cheaper than identification (arduino-cli), so poll the
