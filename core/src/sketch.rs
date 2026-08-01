@@ -122,6 +122,37 @@ impl SketchProject {
         Ok(())
     }
 
+    /// Create `profile_name` pointing at `fqbn`, creating sketch.yaml when
+    /// absent. Never overwrites: a profile that already exists is an error.
+    /// The sketch's first profile also becomes `default_profile`, so gaining
+    /// a profile gives Verify/Flash a working default immediately.
+    pub fn init_profile(&self, profile_name: &str, fqbn: &str) -> Result<SketchYaml> {
+        let name = profile_name.trim();
+        if name.is_empty() {
+            return Err(Error::Other("a profile needs a name".into()));
+        }
+        let fqbn = fqbn.trim();
+        if fqbn.is_empty() {
+            return Err(Error::Other("a profile needs a board (FQBN)".into()));
+        }
+        let mut y = self.load_yaml()?;
+        if y.profiles.contains_key(name) {
+            return Err(Error::Other(format!("profile `{name}` already exists")));
+        }
+        y.profiles.insert(
+            name.to_string(),
+            Profile {
+                fqbn: fqbn.to_string(),
+                ..Default::default()
+            },
+        );
+        if y.default_profile.is_none() {
+            y.default_profile = Some(name.to_string());
+        }
+        self.save_yaml(&y)?;
+        Ok(y)
+    }
+
     /// Add (or no-op if present) a local library `dir:` entry to a profile.
     /// The stored path is made relative to the sketch dir when possible, so
     /// the project stays relocatable.
@@ -619,5 +650,61 @@ profiles:
             .unwrap_err()
             .to_string();
         assert!(err.contains("no profile named `nope`"), "got: {err}");
+    }
+
+    // ---------- init_profile ----------
+
+    #[test]
+    fn init_profile_creates_yaml_and_sets_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+
+        let y = proj.init_profile("weather", "esp32:esp32:esp32s3").unwrap();
+
+        assert!(tmp.path().join("sketch.yaml").is_file());
+        assert_eq!(y.profiles["weather"].fqbn, "esp32:esp32:esp32s3");
+        assert_eq!(y.default_profile.as_deref(), Some("weather"));
+        // And it round-trips from disk, not just in memory.
+        assert_eq!(proj.load_yaml().unwrap(), y);
+    }
+
+    #[test]
+    fn init_profile_rejects_a_duplicate_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.init_profile("weather", "esp32:esp32:esp32s3").unwrap();
+
+        let err = proj.init_profile("weather", "esp32:esp32:esp32c6");
+        assert!(err.is_err(), "a second `weather` must not overwrite the first");
+        // The original is untouched.
+        assert_eq!(
+            proj.load_yaml().unwrap().profiles["weather"].fqbn,
+            "esp32:esp32:esp32s3"
+        );
+    }
+
+    #[test]
+    fn init_profile_keeps_existing_default_and_profiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("sketch.yaml"),
+            "default_profile: base\nprofiles:\n  base:\n    fqbn: esp32:esp32:esp32\n",
+        )
+        .unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+
+        let y = proj.init_profile("c6", "esp32:esp32:esp32c6").unwrap();
+
+        assert_eq!(y.default_profile.as_deref(), Some("base"), "default must not move");
+        assert_eq!(y.profiles["base"].fqbn, "esp32:esp32:esp32");
+        assert_eq!(y.profiles["c6"].fqbn, "esp32:esp32:esp32c6");
+    }
+
+    #[test]
+    fn init_profile_rejects_blank_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        assert!(proj.init_profile("  ", "esp32:esp32:esp32").is_err());
+        assert!(proj.init_profile("weather", "  ").is_err());
     }
 }
