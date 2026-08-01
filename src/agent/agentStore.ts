@@ -53,8 +53,12 @@ export class AgentStore {
   /**
    * Index into `msgs` of the assistant message currently accumulating text,
    * or `undefined` if the next delta/assistant text should start a fresh
-   * one. Reset on a turn boundary: a `result` event or a new user message
-   * (`userSent`).
+   * one. Reset on any boundary between model inferences: a `result` event,
+   * a new user message (`userSent`), or a `tool_use` content block (the CLI
+   * emits a separate non-delta `assistant` line per inference, and a
+   * tool-using turn has one inference before the call and another after the
+   * tool_result — without the tool_use reset the second inference's text
+   * would overwrite the first bubble instead of following it).
    */
   private currentAssistantIdx?: number;
 
@@ -163,7 +167,8 @@ export class AgentStore {
 
     const textBlocks = content.filter(isContentBlockText);
     if (textBlocks.length > 0) {
-      // Authoritative: replaces (not appends to) whatever deltas built up.
+      // Authoritative: replaces (not appends to) whatever deltas built up
+      // *for this same inference*.
       this.setAssistantText(textBlocks.map((b) => b.text).join(""));
       changed = true;
     }
@@ -179,6 +184,14 @@ export class AgentStore {
           status: "running",
         });
         changed = true;
+        // A tool call is itself a turn boundary for assistant *text*: the
+        // CLI emits one non-delta `assistant` line per model inference, and
+        // a tool-using turn has one inference before the call and another
+        // after the tool_result comes back. Without this reset, the next
+        // inference's "authoritative" text would silently overwrite (not
+        // follow) the pre-call bubble in place — see the task-6 fix report
+        // for the exact repro this pins.
+        this.currentAssistantIdx = undefined;
       }
     }
 

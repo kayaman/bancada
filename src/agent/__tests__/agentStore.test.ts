@@ -83,6 +83,100 @@ describe("AgentStore: assistant text dedupe", () => {
   });
 });
 
+describe("AgentStore: a tool call mid-turn is itself a text-bubble boundary", () => {
+  // Regression coverage for the task-6 review finding: the CLI emits one
+  // non-delta `assistant` line per model inference, and a tool-using turn
+  // has (at least) two inferences — before the call and after the
+  // tool_result — separated by a `result` in neither case (the turn is
+  // still going). Without treating `tool_use` itself as a boundary, the
+  // second inference's "authoritative" text silently overwrote the first
+  // bubble in place instead of following it after the tool card.
+
+  it("exact repro: pre-call and post-call text survive as two bubbles around the tool card", () => {
+    const s = new AgentStore();
+    s.push(assistantText("A: about to read the file"));
+    s.push(toolUse("t1", "Read", { file_path: "/s/Blink.ino" }));
+    s.push(toolResult("t1", "file contents", false));
+    s.push(assistantText("B: here is what I found"));
+
+    expect(s.snapshot().messages).toEqual([
+      { kind: "assistant", text: "A: about to read the file" },
+      {
+        kind: "tool",
+        id: "t1",
+        name: "Read",
+        input: { file_path: "/s/Blink.ino" },
+        status: "ok",
+        result: "file contents",
+      },
+      { kind: "assistant", text: "B: here is what I found" },
+    ]);
+  });
+
+  it("deltas either side of a tool call, incl. text+tool_use on the same authoritative line: no loss, no dup", () => {
+    const s = new AgentStore();
+    // Pre-call: deltas build up, then the authoritative line for that same
+    // inference carries BOTH the final text and the tool_use in one event
+    // (a realistic shape: "I'll read the file: <tool_use>").
+    s.push(streamDelta("A: about"));
+    s.push(
+      assistantTextAndToolUse("A: about to read the file", "t1", "Read", {
+        file_path: "/s/Blink.ino",
+      }),
+    );
+    s.push(toolResult("t1", "file contents", false));
+    // Post-call: a fresh delta run, then its own authoritative line.
+    s.push(streamDelta("B: here"));
+    s.push(assistantText("B: here is what I found"));
+
+    expect(s.snapshot().messages).toEqual([
+      { kind: "assistant", text: "A: about to read the file" },
+      {
+        kind: "tool",
+        id: "t1",
+        name: "Read",
+        input: { file_path: "/s/Blink.ino" },
+        status: "ok",
+        result: "file contents",
+      },
+      { kind: "assistant", text: "B: here is what I found" },
+    ]);
+  });
+
+  it("two sequential tool calls in one turn each get their own bubble before and after", () => {
+    const s = new AgentStore();
+    s.push(assistantText("Step 1: read file A"));
+    s.push(toolUse("t1", "Read", { file_path: "/a.ino" }));
+    s.push(toolResult("t1", "contents a", false));
+    s.push(assistantText("Step 2: read file B"));
+    s.push(toolUse("t2", "Read", { file_path: "/b.ino" }));
+    s.push(toolResult("t2", "contents b", false));
+    s.push(assistantText("Done comparing both files"));
+
+    expect(s.snapshot().messages).toEqual([
+      { kind: "assistant", text: "Step 1: read file A" },
+      {
+        kind: "tool",
+        id: "t1",
+        name: "Read",
+        input: { file_path: "/a.ino" },
+        status: "ok",
+        result: "contents a",
+      },
+      { kind: "assistant", text: "Step 2: read file B" },
+      {
+        kind: "tool",
+        id: "t2",
+        name: "Read",
+        input: { file_path: "/b.ino" },
+        status: "ok",
+        result: "contents b",
+      },
+      { kind: "assistant", text: "Done comparing both files" },
+    ]);
+  });
+});
+
 describe("AgentStore: tool_use / tool_result lifecycle", () => {
   it("a successful tool_result resolves the running tool card to ok", () => {
     const s = new AgentStore();
@@ -249,6 +343,26 @@ function toolUse(id: string, name: string, input: unknown): AgentEvent {
   return {
     type: "assistant",
     message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+  };
+}
+
+/** A single assistant line carrying both the inference's final text and its
+ * tool_use — the realistic shape of "I'll read the file: <tool_use>". */
+function assistantTextAndToolUse(
+  text: string,
+  id: string,
+  name: string,
+  input: unknown,
+): AgentEvent {
+  return {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "text", text },
+        { type: "tool_use", id, name, input },
+      ],
+    },
   };
 }
 

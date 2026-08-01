@@ -19,6 +19,11 @@ const FENCE = "```";
  * tag). Tolerant of an unclosed trailing fence: if the text ends while still
  * inside a code block, everything from the opening fence to the end of the
  * text is treated as code rather than being dropped or left as plain text.
+ *
+ * Accepted limitation: a fence marker that appears *inside* a code block's
+ * own content (e.g. an assistant message quoting markdown source) closes
+ * the block early, same as plain markdown fences do — this helper doesn't
+ * attempt nested/escaped fence detection.
  */
 export function splitFences(text: string): Segment[] {
   const lines = text.split("\n");
