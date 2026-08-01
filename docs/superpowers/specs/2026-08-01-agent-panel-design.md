@@ -1,0 +1,203 @@
+# Agent Panel Design
+
+**Date:** 2026-08-01
+**Status:** Implementing (first slice of an AI-assisted IDE vision)
+
+## Context
+
+The long-term vision is to evolve **bancada** (Tauri 2 + Rust + React Arduino
+workbench, v0.7.0) into an AI-assisted IDE for software and hardware. Bancada
+already owns the hardware half — arduino-cli build/upload, esptool, serial
+monitor, scope, fleet, MQTT/WS observability — behind a headless, unit-tested
+`bancada-core` crate deliberately designed to be driven by something other
+than the GUI. It has **zero AI code today**.
+
+This is the **first slice** of that vision: an Assistant panel where the user
+chats with a Claude agent that can read/edit project files, run Verify
+through bancada's existing compile path, read compiler errors, and iterate
+until the build passes. No upload/serial/hardware tools yet (v0.9.0+).
+
+## Decisions made with the user
+
+1. Evolve bancada (not greenfield).
+2. Runtime: spawn the **`claude` CLI directly** as a supervised child
+   (`--input-format stream-json --output-format stream-json`) — no Node
+   sidecar. Matches the repo philosophy ("wrap external binaries, parse
+   their JSON"); auth comes free from the existing Claude Code login
+   (verified: `claude` 2.1.220 on PATH, credentials present).
+3. First slice = chat + build loop only.
+4. Edits **auto-apply**, shown as diff cards (no per-edit approval gate).
+   Warn when the project is not under git.
+5. Panel lives in a new bottom-panel **"Assistant"** group (reuses
+   `bottomTabs.ts` machinery). Right dock deferred.
+6. Show per-turn **cost + turn count** in the panel footer.
+7. `summarize_build_output` strategy (decided after the initial plan): keep
+   **all** stderr lines plus the tail of stdout, capped at **~200 lines /
+   50 KB total** — the agent needs the errors, not a scrollback of a
+   multi-minute platform build.
+8. Diff card rendering (decided after the initial plan): unified diffs of
+   `old_string` → `new_string`, **full strings** (no elision), `-`/`+`
+   lines, red/green backgrounds, mono font.
+
+## Architecture
+
+```
+React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio stream-json ── claude CLI (child)
+                                        │    ▲                                    │
+                                        │    └── agent://event, agent://closed    │ MCP over loopback HTTP
+                                        ▼                                         ▼
+                                  bancada-core: agent.rs (protocol), mcp.rs (JSON-RPC), cli.rs compile
+```
+
+- One `claude` process per session, spawned on first message, cwd = sketch
+  dir (scopes built-in file tools). Multi-turn via NDJSON user messages on
+  stdin. **Interrupt:** attempt the SDK's `control_request` line
+  best-effort, but `kill` after ~2 s is the documented-reliable path (the
+  stdin control protocol is undocumented — verified against docs). No
+  auto-restart on crash (same philosophy as the MQTT thread) — panel shows
+  "Session ended".
+- Argv (built by pure, tested `agent_args()` in core): `-p --verbose
+  --include-partial-messages --permission-mode acceptEdits --allowedTools
+  Read,Edit,Write,Glob,Grep,mcp__bancada__verify --disallowedTools
+  "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput"
+  --mcp-config <inline JSON pointing at loopback HTTP + bearer token>
+  --strict-mcp-config --append-system-prompt <project dir, profile, "use
+  mcp__bancada__verify; iterate until it passes">`. The
+  `mcp__bancada__verify` entry in `--allowedTools` is load-bearing (without
+  it a headless `tools/call` stalls on a permission prompt) — unit-test its
+  presence. **Isolation: use `--bare`** (skips auto-discovery of user
+  hooks/skills/plugins/MCP) — `--setting-sources` alone does NOT block user
+  hooks (doc-verified); confirm `--bare` still allows `--mcp-config` +
+  project CLAUDE.md during the milestone-5 prototype.
+- **Process plumbing** (from adversarial review of the real code):
+  - **Stdin writer thread** fed by an mpsc channel — never write to child
+    stdin while holding the `agent` mutex (large pasted messages > 64 KB
+    pipe buffer + a claude blocked awaiting an MCP reply = deadlock cycle).
+    `agent_send` is an `async` command that just enqueues.
+  - **Stderr drain thread** (emit as `agent://event` `{type:"stderr"}`) —
+    an un-drained pipe wedges the child, same reason `start_monitor` runs
+    two reader threads.
+  - Set generous `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` env on the child — a cold
+    ESP32 platform build is multi-minute, longer than the default MCP tool
+    timeout.
+  - Frontend calls `agent_stop` on `agent://closed` so the exited child is
+    reaped (no zombies).
+- **`verify` tool**: minimal MCP streamable-HTTP server thread inside the
+  Tauri process (`tiny_http` — no reusable server dep exists in the
+  workspace; hyper/reqwest are tauri client-side transitives). **Bind
+  `127.0.0.1:0`** and read the port back (no collision roulette).
+  Bearer-token; methods: `initialize` / `tools/list` / `tools/call`;
+  JSON-RPC notifications (e.g. `notifications/initialized`, no `id`) get a
+  distinct `McpReply::NoContent` → **HTTP 202 empty body** (spec-required).
+  Shutdown: keep the `tiny_http::Server` handle and call `unblock()` (or use
+  `recv_timeout`) before joining — a plain `AtomicBool` can't break the
+  blocking `recv()`. The listener gets **owned clones at spawn time**
+  (`ArduinoCli`, `AppHandle`, sketch_dir, profile, fqbn) and never locks
+  `state.agent` (documented trade-off: agent verify keeps the profile from
+  `agent_start` even if the user switches boards mid-session).
+  - On `tools/call verify`: runs the **same** `cli.compile(...)` path
+    `compile_sketch` uses (src-tauri/src/lib.rs ~705–730; signature
+    confirmed at core/src/cli.rs:333–343; `ArduinoCli` is `Clone` holding
+    only `bin`) with the `build://line` emit — output streams to the
+    existing Console for free (Console subscribes unconditionally, App.tsx
+    ~239–243); agent receives `success`, `exit_code`, capped summary via
+    `summarize_build_output` (decision 7 above).
+  - **Build gate (new, fixes a real race):** nothing serializes compiles
+    today — user-Verify mutual exclusion is only the frontend `busy` flag,
+    which agent builds bypass. Add `build_gate: Mutex<()>` in `AppState`,
+    taken by `compile_sketch`, `upload_sketch`, and the MCP verify path
+    (try_lock + "build already in progress" error to the agent). Emit
+    `agent://event {type:"verify_started"/"verify_done"}` so App can set
+    `busy` during agent builds (also restores the port-rescan deferral,
+    App.tsx ~256–263).
+
+## Event contracts
+
+### Tauri events
+
+- **`agent://event`** — emitted for every parsed line from the child's
+  stdout (`parse_event`), plus synthetic events the host adds:
+  - `{type:"stderr"}` from the stderr drain thread.
+  - `{type:"verify_started"}` / `{type:"verify_done"}` around an MCP
+    `verify` call, so the frontend can set `busy` during agent builds.
+- **`agent://closed`** — emitted on child EOF, carries `{reason}`. The
+  frontend calls `agent_stop` on receipt so the exited child is reaped.
+
+### stream-json `AgentEvent` (core/src/agent.rs)
+
+A serde enum over the CLI's stream-json output, with a tolerant catch-all
+since the wire protocol is undocumented (see Risk R1):
+
+- `System`
+- `Assistant`
+- `User`
+- `StreamEvent`
+- `Result`
+- `Unknown(Value)` — catch-all so unknown event types never error the
+  parser.
+
+`parse_event(line)` decodes one line into this enum. `user_message_json` and
+`interrupt_json` build the corresponding stdin NDJSON messages.
+
+### MCP `verify` tool (core/src/mcp.rs)
+
+- **Server name:** `bancada`.
+- **Tool name:** `verify` — no arguments; the sketch dir, profile, and fqbn
+  are bound at MCP-listener spawn time from the session that started the
+  agent, not supplied by the caller.
+- **Full tool id as seen by the agent:** `mcp__bancada__verify` (this is
+  the exact string that must appear in `agent_args()`'s `--allowedTools`).
+- JSON-RPC 2.0 over the loopback HTTP listener; `handle_request(body,
+  tools) -> McpReply` either replies immediately or returns
+  `CallTool{id, name, args}` for the host to execute, plus
+  `tool_result_json` to format the result back.
+- Methods: `initialize`, `tools/list`, `tools/call`.
+- Notifications (no `id`, e.g. `notifications/initialized`) map to
+  `McpReply::NoContent` → HTTP 202 with an empty body (spec-required).
+- `tools/call verify` result: `success`, `exit_code`, and a capped output
+  summary (decision 7 above: all stderr + stdout tail, ~200 lines / 50 KB).
+
+## Safety model
+
+- The agent touches only the project dir: cwd is the sketch dir, and
+  `--permission-mode acceptEdits` scopes built-in file tools there.
+  Out-of-cwd edit behavior in `-p` mode is under-documented — verify denial
+  during the milestone-5 prototype and tighten with a permission rule if
+  needed.
+- `Bash`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `KillShell`, and
+  `BashOutput` are explicitly disallowed via `--disallowedTools`.
+- `--strict-mcp-config` keeps the user's personal MCP servers out of the
+  embedded session.
+- `--bare` skips auto-discovery of user hooks/skills/plugins/MCP
+  (`--setting-sources` alone does **not** block user hooks — doc-verified).
+- `verify` is compile-only — it never runs `-u` (upload).
+- Edits auto-apply with no per-edit approval gate (decision 4); the panel
+  warns when the project is not under git, since there is no undo path
+  without it (see Risk R4).
+- The MCP listener is bearer-token protected and bound to `127.0.0.1`.
+
+## Risks
+
+- **R1** The CLI's stdin stream-json protocol (user-message shape,
+  `control_request` interrupt) is **undocumented** — doc-verified; the SDK
+  is the documented surface and shells this same protocol. Mitigation:
+  record fixtures from the real CLI 2.1.220 in milestone 3, tolerant parser
+  (`Unknown` catch-all), `agent_probe` min-version gate, kill-based
+  interrupt as the reliable path. Escape hatch if the protocol proves
+  unstable: swap the transport to a bundled Agent SDK sidecar later —
+  `core::agent` types and the whole frontend are transport-agnostic.
+- **R2** `claude`'s HTTP MCP client behavior (plain JSON POST response vs
+  SSE) is unspecified in docs → **prototype the HTTP MCP round-trip first
+  in milestone 5**; wrap as single-event SSE if needed; worst case, fall
+  back to a tiny stdio→HTTP proxy binary. Same prototype also confirms:
+  `--bare` + `--mcp-config` coexistence, out-of-cwd edit denial under
+  acceptEdits in `-p` mode.
+- **R3** User-level settings/hooks leaking into the embedded agent →
+  `--strict-mcp-config` + `--bare` (doc-verified: `--setting-sources` does
+  NOT block hooks). Project-level CLAUDE.md loading is arguably a feature;
+  confirm `--bare` behavior in the prototype.
+- **R4** No undo without git → UI hint in slice 1; optional pre-session
+  snapshot as fast-follow.
+- **R5** Concurrent user/agent builds racing the arduino-cli build cache →
+  `build_gate: Mutex<()>` in `AppState` shared by `compile_sketch` /
+  `upload_sketch` / MCP verify (see Architecture).
