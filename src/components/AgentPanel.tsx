@@ -296,22 +296,46 @@ function ToolCard({
         </div>
       );
     }
-    const ok = msg.status === "ok";
+    if (msg.status === "error") {
+      // `run_verify` (src-tauri/src/lib.rs) only sets isError for the tool
+      // genuinely failing to run (arduino-cli missing, build gate busy) —
+      // NOT for a normal failed build, which it deliberately reports with
+      // isError:false so the model keeps iterating. This branch is that
+      // "could not run at all" case.
+      return (
+        <div className="agent-tool agent-tool-verify">
+          <div className="agent-tool-head">
+            <span className="agent-tool-icon fail">✗</span>
+            <span>Verify could not run</span>
+          </div>
+          {msg.result && (
+            <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
+          )}
+        </div>
+      );
+    }
+    // A normal completed verify always has isError:false — the real
+    // pass/fail lives in the "success: <bool>\nexit_code: <n>\n\n<summary>"
+    // text `run_verify` builds, not in msg.status.
+    const { success, exitCode, summary } = parseVerifyResult(msg.result ?? "");
+    const ok = success === true;
     return (
       <div className="agent-tool agent-tool-verify">
         <div className="agent-tool-head">
           <span className={ok ? "agent-tool-icon ok" : "agent-tool-icon fail"}>
-            {ok ? "✓" : "✗"}
+            {success === undefined ? "•" : ok ? "✓" : "✗"}
           </span>
-          <span>{ok ? "Verify passed" : "Verify failed"}</span>
+          <span>
+            {success === undefined
+              ? "Verify finished"
+              : ok
+                ? "Verify passed"
+                : "Verify failed"}
+            {exitCode !== undefined ? ` (exit ${exitCode})` : ""}
+          </span>
         </div>
-        {msg.result && (
-          <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
-        )}
-        <button
-          className="btn small"
-          onClick={() => openBottomTab("build")}
-        >
+        {summary && <div className="agent-tool-summary">{truncate(summary, 400)}</div>}
+        <button className="btn small" onClick={() => openBottomTab("build")}>
           Open Console ↗
         </button>
       </div>
@@ -355,9 +379,38 @@ function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
   }
 }
 
-/** The MCP tool id is `mcp__bancada__verify`; tolerate a bare `verify` too. */
+/** The wire tool_use name is `mcp__bancada__verify` (confirmed: this is the
+ *  exact string `agent_args()` requires in `--allowedTools`,
+ *  core/src/agent.rs) — a bare `verify` is also tolerated since that's the
+ *  name the MCP `tools/list` response itself advertises. */
 function isVerifyTool(name: string): boolean {
   return name === "verify" || name.endsWith("__verify");
+}
+
+/** `run_verify` (src-tauri/src/lib.rs) always builds its result text as
+ *  `"success: <bool>\nexit_code: <n>\n\n<summary>"` on the tool's normal
+ *  path (isError is reserved for the tool failing to run at all — see the
+ *  "error" branch above). Tolerant of an unexpected shape: an unparsed
+ *  `success` line just means `success` comes back `undefined`. */
+function parseVerifyResult(
+  result: string,
+): { success?: boolean; exitCode?: number; summary: string } {
+  const lines = result.split("\n");
+  const successMatch = /^success:\s*(true|false)\s*$/.exec(lines[0] ?? "");
+  if (!successMatch) return { summary: result };
+  let bodyStart = 1;
+  let exitCode: number | undefined;
+  const exitMatch = /^exit_code:\s*(-?\d+)\s*$/.exec(lines[1] ?? "");
+  if (exitMatch) {
+    exitCode = Number(exitMatch[1]);
+    bodyStart = 2;
+  }
+  while (bodyStart < lines.length && lines[bodyStart] === "") bodyStart++;
+  return {
+    success: successMatch[1] === "true",
+    exitCode,
+    summary: lines.slice(bodyStart).join("\n"),
+  };
 }
 
 function stringField(input: unknown, key: string): string | undefined {
