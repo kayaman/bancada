@@ -302,12 +302,25 @@ body {
   min-width: 0;
 }
 
-.editor-title {
-  padding: 4px 12px;
+/* One tab per project file; reuses .panel-tabs/.tab, but scrolls sideways
+   instead of wrapping when a sketch has more files than the strip is wide. */
+.editor-tabs {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  scrollbar-width: thin;
+}
+
+.editor-tabs .tab {
+  flex: none;
+  font-family: var(--font-mono);
+}
+
+.editor-tabs-empty,
+.editor-tabs-hint {
+  padding: 4px 6px;
   font-size: 11px;
   color: var(--text-dim);
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
 }
 

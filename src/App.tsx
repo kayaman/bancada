@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
 import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
+import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
@@ -739,10 +740,12 @@ export default function App() {
             />
           ) : (
             <>
-          <div className="editor-title">
-            {openFile ?? "no file open"}
-            {openFile && dirtyFiles.has(openFile) ? " ● unsaved (Ctrl+S)" : ""}
-          </div>
+          <EditorTabs
+            files={files}
+            openFile={openFile}
+            dirtyFiles={dirtyFiles}
+            onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
+          />
           <CodeMirror
             className="editor"
             value={content}
