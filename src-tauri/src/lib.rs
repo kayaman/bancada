@@ -1752,13 +1752,21 @@ fn random_token() -> String {
 /// its bearer token) to a private temp file, instead of the CLI argv (F5,
 /// post-review fix): argv is visible to any local process via
 /// `/proc/<pid>/cmdline` on Linux, which would hand out the one thing
-/// gating the `verify` listener to whoever asked. 0600 restricts the file
-/// to this user; `agent_start` deletes it on every exit path (spawn
-/// failure, stdio-pipe failure, and the normal `stop_agent_session`).
+/// gating the `verify` listener to whoever asked. `agent_start` deletes the
+/// file on every exit path (spawn failure, stdio-pipe failure, and the
+/// normal `stop_agent_session`).
 ///
 /// The filename carries a fresh random nonce, not the token: a temp-dir
 /// *listing* is typically world-readable even when an individual file's
 /// contents aren't, so the secret has no business appearing in the name.
+///
+/// On unix the file is *created* at 0600 (`OpenOptionsExt::mode` +
+/// `create_new`), not written-then-chmodded (post-review fix): the latter
+/// leaves a real window — however brief — where the file exists at the
+/// process umask (often 022, i.e. world-readable) before the permission
+/// tightens. `create_new` is also `O_EXCL`, so this refuses to write
+/// through a pre-existing file or symlink at the same path rather than
+/// silently following it.
 fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
     let mcp_config = serde_json::json!({
         "mcpServers": {
@@ -1770,25 +1778,34 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
                 }
             }
         }
-    });
+    })
+    .to_string();
     let path = std::env::temp_dir().join(format!("bancada-agent-mcp-{}.json", random_token()));
-    std::fs::write(&path, mcp_config.to_string())
-        .map_err(|e| format!("could not write the agent's MCP config file: {e}"))?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("could not create the agent's MCP config file: {e}"))?;
+        if let Err(e) = file.write_all(mcp_config.as_bytes()) {
+            drop(file);
             let _ = std::fs::remove_file(&path);
-            return Err(format!(
-                "could not restrict the agent's MCP config file to this user: {e}"
-            ));
+            return Err(format!("could not write the agent's MCP config file: {e}"));
         }
     }
-    // Non-unix: no equivalent chmod here (no Windows dev/CI target exists in
-    // this workspace yet). Revisit if/when one does — the file still isn't
-    // *findable* without knowing the random nonce, but that's weaker than a
-    // real ACL.
+    #[cfg(not(unix))]
+    {
+        // No equivalent atomic-mode create outside unix (no Windows dev/CI
+        // target exists in this workspace yet) — plain write, no ACL
+        // narrowing. Revisit if/when one does.
+        std::fs::write(&path, &mcp_config)
+            .map_err(|e| format!("could not write the agent's MCP config file: {e}"))?;
+    }
 
     Ok(path)
 }
@@ -2903,6 +2920,38 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         // Mask down to the permission bits; the type bits vary by platform.
         assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pins the property `mcp_config_file_is_0600` alone can't: this file is
+    /// never briefly world-readable. A single post-hoc `stat()` (as above)
+    /// can't observe a window that's already closed by the time the test
+    /// runs it, so this instead pins the *mechanism* the atomicity actually
+    /// comes from — `create_new` is `O_EXCL`, so it must refuse a path that
+    /// already exists rather than open (and so implicitly widen, the way
+    /// the old write-then-chmod's plain `std::fs::write` would have) it.
+    /// Regressing back to write-then-chmod would fail this deterministically
+    /// (`fs::write` truncates and overwrites a pre-existing path instead of
+    /// refusing), where a permissions-only assertion would not.
+    #[cfg(unix)]
+    #[test]
+    fn mcp_config_file_creation_is_exclusive_and_never_touches_a_pre_existing_path() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = std::env::temp_dir()
+            .join(format!("bancada-agent-mcp-preexisting-{}.json", random_token()));
+        std::fs::write(&path, "not agent config").unwrap();
+
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path);
+        assert!(result.is_err(), "create_new must refuse an existing path");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "not agent config",
+            "a pre-existing file at the target path must be left untouched"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
