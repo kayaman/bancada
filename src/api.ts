@@ -283,6 +283,9 @@ export const writeSketchFile = (
 
 export const loadSketchYaml = (sketchDir: string) =>
   invoke<SketchYaml>("load_sketch_yaml", { sketchDir });
+/** Create sketch.yaml (when absent) with a first profile for `fqbn`. */
+export const initProfile = (sketchDir: string, profile: string, fqbn: string) =>
+  invoke<SketchYaml>("init_profile", { sketchDir, profile, fqbn });
 export const addLocalLibrary = (
   sketchDir: string,
   profile: string,

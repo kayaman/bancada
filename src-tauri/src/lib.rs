@@ -160,6 +160,12 @@ fn load_sketch_yaml(sketch_dir: String) -> Result<SketchYaml, String> {
 }
 
 #[tauri::command]
+fn init_profile(sketch_dir: String, profile: String, fqbn: String) -> Result<SketchYaml, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.init_profile(&profile, &fqbn).map_err(err_str)
+}
+
+#[tauri::command]
 fn add_local_library(
     sketch_dir: String,
     profile: String,
@@ -1608,6 +1614,7 @@ pub fn run() {
             read_sketch_file,
             write_sketch_file,
             load_sketch_yaml,
+            init_profile,
             add_local_library,
             add_registry_library_to_profile,
             search_libraries,
