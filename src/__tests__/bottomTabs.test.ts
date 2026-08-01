@@ -37,6 +37,7 @@ describe("bottomTabs mapping consistency", () => {
     expect(GROUP_TABS.console).toEqual(["build"]);
     expect(GROUP_TABS.debug).toEqual(["serial", "scope"]);
     expect(GROUP_TABS.obs).toEqual(["mqtt", "ws"]);
+    expect(GROUP_TABS.assistant).toEqual(["agent"]);
   });
 });
 
