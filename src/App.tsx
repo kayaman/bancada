@@ -6,6 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
+import { arrivals } from "./portWatch";
 import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
 import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
@@ -137,10 +138,32 @@ export default function App() {
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
+  // Hotplug plumbing. busyRef mirrors `busy` for the event listener;
+  // pendingScanRef queues a rescan that arrived mid-flash; prevOnlineRef
+  // is null until the first fleet sync so launch-time boards aren't
+  // announced as arrivals.
+  const busyRef = useRef(false);
+  const pendingScanRef = useRef(false);
+  const scanTimerRef = useRef<number | undefined>(undefined);
+  const prevOnlineRef = useRef<string[] | null>(null);
+
   const notify = useCallback((msg: string, isError = false) => {
     setStatus(msg);
     setStatusIsError(isError);
   }, []);
+
+  useEffect(() => {
+    busyRef.current = busy;
+    if (!busy && pendingScanRef.current) {
+      pendingScanRef.current = false;
+      // `busy` clears before a just-flashed native-USB board finishes
+      // re-enumerating; scanning immediately would read the port's brief
+      // absence as a detach and drop the selection. Wait out the settle
+      // window (same reasoning as the post-flash monitor restart).
+      window.setTimeout(refreshPorts, 1500);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy]);
 
   // Opening a tab marks its content as seen.
   useEffect(() => {
@@ -225,6 +248,16 @@ export default function App() {
         }
       }),
       api.onSerialClosed(() => setMonitorOn(false)),
+      api.onPortsChanged(() => {
+        if (busyRef.current) {
+          // arduino-cli probing ports mid-flash can disrupt esptool — defer.
+          pendingScanRef.current = true;
+          return;
+        }
+        // USB enumeration surfaces sibling ports a beat apart; coalesce.
+        window.clearTimeout(scanTimerRef.current);
+        scanTimerRef.current = window.setTimeout(refreshPorts, 500);
+      }),
     ];
     api
       .cliVersion()
@@ -265,7 +298,19 @@ export default function App() {
         // Enrol whatever is attached into the fleet, whether or not its panel is
         // open — plugging a board in is what should record it. Fire-and-forget:
         // a fleet write must never break port detection.
-        api.fleetSync(ps).catch(() => {});
+        api
+          .fleetSync(ps)
+          .then((snap) => {
+            const fresh = arrivals(prevOnlineRef.current, snap);
+            prevOnlineRef.current = snap.online;
+            if (fresh.length > 0)
+              notify(
+                `⚡ ${fresh
+                  .map((a) => (a.port ? `${a.name} (${a.port})` : a.name))
+                  .join(", ")} attached`,
+              );
+          })
+          .catch(() => {});
       })
       .catch((e) => notify(String(e), true));
 
