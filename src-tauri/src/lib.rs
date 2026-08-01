@@ -22,8 +22,8 @@
 //! has a single owner at a time — monitor child process or scope session —
 //! and acquiring it for one evicts the other.
 //!
-//! Agent commands (Assistant panel): `agent_probe`, `start_agent`,
-//! `agent_send`, `agent_interrupt`, `stop_agent`. One `claude` child per
+//! Agent commands (Assistant panel): `agent_probe`, `agent_start`,
+//! `agent_send`, `agent_interrupt`, `agent_stop`. One `claude` child per
 //! session, driven over stdio stream-json, with four detached threads —
 //! stdin writer (fed by an mpsc channel, so the `agent` mutex is never held
 //! across a pipe write), stdout reader, stderr drain, and a loopback
@@ -32,7 +32,7 @@
 //! blocking `recv()` with `Server::unblock()`, which no atomic flag could
 //! do. The child never restarts on its own (same philosophy as the MQTT
 //! thread) — the panel shows "Session ended" and the frontend calls
-//! `stop_agent` on `agent://closed` so the child is reaped.
+//! `agent_stop` on `agent://closed` so the child is reaped.
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
 //! `verify` tool all drive the same arduino-cli build cache, so they share
@@ -1902,10 +1902,15 @@ fn stop_agent_session(session: AgentSession) {
     kill_child(child);
 }
 
+/// Mirrors `AgentProbe` in `src/agent/types.ts`, where `version` and `error`
+/// are genuinely optional — hence `skip_serializing_if` rather than letting
+/// serde emit `null` for a field the frontend types as absent.
 #[derive(serde::Serialize)]
 struct AgentProbe {
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -1960,7 +1965,7 @@ fn claude_spawn_error(e: std::io::Error) -> String {
 /// cwd = the sketch dir, and the three pipe threads. Nothing here blocks,
 /// so this stays a sync command like `start_monitor`.
 #[tauri::command]
-fn start_agent(
+fn agent_start(
     app: AppHandle,
     state: State<'_, AppState>,
     sketch_dir: String,
@@ -2115,7 +2120,7 @@ fn agent_send(state: State<'_, AppState>, text: String) -> Result<(), String> {
 /// **unconditional** — the trade-off is deliberate: the control protocol is
 /// unverified, so the only reliable stop is the one the OS guarantees, and
 /// the cost is that interrupting ends the session (the stdout reader emits
-/// `agent://closed`, and the next message needs a fresh `start_agent`)
+/// `agent://closed`, and the next message needs a fresh `agent_start`)
 /// rather than merely ending the turn.
 #[tauri::command]
 fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
@@ -2152,7 +2157,7 @@ fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
 /// on `agent://closed` to reap an already-exited child, so "not running" is
 /// success, not an error.
 #[tauri::command]
-fn stop_agent(state: State<'_, AppState>) -> Result<(), String> {
+fn agent_stop(state: State<'_, AppState>) -> Result<(), String> {
     let session = state.agent.lock().unwrap().take();
     if let Some(session) = session {
         stop_agent_session(session);
@@ -2258,10 +2263,10 @@ pub fn run() {
             load_mqtt_config,
             save_mqtt_config,
             agent_probe,
-            start_agent,
+            agent_start,
             agent_send,
             agent_interrupt,
-            stop_agent
+            agent_stop
         ])
         .build(tauri::generate_context!())
         .expect("error while building Bancada")
@@ -2276,7 +2281,7 @@ pub fn run() {
                 if let Some(session) = mqtt_session {
                     stop_mqtt_session(session);
                 }
-                // ---------- agent ---------- same teardown as `stop_agent`:
+                // ---------- agent ---------- same teardown as `agent_stop`:
                 // kill and reap the child rather than orphan it.
                 let agent_session = state.agent.lock().unwrap().take();
                 if let Some(session) = agent_session {
