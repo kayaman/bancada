@@ -456,7 +456,16 @@ fn add_platform_to_profile(
 
 // ---------- new projects ----------
 
-/// Sketchbook root — the default place to create a new project.
+/// Default location for a new project: `~/Projects` when present, else home.
+#[tauri::command]
+fn default_project_parent(app: AppHandle) -> Result<String, String> {
+    let home = app.path().home_dir().map_err(err_str)?;
+    Ok(bancada_core::project::default_project_parent(&home)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Sketchbook root — the conventional Arduino home for sketches.
 #[tauri::command]
 async fn sketchbook_dir(state: State<'_, AppState>) -> Result<String, String> {
     let cli = state.cli.clone();
@@ -512,9 +521,11 @@ async fn create_project(
             .unwrap_or_else(|| bancada_core::project::profile_name_for_fqbn(&fqbn));
 
         let parent_path = Path::new(&parent);
-        if !parent_path.is_dir() {
+        if parent_path.exists() && !parent_path.is_dir() {
             return Err(format!("{parent} is not a directory"));
         }
+        std::fs::create_dir_all(parent_path)
+            .map_err(|e| format!("could not create {parent}: {e}"))?;
         let dir = parent_path.join(&name);
         // Never overwrite: `sketch new --overwrite` is deliberately not used.
         if dir.symlink_metadata().is_ok() {
@@ -1630,6 +1641,7 @@ pub fn run() {
             update_core_index,
             add_platform_to_profile,
             sketchbook_dir,
+            default_project_parent,
             list_all_boards,
             create_project,
             gh_list_versions,
