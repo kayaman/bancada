@@ -1,15 +1,23 @@
 import type { SketchFile } from "../api";
+import NewFileInput from "./NewFileInput";
 
 interface Props {
   files: SketchFile[];
   openFile: string | null;
   dirtyFiles: Set<string>;
   onOpen: (relPath: string) => void;
+  /** Raw name from the ＋ input; return true when handled. */
+  onCreate?: (raw: string) => boolean;
 }
 
-export default function FileTree({ files, openFile, dirtyFiles, onOpen }: Props) {
+export default function FileTree({ files, openFile, dirtyFiles, onOpen, onCreate }: Props) {
   return (
     <div className="file-tree">
+      {onCreate && (
+        <div className="tree-new">
+          <NewFileInput title="New file in this sketch" onSubmit={onCreate} />
+        </div>
+      )}
       {files.map((f) => {
         const depth = f.rel_path.split("/").length - 1;
         const name = f.rel_path.split("/").pop();

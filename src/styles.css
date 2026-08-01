@@ -324,6 +324,16 @@ body {
   font-family: var(--font-mono);
 }
 
+.new-file-input {
+  width: 160px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.tree-new {
+  padding: 2px 8px;
+}
+
 .editor {
   flex: 1;
   overflow: auto;

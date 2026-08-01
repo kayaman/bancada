@@ -1,16 +1,19 @@
 import type { SketchFile } from "../api";
 import { fileTabs, tabLabel } from "../editorTabs";
+import NewFileInput from "./NewFileInput";
 
 interface Props {
   files: SketchFile[];
   openFile: string | null;
   dirtyFiles: Set<string>;
   onOpen: (relPath: string) => void;
+  /** Raw name from the ＋ input; return true when handled. */
+  onCreate?: (raw: string) => boolean;
 }
 
 /** One tab per project file, always visible above the editor — the sidebar's
  *  file tree may be hidden behind another panel, this strip never is. */
-export default function EditorTabs({ files, openFile, dirtyFiles, onOpen }: Props) {
+export default function EditorTabs({ files, openFile, dirtyFiles, onOpen, onCreate }: Props) {
   const tabs = fileTabs(files);
   return (
     <div className="panel-tabs editor-tabs">
@@ -28,6 +31,7 @@ export default function EditorTabs({ files, openFile, dirtyFiles, onOpen }: Prop
           </button>
         );
       })}
+      {onCreate && <NewFileInput title="New file in this sketch" onSubmit={onCreate} />}
       {tabs.length === 0 && <span className="editor-tabs-empty">no file open</span>}
       <div className="spacer" />
       {openFile && dirtyFiles.has(openFile) && (

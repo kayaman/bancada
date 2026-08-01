@@ -6,6 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
+import { checkNewFile } from "./newFile";
 import { arrivals } from "./portWatch";
 import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
 import EditorTabs from "./components/EditorTabs";
@@ -380,6 +381,28 @@ export default function App() {
     }
   };
 
+  /** Validate, create empty, refresh the list and open — the file must show
+   *  up in tree and tabs immediately or creation looks like it failed. */
+  const createNewFile = (raw: string): boolean => {
+    if (!sketchDir) return false;
+    const check = checkNewFile(raw, files);
+    if (!check.ok) {
+      notify(check.reason, true);
+      return false;
+    }
+    (async () => {
+      try {
+        await api.writeSketchFile(sketchDir, check.relPath, "");
+        setFiles(await api.listSketchFiles(sketchDir));
+        await openFileInEditor(sketchDir, check.relPath);
+        notify(`Created ${check.relPath}`);
+      } catch (e) {
+        notify(String(e), true);
+      }
+    })();
+    return true;
+  };
+
   const saveCurrent = useCallback(async () => {
     if (!sketchDir || !openFile) return;
     const text = buffersRef.current.get(openFile);
@@ -713,6 +736,7 @@ export default function App() {
               openFile={openFile}
               dirtyFiles={dirtyFiles}
               onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
+              onCreate={createNewFile}
             />
           )}
           {sideTab === "libraries" && (
@@ -790,6 +814,7 @@ export default function App() {
             openFile={openFile}
             dirtyFiles={dirtyFiles}
             onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
+            onCreate={createNewFile}
           />
           <CodeMirror
             className="editor"
