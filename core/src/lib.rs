@@ -16,6 +16,7 @@ pub mod esptool;
 pub mod fleet;
 pub mod ghlib;
 pub mod library;
+pub mod mcp;
 pub mod mqtt;
 pub mod project;
 pub mod scope;
