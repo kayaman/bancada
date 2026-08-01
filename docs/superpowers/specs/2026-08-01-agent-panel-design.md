@@ -65,10 +65,14 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   mcp__bancada__verify; iterate until it passes">`. The
   `mcp__bancada__verify` entry in `--allowedTools` is load-bearing (without
   it a headless `tools/call` stalls on a permission prompt) — unit-test its
-  presence. **Isolation: use `--bare`** (skips auto-discovery of user
-  hooks/skills/plugins/MCP) — `--setting-sources` alone does NOT block user
-  hooks (doc-verified); confirm `--bare` still allows `--mcp-config` +
-  project CLAUDE.md during the milestone-5 prototype.
+  presence. ~~**Isolation: use `--bare`**~~ **`--bare` was dropped** after
+  the milestone-5 prototype: `claude --help` (2.1.220) documents that under
+  `--bare` "Anthropic auth is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper`
+  via `--settings` (OAuth and keychain are never read)", and the prototype
+  reproduced `authentication_failed` on turn one. Since decision #2 is that
+  auth comes free from the user's existing login, R3's isolation is traded
+  for working auth; `--strict-mcp-config` plus the explicit
+  `--allowedTools`/`--disallowedTools` pair remain.
 - **Process plumbing** (from adversarial review of the real code):
   - **Stdin writer thread** fed by an mpsc channel — never write to child
     stdin while holding the `agent` mutex (large pasted messages > 64 KB
@@ -159,17 +163,20 @@ since the wire protocol is undocumented (see Risk R1):
 
 ## Safety model
 
-- The agent touches only the project dir: cwd is the sketch dir, and
-  `--permission-mode acceptEdits` scopes built-in file tools there.
-  Out-of-cwd edit behavior in `-p` mode is under-documented — verify denial
-  during the milestone-5 prototype and tighten with a permission rule if
-  needed.
+- The agent's cwd is the sketch dir. **Prototype finding (milestone 5):
+  `--permission-mode acceptEdits` does NOT confine built-in file tools to
+  the cwd** — a `-p` session asked to `Write /tmp/bancada-probe-outofcwd.txt`
+  created it with `"permission_denials":[]`. The sandbox is therefore
+  weaker than this spec assumed; tightening it (a `PreToolUse` hook or a
+  path-scoped deny rule that still permits absolute paths *inside* the
+  project) is an open follow-up, not something slice 1 provides.
 - `Bash`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `KillShell`, and
   `BashOutput` are explicitly disallowed via `--disallowedTools`.
 - `--strict-mcp-config` keeps the user's personal MCP servers out of the
   embedded session.
-- `--bare` skips auto-discovery of user hooks/skills/plugins/MCP
-  (`--setting-sources` alone does **not** block user hooks — doc-verified).
+- The user's own hooks/skills/plugins **do** load (see the `--bare` note in
+  Architecture): `--setting-sources` alone does not block user hooks
+  (doc-verified) and `--bare`, which would, breaks auth.
 - `verify` is compile-only — it never runs `-u` (upload).
 - Edits auto-apply with no per-edit approval gate (decision 4); the panel
   warns when the project is not under git, since there is no undo path
@@ -186,16 +193,18 @@ since the wire protocol is undocumented (see Risk R1):
   interrupt as the reliable path. Escape hatch if the protocol proves
   unstable: swap the transport to a bundled Agent SDK sidecar later —
   `core::agent` types and the whole frontend are transport-agnostic.
-- **R2** `claude`'s HTTP MCP client behavior (plain JSON POST response vs
-  SSE) is unspecified in docs → **prototype the HTTP MCP round-trip first
-  in milestone 5**; wrap as single-event SSE if needed; worst case, fall
-  back to a tiny stdio→HTTP proxy binary. Same prototype also confirms:
-  `--bare` + `--mcp-config` coexistence, out-of-cwd edit denial under
-  acceptEdits in `-p` mode.
+- **R2** ~~unspecified~~ **RESOLVED by the milestone-5 prototype**: the CLI
+  accepts plain `Content-Type: application/json` POST responses — no SSE
+  wrapping needed (it advertises `Accept: application/json,
+  text/event-stream` and is happy with either). It *also* opens a
+  `GET /mcp` server→client SSE stream, which a server that offers no such
+  stream must answer **405**; answering it with a JSON-RPC body instead put
+  the client into a tight reconnect busy-loop.
 - **R3** User-level settings/hooks leaking into the embedded agent →
-  `--strict-mcp-config` + `--bare` (doc-verified: `--setting-sources` does
-  NOT block hooks). Project-level CLAUDE.md loading is arguably a feature;
-  confirm `--bare` behavior in the prototype.
+  **partly unmitigated**: `--strict-mcp-config` covers MCP servers, but
+  `--bare` (the only thing that blocks user hooks/skills/plugins) breaks
+  auth and was dropped, and `--setting-sources` does NOT block hooks
+  (doc-verified). Accepted for slice 1.
 - **R4** No undo without git → UI hint in slice 1; optional pre-session
   snapshot as fast-follow.
 - **R5** Concurrent user/agent builds racing the arduino-cli build cache →

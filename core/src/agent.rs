@@ -273,11 +273,31 @@ pub struct AgentCfg {
 ///
 /// The `mcp__bancada__verify` entry in `--allowedTools` is load-bearing: a
 /// headless (`-p`) session with an MCP tool absent from the allow-list
-/// stalls forever on a permission prompt it has no way to answer. `--bare`
-/// skips auto-discovery of the user's own hooks/skills/plugins/MCP servers
-/// so the embedded session only sees what this argv explicitly wires up;
-/// `--strict-mcp-config` does the equivalent for the user's personal MCP
-/// servers, leaving only the loopback `bancada` server from `--mcp-config`.
+/// stalls forever on a permission prompt it has no way to answer.
+/// `--strict-mcp-config` keeps the user's personal MCP servers out of the
+/// embedded session, leaving only the loopback `bancada` server from
+/// `--mcp-config`.
+///
+/// ## Why `--bare` is *not* here (risk R3, resolved by the Task 5 prototype)
+///
+/// The design spec called for `--bare` as the isolation mechanism (it skips
+/// auto-discovery of the user's own hooks/skills/plugins). It cannot be
+/// used: `claude --help` for 2.1.220 states that under `--bare` "Anthropic
+/// auth is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper` via `--settings`
+/// (OAuth and keychain are never read)", and the Task 5 prototype confirmed
+/// it end to end — an otherwise identical argv with `--bare` produced
+/// `"error":"authentication_failed"` / `"Not logged in · Please run
+/// /login"` on the very first turn, while the same argv without it
+/// completed a full `mcp__bancada__verify` tool round-trip.
+///
+/// Bancada's whole runtime premise (spec decision #2) is that auth comes
+/// free from the user's existing Claude Code login, which is exactly the
+/// OAuth/keychain credential `--bare` refuses to read. So R3's isolation is
+/// deliberately traded for working auth: the remaining isolation mechanisms
+/// are `--strict-mcp-config` (no personal MCP servers) plus the explicit
+/// `--allowedTools`/`--disallowedTools` pair (no Bash/network/subagents).
+/// The residue is that the user's own hooks, skills and plugins do load
+/// into the embedded session.
 pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
     let mcp_config = serde_json::json!({
         "mcpServers": {
@@ -309,7 +329,6 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--mcp-config".to_string(),
         mcp_config,
         "--strict-mcp-config".to_string(),
-        "--bare".to_string(),
         "--append-system-prompt".to_string(),
         cfg.system_prompt_extra.clone(),
     ]
@@ -448,8 +467,9 @@ mod tests {
     /// with exactly: pong"}]}}`. `--bare` is omitted: in this sandbox it
     /// made the child report `authentication_failed` immediately (see the
     /// task report) even though a plain `claude -p "..."` in the same shell
-    /// works — a real finding worth re-checking during the milestone-5
-    /// prototype, not a fixture-recording shortcut. The four
+    /// works — a real finding, not a fixture-recording shortcut, and the
+    /// Task 5 prototype has since reproduced it outside the sandbox and
+    /// removed `--bare` from `agent_args` entirely. The four
     /// SessionStart-hook lines that `--bare` would have skipped were
     /// trimmed from the top of the raw capture (this sandbox's own hooks,
     /// irrelevant to the embedded-agent wire shape); everything from the
@@ -792,15 +812,34 @@ mod tests {
     }
 
     #[test]
-    fn agent_args_isolates_the_session_with_bare_and_strict_mcp_config() {
+    fn agent_args_isolates_the_session_with_strict_mcp_config() {
         let cfg = AgentCfg {
             mcp_port: 1,
             mcp_token: "t".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
-        assert!(args.iter().any(|a| a == "--bare"));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn agent_args_never_passes_bare_because_it_disables_keychain_auth() {
+        // Regression guard for the Task 5 prototype finding: `--bare` makes
+        // the CLI read auth *only* from ANTHROPIC_API_KEY/apiKeyHelper, so
+        // an embedded session relying on the user's Claude Code login dies
+        // with `authentication_failed` on turn one. See the `agent_args`
+        // doc comment for the full rationale.
+        let cfg = AgentCfg {
+            mcp_port: 1,
+            mcp_token: "t".to_string(),
+            system_prompt_extra: String::new(),
+        };
+        let args = agent_args(&cfg);
+        assert!(
+            !args.iter().any(|a| a == "--bare"),
+            "--bare breaks stored-credential auth; isolation is --strict-mcp-config \
+             plus the explicit tool allow/deny lists"
+        );
     }
 
     #[test]
