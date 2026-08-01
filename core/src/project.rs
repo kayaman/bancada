@@ -5,7 +5,7 @@
 //! validating a project name against Arduino's sketch-folder rules, and deriving
 //! a sensible profile name from an FQBN.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
@@ -103,6 +103,20 @@ pub fn profile_name_for_fqbn(fqbn: &str) -> String {
         }
     } else {
         candidate
+    }
+}
+
+/// Where a new project goes by default: `~/Projects` when the user has
+/// one, otherwise the home directory itself.
+///
+/// `is_dir` follows symlinks, so a symlinked `~/Projects` counts; a plain
+/// file that happens to be named `Projects` does not.
+pub fn default_project_parent(home: &Path) -> PathBuf {
+    let projects = home.join("Projects");
+    if projects.is_dir() {
+        projects
+    } else {
+        home.to_path_buf()
     }
 }
 
@@ -213,6 +227,29 @@ mod tests {
         assert!(s.contains("void loop()"));
         // must compile on cores that don't define LED_BUILTIN
         assert!(s.contains("#ifndef LED_BUILTIN"));
+    }
+
+    #[test]
+    fn default_parent_prefers_projects_dir() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("Projects")).unwrap();
+        assert_eq!(
+            default_project_parent(home.path()),
+            home.path().join("Projects")
+        );
+    }
+
+    #[test]
+    fn default_parent_falls_back_to_home() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(default_project_parent(home.path()), home.path());
+    }
+
+    #[test]
+    fn default_parent_ignores_a_projects_file() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("Projects"), "not a dir").unwrap();
+        assert_eq!(default_project_parent(home.path()), home.path());
     }
 
     #[test]
