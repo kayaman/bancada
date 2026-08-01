@@ -2937,8 +2937,10 @@ mod tests {
     #[test]
     fn mcp_config_file_creation_is_exclusive_and_never_touches_a_pre_existing_path() {
         use std::os::unix::fs::OpenOptionsExt;
-        let path = std::env::temp_dir()
-            .join(format!("bancada-agent-mcp-preexisting-{}.json", random_token()));
+        let path = std::env::temp_dir().join(format!(
+            "bancada-agent-mcp-preexisting-{}.json",
+            random_token()
+        ));
         std::fs::write(&path, "not agent config").unwrap();
 
         let result = std::fs::OpenOptions::new()
@@ -3104,5 +3106,189 @@ mod tests {
             "the stub's stderr never came back through a tool_result"
         );
         assert!(l.event_types().contains(&"verify_done".to_string()));
+    }
+
+    /// Task 8's "Verify end-to-end" live scenario: unlike the stubbed test
+    /// above (which proves the wire protocol), this drives a **real**
+    /// `arduino-cli compile` through the same MCP `verify` tool path, on a
+    /// real Blink-style project created the same way `create_project`
+    /// does (`sketch_new` + `write_main_ino` + `profile_create`).
+    ///
+    /// `start_listener` is deliberately not reused here: it hardcodes
+    /// `profile: None, fqbn: None`, and this test needs a real profile
+    /// bound — the same as a real `agent_start` call binds from the
+    /// session's active project — so the listener setup is inlined instead.
+    ///
+    /// Needs the CLI installed, a logged-in account, network, and it spends
+    /// real tokens plus a real (fast, AVR) compile — hence `#[ignore]` and
+    /// the same `BANCADA_AGENT_LIVE` env gate as the test above. Also needs
+    /// an arduino-cli platform installed for the target FQBN (default
+    /// `arduino:avr:uno`, overridable via `BANCADA_AGENT_TEST_FQBN`); if it
+    /// is not installed, the test skips with an explicit message rather
+    /// than failing — installing platforms is out of scope for an opt-in
+    /// test (same convention as `core/tests/new_project_builds.rs`).
+    ///
+    /// ```text
+    /// BANCADA_AGENT_LIVE=1 cargo test -p bancada -- --ignored --nocapture
+    /// ```
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "spawns the real claude CLI and a real arduino-cli compile: needs login, network, tokens and an installed core"]
+    fn live_claude_calls_the_verify_tool_with_a_real_compile() {
+        if std::env::var("BANCADA_AGENT_LIVE").is_err() {
+            eprintln!("skipped: set BANCADA_AGENT_LIVE=1 to run the live verify round trip");
+            return;
+        }
+
+        let fqbn = std::env::var("BANCADA_AGENT_TEST_FQBN")
+            .unwrap_or_else(|_| "arduino:avr:uno".to_string());
+        let cli = ArduinoCli::default();
+        let platform = fqbn.split(':').take(2).collect::<Vec<_>>().join(":");
+        let installed = match cli.core_list() {
+            Ok(platforms) => platforms.iter().any(|p| p.id == platform),
+            Err(e) => {
+                eprintln!("skipped: could not run `arduino-cli core list`: {e}");
+                return;
+            }
+        };
+        if !installed {
+            eprintln!(
+                "skipped: platform {platform} (for FQBN {fqbn}) is not installed on this \
+                 machine — run `arduino-cli core install {platform}` or set \
+                 BANCADA_AGENT_TEST_FQBN to an FQBN whose platform is installed"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "Blink".to_string();
+        let profile = bancada_core::project::profile_name_for_fqbn(&fqbn);
+        let dir = tmp.path().join(&name);
+
+        cli.sketch_new(&dir).expect("sketch new");
+        bancada_core::project::write_main_ino(&dir, &name).expect("write blink .ino");
+        cli.profile_create(&dir, &profile, &fqbn, true)
+            .expect("profile create");
+        let sketch_dir = dir.to_string_lossy().into_owned();
+
+        let (server, port) = bind_mcp_server().expect("bind loopback");
+        let token = random_token();
+        let events: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = McpVerifyCtx {
+            token: token.clone(),
+            cli,
+            sketch_dir: sketch_dir.clone(),
+            profile: Some(profile.clone()),
+            fqbn: None,
+            build_gate: gate(),
+        };
+        let thread_server = server.clone();
+        let thread_events = events.clone();
+        let join = std::thread::spawn(move || {
+            mcp_listener_loop(thread_server, ctx, move |name, payload| {
+                thread_events
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), payload));
+            });
+        });
+
+        let mcp_config_path = write_mcp_config_file(port, &token).unwrap();
+        let cfg = AgentCfg {
+            mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
+            system_prompt_extra: system_prompt_extra(&sketch_dir, Some(&profile), None),
+        };
+        let mut child = std::process::Command::new("claude")
+            .args(agent::agent_args(&cfg))
+            .current_dir(&dir)
+            .env("MCP_TOOL_TIMEOUT", MCP_TIMEOUT_MS)
+            .env("MCP_TIMEOUT", MCP_TIMEOUT_MS)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn claude");
+
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            agent::user_message_json("Run the verify tool and report success.")
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        drop(stdin); // single turn: EOF lets the child finish
+
+        let stdout = child.stdout.take().unwrap();
+        let mut saw_verify_tool_use = false;
+        let mut saw_verify_tool_result_success_text = false;
+        let mut raw_lines: Vec<String> = Vec::new();
+        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            raw_lines.push(line.clone());
+            match agent::parse_event(&line) {
+                Ok(agent::AgentEvent::Assistant(a)) => {
+                    for block in &a.message.content {
+                        if let agent::ContentBlock::ToolUse { name, .. } = block {
+                            if name == "mcp__bancada__verify" {
+                                saw_verify_tool_use = true;
+                            }
+                        }
+                    }
+                }
+                Ok(agent::AgentEvent::User(u)) => {
+                    for block in &u.message.content {
+                        if let agent::UserContentBlock::ToolResult { content, .. } = block {
+                            if content.to_string().contains("success:") {
+                                saw_verify_tool_result_success_text = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&mcp_config_path);
+        server.unblock();
+        let _ = join.join();
+
+        eprintln!("--- transcript ({} lines) ---", raw_lines.len());
+        for l in &raw_lines {
+            eprintln!("{l}");
+        }
+        eprintln!("--- end transcript ---");
+
+        let recorded = events.lock().unwrap();
+        let event_types: Vec<String> = recorded
+            .iter()
+            .filter(|(name, _)| name == "agent://event")
+            .filter_map(|(_, v)| v.get("type").and_then(|t| t.as_str()).map(String::from))
+            .collect();
+        let build_line_count = recorded
+            .iter()
+            .filter(|(name, _)| name == "build://line")
+            .count();
+        drop(recorded);
+
+        assert!(
+            saw_verify_tool_use,
+            "no mcp__bancada__verify tool_use block seen in the transcript"
+        );
+        assert!(
+            saw_verify_tool_result_success_text,
+            "no tool_result with 'success:' text seen in the transcript"
+        );
+        assert!(
+            event_types.contains(&"verify_started".to_string()),
+            "expected a verify_started agent://event, got: {event_types:?}"
+        );
+        assert!(
+            event_types.contains(&"verify_done".to_string()),
+            "expected a verify_done agent://event, got: {event_types:?}"
+        );
+        assert!(
+            build_line_count > 0,
+            "expected real build://line output from a real arduino-cli compile"
+        );
     }
 }
