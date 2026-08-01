@@ -18,6 +18,7 @@ import FleetManager from "./components/FleetManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
+import ProfileInit from "./components/ProfileInit";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
 import {
@@ -67,6 +68,8 @@ export default function App() {
   const [profile, setProfile] = useState<string | null>(null);
   /** When true the editor area shows the New Project form instead. */
   const [creatingProject, setCreatingProject] = useState(false);
+  /** When true a one-row profile-bootstrap form shows under the toolbar. */
+  const [creatingProfile, setCreatingProfile] = useState(false);
 
   // editor — unsaved edits live in the buffer map keyed by rel_path; disk is
   // the source of truth for clean files.
@@ -347,6 +350,7 @@ export default function App() {
       setDirtyFiles(new Set());
       setOpenFile(null);
       setContent("");
+      setCreatingProfile(false);
       const name = dir.split("/").pop();
       const target =
         (restoreFile && fs.find((f) => f.rel_path === restoreFile)) ||
@@ -646,12 +650,27 @@ export default function App() {
         busy={busy}
         onOpenSketch={openSketch}
         onNewProject={() => setCreatingProject(true)}
+        onCreateProfile={() => setCreatingProfile(true)}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
         onRefreshPorts={refreshPorts}
         onVerify={verify}
         onUpload={upload}
       />
+
+      {creatingProfile && sketchDir && (
+        <ProfileInit
+          sketchDir={sketchDir}
+          detectedFqbn={detectedFqbn() ?? null}
+          onCreated={(yaml, prof) => {
+            setSketchYaml(yaml);
+            setProfile(prof);
+            setCreatingProfile(false);
+          }}
+          onCancel={() => setCreatingProfile(false)}
+          notify={notify}
+        />
+      )}
 
       <div className="main" style={bottomMax ? { display: "none" } : undefined}>
         {/* Collapsed by `display: none` rather than unmounted — the same trick

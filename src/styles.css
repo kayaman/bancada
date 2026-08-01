@@ -334,6 +334,21 @@ body {
   padding: 2px 8px;
 }
 
+/* One-row profile-bootstrap form, anchored under the toolbar. */
+.profile-init {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.profile-init-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .editor {
   flex: 1;
   overflow: auto;

@@ -9,6 +9,7 @@ interface Props {
   busy: boolean;
   onOpenSketch: () => void;
   onNewProject: () => void;
+  onCreateProfile: () => void;
   onSelectProfile: (p: string) => void;
   onSelectPort: (p: string) => void;
   onRefreshPorts: () => void;
@@ -34,23 +35,33 @@ export default function Toolbar(props: Props) {
         ＋ New Project…
       </button>
 
-      <select
-        className="select"
-        value={props.profile ?? ""}
-        onChange={(e) => props.onSelectProfile(e.target.value)}
-        disabled={profiles.length === 0}
-        title="Build profile (sketch.yaml)"
-      >
-        {profiles.length === 0 && <option value="">no sketch.yaml profile</option>}
-        {profiles.map((p) => {
-          const board = props.sketchYaml?.profiles?.[p]?.fqbn.split(":")[2];
-          return (
-            <option key={p} value={p}>
-              {board ? `${p} — ${board}` : p}
-            </option>
-          );
-        })}
-      </select>
+      {props.sketchDir && profiles.length === 0 ? (
+        <button
+          className="btn"
+          onClick={props.onCreateProfile}
+          title="This sketch has no sketch.yaml profile — create one"
+        >
+          ＋ Create profile…
+        </button>
+      ) : (
+        <select
+          className="select"
+          value={props.profile ?? ""}
+          onChange={(e) => props.onSelectProfile(e.target.value)}
+          disabled={profiles.length === 0}
+          title="Build profile (sketch.yaml)"
+        >
+          {profiles.length === 0 && <option value="">no sketch.yaml profile</option>}
+          {profiles.map((p) => {
+            const board = props.sketchYaml?.profiles?.[p]?.fqbn.split(":")[2];
+            return (
+              <option key={p} value={p}>
+                {board ? `${p} — ${board}` : p}
+              </option>
+            );
+          })}
+        </select>
+      )}
 
       <select
         className="select"
