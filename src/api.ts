@@ -2,6 +2,9 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { AgentEvent, AgentProbe } from "./agent/types";
+
+export type { AgentEvent, AgentProbe } from "./agent/types";
 
 // ---------- types mirrored from Rust ----------
 
@@ -584,6 +587,24 @@ export const loadMqttConfig = () => invoke<MqttConfig>("load_mqtt_config");
 export const saveMqttConfig = (cfg: MqttConfig) =>
   invoke<void>("save_mqtt_config", { cfg });
 
+// ---------- agent (Assistant panel) ----------
+
+/** `claude --version` + a min-version gate — whether the CLI is usable at all. */
+export const agentProbe = () => invoke<AgentProbe>("agent_probe");
+/** Spawns the `claude` child for `sketchDir`, scoped to its file tools. */
+export const agentStart = (sketchDir: string, profile?: string, fqbn?: string) =>
+  invoke<void>("agent_start", {
+    sketchDir,
+    profile: profile ?? null,
+    fqbn: fqbn ?? null,
+  });
+/** Sends one user text message on the agent's stdin. */
+export const agentSend = (text: string) => invoke<void>("agent_send", { text });
+/** Best-effort control-protocol interrupt; the host kills the child if it doesn't land. */
+export const agentInterrupt = () => invoke<void>("agent_interrupt");
+/** Kills the child (if any) and stops the loopback MCP listener. */
+export const agentStop = () => invoke<void>("agent_stop");
+
 // ---------- events ----------
 
 export const onBuildLine = (cb: (l: OutputLine) => void): Promise<UnlistenFn> =>
@@ -597,3 +618,14 @@ export const onSerialClosed = (cb: () => void): Promise<UnlistenFn> =>
 /** Fires when the set of serial ports on the machine changes (hotplug). */
 export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen("ports://changed", () => cb());
+
+/** One parsed line from the agent child's stdout, plus bancada's synthetic
+ * stderr/verify events — see `src/agent/types.ts`. */
+export const onAgentEvent = (cb: (ev: AgentEvent) => void): Promise<UnlistenFn> =>
+  listen<AgentEvent>("agent://event", (e) => cb(e.payload));
+/** Fires once on child EOF; the frontend should call `agentStop` on receipt
+ * so the exited child is reaped. */
+export const onAgentClosed = (
+  cb: (p: { reason: string }) => void,
+): Promise<UnlistenFn> =>
+  listen<{ reason: string }>("agent://closed", (e) => cb(e.payload));

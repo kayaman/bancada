@@ -251,3 +251,42 @@ describe("events", () => {
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("serial://line");
   });
 });
+
+describe("agent commands", () => {
+  it("agentStart nulls omitted profile/fqbn", async () => {
+    await api.agentStart("/s");
+    expect(called()).toEqual([
+      "agent_start",
+      { sketchDir: "/s", profile: null, fqbn: null },
+    ]);
+  });
+
+  it("agentStart forwards a given profile and fqbn", async () => {
+    await api.agentStart("/s", "esp32s3", "esp32:esp32:esp32s3");
+    expect(called()).toEqual([
+      "agent_start",
+      { sketchDir: "/s", profile: "esp32s3", fqbn: "esp32:esp32:esp32s3" },
+    ]);
+  });
+
+  it("agentSend passes text", async () => {
+    await api.agentSend("make this build");
+    expect(called()).toEqual(["agent_send", { text: "make this build" }]);
+  });
+
+  it("agentProbe, agentInterrupt and agentStop take no arguments", async () => {
+    await api.agentProbe();
+    expect(called()[0]).toBe("agent_probe");
+    await api.agentInterrupt();
+    expect(called()[0]).toBe("agent_interrupt");
+    await api.agentStop();
+    expect(called()[0]).toBe("agent_stop");
+  });
+
+  it("onAgentEvent and onAgentClosed subscribe to the exact event names", async () => {
+    await api.onAgentEvent(() => {});
+    expect(listenMock.mock.calls.at(-1)?.[0]).toBe("agent://event");
+    await api.onAgentClosed(() => {});
+    expect(listenMock.mock.calls.at(-1)?.[0]).toBe("agent://closed");
+  });
+});
