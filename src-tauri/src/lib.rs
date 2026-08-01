@@ -178,6 +178,16 @@ fn list_sketch_files(sketch_dir: String) -> Result<Vec<bancada_core::sketch::Ske
     proj.list_files().map_err(err_str)
 }
 
+/// Whether the sketch dir is under git — the Assistant panel warns when it
+/// isn't, since auto-applied agent edits have no undo path without it (spec
+/// Risk R4). A plain `.git` dir check, not a `git` invocation: cheap, and
+/// good enough for the warning's purpose (a worktree/submodule's `.git` file
+/// still counts as "under git").
+#[tauri::command]
+fn sketch_has_git(sketch_dir: String) -> bool {
+    Path::new(&sketch_dir).join(".git").exists()
+}
+
 #[tauri::command]
 fn read_sketch_file(sketch_dir: String, rel_path: String) -> Result<String, String> {
     let full = safe_join(&sketch_dir, &rel_path)?;
@@ -2208,6 +2218,7 @@ pub fn run() {
             cli_version,
             list_boards,
             list_sketch_files,
+            sketch_has_git,
             read_sketch_file,
             write_sketch_file,
             load_sketch_yaml,

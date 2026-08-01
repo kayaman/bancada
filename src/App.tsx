@@ -8,7 +8,14 @@ import * as api from "./api";
 import { nextSelectedPort } from "./ports";
 import { checkNewFile } from "./newFile";
 import { arrivals } from "./portWatch";
-import type { DetectedPort, OutputLine, SketchFile, SketchYaml } from "./api";
+import type {
+  AgentEvent,
+  DetectedPort,
+  OutputLine,
+  SketchFile,
+  SketchYaml,
+} from "./api";
+import { AgentStore } from "./agent/agentStore";
 import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
@@ -21,6 +28,7 @@ import NewProject from "./components/NewProject";
 import ProfileInit from "./components/ProfileInit";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
+import AgentPanel from "./components/AgentPanel";
 import {
   GROUP_LABEL,
   GROUP_OF,
@@ -60,6 +68,19 @@ const appendCapped = (prev: OutputLine[], l: OutputLine): OutputLine[] =>
     ? [...prev.slice(-TRIM_CONSOLE_LINES), l]
     : [...prev, l];
 
+// One store for the whole app lifetime (not panel-owned): App-level
+// `agent://event` listeners feed it even before the Assistant panel has ever
+// been mounted, so the bottom-tab unseen dot keeps working regardless of
+// which tab is open. See src/agent/agentStore.ts.
+const agentStore = new AgentStore();
+
+/** `file_path` from an Edit/Write tool input is cwd-absolute (cwd = sketch
+ *  dir); reduce it to the same rel_path shape the file tree/editor use. */
+const relativeToSketchDir = (filePath: string, dir: string): string => {
+  const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+  return filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath;
+};
+
 export default function App() {
   // project
   const [sketchDir, setSketchDir] = useState<string | null>(null);
@@ -70,6 +91,14 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   /** When true a one-row profile-bootstrap form shows under the toolbar. */
   const [creatingProfile, setCreatingProfile] = useState(false);
+  // Computed once per opened project (spec Risk R4): the Assistant panel
+  // warns when there's no undo path for its auto-applied edits.
+  const [gitWarning, setGitWarning] = useState(false);
+  // Live mirror of sketchDir for the App-level agent event listeners, which
+  // are registered once (empty-dep effect) and would otherwise close over a
+  // stale `null`.
+  const sketchDirRef = useRef<string | null>(null);
+  sketchDirRef.current = sketchDir;
 
   // editor — unsaved edits live in the buffer map keyed by rel_path; disk is
   // the source of truth for clean files.
@@ -77,6 +106,12 @@ export default function App() {
   const [content, setContent] = useState("");
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set());
   const buffersRef = useRef(new Map<string, string>());
+  // Same story as sketchDirRef: mirrors `openFile` for the agent listeners.
+  const openFileRef = useRef<string | null>(null);
+  openFileRef.current = openFile;
+  /** rel_paths the agent edited while a local buffer was dirty — sendToAgent
+   *  refuses until the conflict is resolved (cleared inside saveAll()). */
+  const agentConflictsRef = useRef<Set<string>>(new Set());
 
   // boards
   const [ports, setPorts] = useState<DetectedPort[]>([]);
@@ -115,7 +150,9 @@ export default function App() {
       ? "build"
       : bottomGroup === "debug"
         ? debugTab
-        : obsTab;
+        : bottomGroup === "obs"
+          ? obsTab
+          : "agent";
   // Bottom panel expanded over the whole main area (editor stays mounted).
   const [bottomMax, setBottomMax] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(() => {
@@ -138,6 +175,7 @@ export default function App() {
   const [scopeMounted, setScopeMounted] = useState(false);
   const [mqttMounted, setMqttMounted] = useState(false);
   const [wsMounted, setWsMounted] = useState(false);
+  const [agentMounted, setAgentMounted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
@@ -185,6 +223,7 @@ export default function App() {
     if (tab === "scope") setScopeMounted(true);
     if (tab === "mqtt") setMqttMounted(true);
     if (tab === "ws") setWsMounted(true);
+    if (tab === "agent") setAgentMounted(true);
   }, []);
 
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
@@ -261,6 +300,20 @@ export default function App() {
         // USB enumeration surfaces sibling ports a beat apart; coalesce.
         window.clearTimeout(scanTimerRef.current);
         scanTimerRef.current = window.setTimeout(refreshPorts, 500);
+      }),
+      // Agent event plumbing lives here (App level), not inside AgentPanel:
+      // the unseen dot on the Assistant tab must light up even before the
+      // panel has ever been mounted (spec: agentStore is not panel-owned).
+      api.onAgentEvent((ev) => {
+        agentStore.push(ev);
+        if (bottomTabRef.current !== "agent")
+          setUnseen((u) => ({ ...u, agent: true }));
+        handleAgentSideEffects(ev);
+      }),
+      api.onAgentClosed((p) => {
+        agentStore.closed(p.reason);
+        // Reap the exited child (spec: "frontend calls agent_stop on receipt").
+        api.agentStop().catch(() => {});
       }),
     ];
     api
@@ -341,6 +394,11 @@ export default function App() {
       setSketchDir(dir);
       setFiles(fs);
       setSketchYaml(yaml);
+      // Fire-and-forget, same as fleetSync above: a hint, not load-bearing.
+      api
+        .sketchHasGit(dir)
+        .then((has) => setGitWarning(!has))
+        .catch(() => setGitWarning(false));
       const profiles = Object.keys(yaml.profiles ?? {});
       const prof = yaml.default_profile ?? profiles[0] ?? null;
       setProfile(prof);
@@ -425,7 +483,10 @@ export default function App() {
     }
   }, [sketchDir, openFile, notify]);
 
-  /** Flush every dirty buffer to disk (before compile/upload). */
+  /** Flush every dirty buffer to disk (before compile/upload, or before a
+   *  message to the agent). Also the resolution point for an agent
+   *  dirty-conflict (see agentConflictsRef): once every buffer is flushed,
+   *  nothing is unsaved anymore, so the whole conflict set clears. */
   const saveAll = useCallback(async () => {
     if (!sketchDir) return;
     for (const [path, text] of buffersRef.current) {
@@ -433,6 +494,7 @@ export default function App() {
     }
     buffersRef.current.clear();
     setDirtyFiles(new Set());
+    agentConflictsRef.current.clear();
   }, [sketchDir]);
 
   // Ctrl+S
@@ -636,6 +698,124 @@ export default function App() {
     },
     [selectedPort, stopMonitorIfOn, notify],
   );
+
+  // ---------- agent (Assistant panel) ----------
+
+  /** Refresh the tree and, if the agent touched the file open in the editor,
+   *  either pull the fresh content in or flag a conflict — called from
+   *  `handleAgentSideEffects`, which only has refs (registered once, on
+   *  mount) so this reads sketchDirRef/openFileRef/buffersRef, never state
+   *  directly. */
+  const handleAgentFileChange = (filePath: string) => {
+    const dir = sketchDirRef.current;
+    if (!dir) return;
+    api
+      .listSketchFiles(dir)
+      .then(setFiles)
+      .catch(() => {
+        /* best-effort — a missed tree refresh isn't worth surfacing */
+      });
+
+    const rel = relativeToSketchDir(filePath, dir);
+    if (rel !== openFileRef.current) return;
+    if (buffersRef.current.has(rel)) {
+      // The user has unsaved edits to the same file the agent just changed
+      // on disk — reading it in now would silently discard one side.
+      agentConflictsRef.current.add(rel);
+      notify(
+        `The assistant edited ${rel} while you had unsaved changes — save (Ctrl+S) or discard your edits to resolve the conflict before sending another message.`,
+        true,
+      );
+      return;
+    }
+    api
+      .readSketchFile(dir, rel)
+      .then(setContent)
+      .catch((e) => notify(String(e), true));
+  };
+
+  /** Reacts to the raw agent://event stream: build-gate `busy` coupling, and
+   *  pulling in (or flagging a conflict for) an Edit/Write the agent just
+   *  applied to the file open in the editor. Registered once (empty-dep
+   *  mount effect) — must not close over component state, only refs and
+   *  stable setters/callbacks. */
+  const handleAgentSideEffects = (ev: AgentEvent) => {
+    if (ev.type === "verify_started") {
+      setBusy(true);
+      return;
+    }
+    if (ev.type === "verify_done") {
+      setBusy(false);
+      return;
+    }
+    if (ev.type !== "user") return;
+    const content = ev.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (block.type !== "tool_result") continue;
+      const toolUseId = block.tool_use_id;
+      if (typeof toolUseId !== "string") continue;
+      const msg = agentStore
+        .snapshot()
+        .messages.find((m) => m.kind === "tool" && m.id === toolUseId);
+      if (!msg || msg.kind !== "tool") continue;
+      if (msg.name !== "Edit" && msg.name !== "Write") continue;
+      const input = msg.input;
+      const filePath =
+        typeof input === "object" && input !== null
+          ? (input as Record<string, unknown>).file_path
+          : undefined;
+      if (typeof filePath !== "string") continue;
+      handleAgentFileChange(filePath);
+    }
+  };
+
+  /** Save-then-send, auto-starting the session on the first message with the
+   *  same target Verify uses. Refuses while a dirty-conflict is unresolved.
+   *  The auto-start (target resolution + `agentStart`) happens *before*
+   *  `userSent` — failing to resolve a target or spawn the child must not
+   *  leave a phantom "sent" bubble with nothing behind it. */
+  const sendToAgent = async (text: string) => {
+    if (agentConflictsRef.current.size > 0) {
+      notify(
+        "Resolve the assistant's file conflict first — save or discard your edits, then try again.",
+        true,
+      );
+      return;
+    }
+    if (!sketchDir) {
+      notify("Open a sketch first.", true);
+      return;
+    }
+    await saveAll();
+    if (agentStore.snapshot().status === "idle") {
+      const target = resolveTarget();
+      if (!target) return; // resolveTarget already notified
+      try {
+        await api.agentStart(sketchDir, target.profile, target.fqbn);
+      } catch (e) {
+        notify(String(e), true);
+        return;
+      }
+    }
+    agentStore.userSent(text);
+    try {
+      await api.agentSend(text);
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
+
+  const interruptAgent = () => {
+    api.agentInterrupt().catch((e) => notify(String(e), true));
+  };
+
+  /** Stop the session and drop the transcript back to a clean slate. */
+  const newAgentSession = () => {
+    api.agentStop().catch(() => {});
+    agentStore.clear();
+    agentConflictsRef.current.clear();
+  };
 
   // ---------- render ----------
 
@@ -883,7 +1063,13 @@ export default function App() {
               }
               onClick={() =>
                 openBottomTab(
-                  g === "console" ? "build" : g === "debug" ? debugTab : obsTab,
+                  g === "console"
+                    ? "build"
+                    : g === "debug"
+                      ? debugTab
+                      : g === "obs"
+                        ? obsTab
+                        : "agent",
                 )
               }
             >
@@ -961,6 +1147,18 @@ export default function App() {
             onEnsureMonitor={ensureMonitor}
             onStopMonitor={stopMonitorIfOn}
             onFlashFirmware={flashScopeFirmware}
+          />
+        )}
+        {agentMounted && (
+          <AgentPanel
+            active={bottomTab === "agent"}
+            sketchDir={sketchDir}
+            store={agentStore}
+            onSend={sendToAgent}
+            onInterrupt={interruptAgent}
+            onNewSession={newAgentSession}
+            openBottomTab={openBottomTab}
+            gitWarning={gitWarning}
           />
         )}
       </section>

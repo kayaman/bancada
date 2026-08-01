@@ -276,6 +276,9 @@ export const listBoards = () => invoke<DetectedPort[]>("list_boards");
 
 export const listSketchFiles = (sketchDir: string) =>
   invoke<SketchFile[]>("list_sketch_files", { sketchDir });
+/** Whether `sketchDir` is under git — backs the Assistant panel's no-undo warning. */
+export const sketchHasGit = (sketchDir: string) =>
+  invoke<boolean>("sketch_has_git", { sketchDir });
 export const readSketchFile = (sketchDir: string, relPath: string) =>
   invoke<string>("read_sketch_file", { sketchDir, relPath });
 export const writeSketchFile = (
