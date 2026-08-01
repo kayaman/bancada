@@ -328,8 +328,12 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
 /// `[... N stderr lines dropped]` marker replaces the front. Whatever line
 /// budget remains after stderr goes to the tail of stdout, with the same
 /// drop-the-front-keep-the-tail marker convention. `max_bytes` is enforced
-/// as a hard cap on top of the line cap by shrinking stdout's tail first
-/// (least essential — it's context, not errors) and only then stderr's.
+/// as a genuine hard cap on top of the line cap by shrinking stdout's tail
+/// first (least essential — it's context, not errors), then stderr's; if
+/// even the bare section headers/markers (no content lines left to drop)
+/// still exceed `max_bytes` — e.g. `max_lines` near zero with a tiny
+/// `max_bytes` — the rendered text is hard-truncated to `max_bytes` as a
+/// last resort, so the return value's byte length never exceeds the cap.
 ///
 /// Empty input returns an empty string.
 pub fn summarize_build_output(lines: &[OutputLine], max_lines: usize, max_bytes: usize) -> String {
@@ -348,22 +352,43 @@ pub fn summarize_build_output(lines: &[OutputLine], max_lines: usize, max_bytes:
     let remaining = max_lines.saturating_sub(stderr_kept.len());
     let (mut stdout_kept, mut stdout_dropped) = keep_tail(&stdout, remaining);
 
-    // Byte cap: shrink stdout's tail first, then stderr's, one line at a
-    // time from the front (the tail is what's worth keeping in both
-    // sections), until the rendered text fits or nothing is left to drop.
+    // Byte cap, phase 1: shrink stdout's tail first, then stderr's, one
+    // line at a time from the front (the tail is what's worth keeping in
+    // both sections), until the rendered text fits or there is no whole
+    // line left to drop.
     loop {
         let rendered = render_summary(&stderr_kept, stderr_dropped, &stdout_kept, stdout_dropped);
-        if rendered.len() <= max_bytes || (stdout_kept.is_empty() && stderr_kept.is_empty()) {
+        if rendered.len() <= max_bytes {
             return rendered;
         }
         if !stdout_kept.is_empty() {
             stdout_kept.remove(0);
             stdout_dropped += 1;
-        } else {
+        } else if !stderr_kept.is_empty() {
             stderr_kept.remove(0);
             stderr_dropped += 1;
+        } else {
+            // Phase 2: even the bare headers/markers (no content lines
+            // left at all) exceed max_bytes — a pathologically tiny cap,
+            // or max_lines left nothing to keep in the first place. Hard-
+            // truncate so max_bytes is a genuine hard limit, not merely a
+            // best-effort one.
+            return truncate_to_byte_budget(rendered, max_bytes);
         }
     }
+}
+
+/// Truncates `s` to at most `max_bytes` bytes, backing off to the nearest
+/// preceding `char` boundary so the result is never invalid UTF-8.
+fn truncate_to_byte_budget(s: String, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 /// Keeps at most `max` items from the tail of `items`; returns the kept
@@ -541,6 +566,23 @@ mod tests {
     // never happens to exercise a tool_use/tool_result turn, an unknown
     // event *shape* distinct from rate_limit_event, or invalid JSON, so
     // these are written by hand to cover them.
+
+    #[test]
+    fn hand_authored_assistant_with_no_message_field_still_parses_as_assistant() {
+        // The brief's own tolerant-parser example: a bare {"type":"assistant"}
+        // must decode through the #[serde(default)] scaffolding into
+        // AgentEvent::Assistant with an empty message, never Unknown or Err
+        // — pins the regression the review flagged against a future field
+        // becoming required by accident.
+        let line = r#"{"type":"assistant"}"#;
+        match parse_event(line).unwrap() {
+            AgentEvent::Assistant(a) => {
+                assert_eq!(a.message.role, "");
+                assert!(a.message.content.is_empty());
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
 
     #[test]
     fn hand_authored_tool_use_block_is_captured() {
@@ -930,5 +972,50 @@ mod tests {
             "stderr must survive: {summary}"
         );
         assert!(!summary.contains("stderr lines dropped"), "{summary}");
+    }
+
+    /// Regression: with `max_lines` at zero (or near it), the line-cap
+    /// phase alone empties every section, leaving only the `--- stderr ---`
+    /// / dropped-count header text to render — and that header text can
+    /// itself exceed a tiny `max_bytes`. Before the fix the function
+    /// returned early as soon as nothing more could be *dropped*, without
+    /// ever re-checking the rendered length against `max_bytes`, so the
+    /// "hard cap" in the doc comment didn't actually hold.
+    #[test]
+    fn summarize_hard_caps_bytes_when_max_lines_is_zero() {
+        let lines: Vec<OutputLine> = (0..10)
+            .map(|i| out(OutputStream::Stderr, &format!("err-{i}")))
+            .collect();
+
+        let summary = summarize_build_output(&lines, 0, 5);
+        assert!(
+            summary.len() <= 5,
+            "summary was {} bytes against a 5-byte cap: {summary:?}",
+            summary.len()
+        );
+    }
+
+    /// Same failure mode approached from the other side: a non-zero
+    /// `max_lines` that still leaves nothing kept once the line budget runs
+    /// out for stdout, paired with a `max_bytes` too small even for the
+    /// section headers.
+    #[test]
+    fn summarize_hard_caps_bytes_with_near_zero_line_and_byte_caps() {
+        let lines: Vec<OutputLine> = (0..3)
+            .map(|i| out(OutputStream::Stdout, &format!("out-{i}")))
+            .collect();
+
+        let summary = summarize_build_output(&lines, 1, 3);
+        assert!(
+            summary.len() <= 3,
+            "summary was {} bytes against a 3-byte cap: {summary:?}",
+            summary.len()
+        );
+    }
+
+    #[test]
+    fn summarize_zero_byte_cap_is_always_empty() {
+        let lines = vec![out(OutputStream::Stderr, "boom")];
+        assert_eq!(summarize_build_output(&lines, 200, 0), "");
     }
 }
