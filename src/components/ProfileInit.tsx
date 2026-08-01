@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import BoardPicker from "./BoardPicker";
 import {
   initProfile,
   listAllBoards,
@@ -40,16 +41,6 @@ export default function ProfileInit({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const groups = useMemo(() => {
-    const g = new Map<string, BoardOption[]>();
-    for (const b of boards) {
-      const list = g.get(b.platform_name) ?? [];
-      list.push(b);
-      g.set(b.platform_name, list);
-    }
-    return [...g.entries()];
-  }, [boards]);
-
   const pick = (f: string) => {
     setFqbn(f);
     if (!nameTouched) setName(f ? profileNameForFqbn(f) : "");
@@ -71,23 +62,12 @@ export default function ProfileInit({
   return (
     <div className="profile-init">
       <span className="profile-init-label">New sketch.yaml profile:</span>
-      <select
-        className="select"
+      <BoardPicker
+        boards={boards}
         value={fqbn}
-        onChange={(e) => pick(e.target.value)}
+        onChange={pick}
         title="Board for this profile"
-      >
-        <option value="">choose a board…</option>
-        {groups.map(([platform, list]) => (
-          <optgroup key={platform} label={platform}>
-            {list.map((b) => (
-              <option key={b.fqbn} value={b.fqbn}>
-                {b.name}
-              </option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
+      />
       <input
         className="input"
         value={name}

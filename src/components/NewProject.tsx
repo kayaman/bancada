@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import BoardPicker from "./BoardPicker";
 import {
   createProject,
   defaultProjectParent,
@@ -60,17 +61,6 @@ export default function NewProject({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Boards are grouped by platform: `board listall` returns hundreds.
-  const grouped = useMemo(() => {
-    const g = new Map<string, BoardOption[]>();
-    for (const b of boards) {
-      const list = g.get(b.platform_name) ?? [];
-      list.push(b);
-      g.set(b.platform_name, list);
-    }
-    return [...g.entries()];
-  }, [boards]);
 
   const effectiveProfile = profile.trim() || profileFor(fqbn);
   const dest = parent && name.trim() ? `${parent}/${name.trim()}` : "";
@@ -179,22 +169,12 @@ export default function NewProject({
 
         <label className="field">
           Board
-          <select
-            className="select"
+          <BoardPicker
+            boards={boards}
             value={fqbn}
-            onChange={(e) => setFqbn(e.target.value)}
-          >
-            <option value="">— choose a board —</option>
-            {grouped.map(([platform, list]) => (
-              <optgroup key={platform} label={platform}>
-                {list.map((b) => (
-                  <option key={b.fqbn} value={b.fqbn}>
-                    {b.name}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+            onChange={setFqbn}
+            title="Board for the project's profile"
+          />
         </label>
         {detectedFqbn && fqbn === detectedFqbn && (
           <div className="scope-dim">preselected from the attached board</div>

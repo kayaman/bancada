@@ -349,6 +349,25 @@ body {
   color: var(--text-dim);
 }
 
+/* Filter input + grouped select, shared by both board pickers. */
+.board-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.board-picker .board-search {
+  width: 130px;
+  flex: none;
+}
+
+.board-picker .select {
+  flex: 1;
+  min-width: 0;
+}
+
 .editor {
   flex: 1;
   overflow: auto;
