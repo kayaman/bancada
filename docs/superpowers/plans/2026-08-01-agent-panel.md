@@ -145,9 +145,11 @@ TypeScript/React 18, vitest, `cargo test`.
   `npx vitest` (agentStore sequences: interleaved deltas, tool lifecycle,
   closed mid-turn; diff; bottomTabs group).
 - **Live (env-gated, like docs/hardware-smoke-tests.md)**: `#[ignore]` +
-  `BANCADA_AGENT_TEST=1` — spawn real `claude`, "reply with the word
-  pong", assert init+result; second test drives `mcp__bancada__verify`
-  end-to-end on a temp Blink sketch.
+  `BANCADA_AGENT_LIVE=1` (the env var Task 5's prototype test actually
+  landed with; this doc originally said `BANCADA_AGENT_TEST=1`, corrected
+  in Task 8) — spawn real `claude`, "reply with the word pong", assert
+  init+result; second test drives `mcp__bancada__verify` end-to-end on a
+  temp Blink sketch with a real (non-stubbed) `arduino-cli` compile.
 - **Manual**: open a sketch with a planted `missing ;`, ask "make this
   build" → diff card → verify card → Console streams → green result. Then:
   Stop mid-turn; kill `claude` externally → closed banner; project without
