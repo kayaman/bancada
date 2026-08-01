@@ -60,7 +60,12 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   --include-partial-messages --permission-mode acceptEdits --allowedTools
   Read,Edit,Write,Glob,Grep,mcp__bancada__verify --disallowedTools
   "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput"
-  --mcp-config <inline JSON pointing at loopback HTTP + bearer token>
+  --mcp-config <path to a 0600 temp file containing the loopback HTTP URL +
+  bearer token as JSON — a path, not inline JSON: a post-review fix (F5)
+  found the token riding argv is world-readable via /proc/<pid>/cmdline on
+  Linux, which defeats the point of a bearer token. `write_mcp_config_file`
+  writes and chmods the file; `agent_start`/`stop_agent_session` delete it
+  on every exit path>
   --strict-mcp-config --append-system-prompt <project dir, profile, "use
   mcp__bancada__verify; iterate until it passes">`. The
   `mcp__bancada__verify` entry in `--allowedTools` is load-bearing (without
@@ -84,8 +89,12 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   - Set generous `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` env on the child — a cold
     ESP32 platform build is multi-minute, longer than the default MCP tool
     timeout.
-  - Frontend calls `agent_stop` on `agent://closed` so the exited child is
-    reaped (no zombies).
+  - Frontend calls `agent_stop(pid)` on `agent://closed` so the exited child
+    is reaped (no zombies) — `pid` is a post-review fix (F4): a stale close
+    from a session already superseded by a newer `agent_start` must not
+    kill the new one, so `agent_stop` refuses unless `pid` matches the
+    *live* session (`should_stop_agent`). The user's explicit "stop"/"new
+    session" action omits `pid` and always proceeds.
 - **`verify` tool**: minimal MCP streamable-HTTP server thread inside the
   Tauri process (`tiny_http` — no reusable server dep exists in the
   workspace; hyper/reqwest are tauri client-side transitives). **Bind
@@ -124,8 +133,10 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   - `{type:"stderr"}` from the stderr drain thread.
   - `{type:"verify_started"}` / `{type:"verify_done"}` around an MCP
     `verify` call, so the frontend can set `busy` during agent builds.
-- **`agent://closed`** — emitted on child EOF, carries `{reason}`. The
-  frontend calls `agent_stop` on receipt so the exited child is reaped.
+- **`agent://closed`** — emitted on child EOF, carries `{reason, pid}`. The
+  frontend calls `agent_stop(pid)` on receipt so the exited child is reaped;
+  `pid` (post-review fix F4) lets `agent_stop` refuse a stale close whose
+  session has since been superseded by a newer `agent_start`.
 
 ### stream-json `AgentEvent` (core/src/agent.rs)
 
@@ -181,7 +192,12 @@ since the wire protocol is undocumented (see Risk R1):
 - Edits auto-apply with no per-edit approval gate (decision 4); the panel
   warns when the project is not under git, since there is no undo path
   without it (see Risk R4).
-- The MCP listener is bearer-token protected and bound to `127.0.0.1`.
+- The MCP listener is bearer-token protected and bound to `127.0.0.1`. The
+  token itself is written to a 0600 temp file and referenced by path in
+  `--mcp-config`, never placed inline in argv (post-review fix F5 — argv is
+  readable by any local process via `/proc/<pid>/cmdline` on Linux, which
+  would have handed the token to exactly the "other local processes" the
+  token exists to keep out).
 
 ## Risks
 

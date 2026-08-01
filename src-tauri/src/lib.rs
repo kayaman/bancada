@@ -12,7 +12,10 @@
 //!                       { type: "unparsed", line }      (non-JSON stdout)
 //!                       { type: "verify_started" }
 //!                       { type: "verify_done", success }
-//!   "agent://closed"    { reason }  (child stdout hit EOF)
+//!   "agent://closed"    { reason, pid }  (child stdout hit EOF; pid is the
+//!                       child's, so the frontend's `agent_stop(pid)` call
+//!                       is a no-op if a newer session has since superseded
+//!                       this one — see `should_stop_agent`)
 //!
 //! Scope commands (`docs/scope-architecture.md` §3): `scope_probe`,
 //! `scope_start`, `scope_single`, `scope_send`, `scope_stop`,
@@ -32,7 +35,11 @@
 //! blocking `recv()` with `Server::unblock()`, which no atomic flag could
 //! do. The child never restarts on its own (same philosophy as the MQTT
 //! thread) — the panel shows "Session ended" and the frontend calls
-//! `agent_stop` on `agent://closed` so the child is reaped.
+//! `agent_stop(pid)` on `agent://closed` so the child is reaped; `pid`
+//! guards a stale close from a superseded session against killing a newer
+//! one (`should_stop_agent`). The `--mcp-config` bearer token rides a 0600
+//! temp file, not argv (`write_mcp_config_file`) — argv is readable by any
+//! local process via `/proc/<pid>/cmdline` on Linux.
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
 //! `verify` tool all drive the same arduino-cli build cache, so they share
@@ -1673,6 +1680,9 @@ struct AgentSession {
     /// parks in `incoming_requests()`, and no flag can break that recv.
     mcp_server: Arc<tiny_http::Server>,
     sketch_dir: String,
+    /// The 0600 temp file backing `--mcp-config` (F5: keeps the bearer token
+    /// off argv) — deleted when the session stops.
+    mcp_config_path: PathBuf,
 }
 
 /// A cold ESP32 platform build runs for minutes — far longer than the
@@ -1736,6 +1746,51 @@ fn random_token() -> String {
     let heap = Box::new(0u8);
     let addr = &*heap as *const u8 as usize;
     format!("{nanos:032x}{addr:016x}")
+}
+
+/// Writes the child's `--mcp-config` JSON (the loopback server's URL plus
+/// its bearer token) to a private temp file, instead of the CLI argv (F5,
+/// post-review fix): argv is visible to any local process via
+/// `/proc/<pid>/cmdline` on Linux, which would hand out the one thing
+/// gating the `verify` listener to whoever asked. 0600 restricts the file
+/// to this user; `agent_start` deletes it on every exit path (spawn
+/// failure, stdio-pipe failure, and the normal `stop_agent_session`).
+///
+/// The filename carries a fresh random nonce, not the token: a temp-dir
+/// *listing* is typically world-readable even when an individual file's
+/// contents aren't, so the secret has no business appearing in the name.
+fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
+    let mcp_config = serde_json::json!({
+        "mcpServers": {
+            "bancada": {
+                "type": "http",
+                "url": format!("http://127.0.0.1:{port}/mcp"),
+                "headers": {
+                    "Authorization": format!("Bearer {token}")
+                }
+            }
+        }
+    });
+    let path = std::env::temp_dir().join(format!("bancada-agent-mcp-{}.json", random_token()));
+    std::fs::write(&path, mcp_config.to_string())
+        .map_err(|e| format!("could not write the agent's MCP config file: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&path);
+            return Err(format!(
+                "could not restrict the agent's MCP config file to this user: {e}"
+            ));
+        }
+    }
+    // Non-unix: no equivalent chmod here (no Windows dev/CI target exists in
+    // this workspace yet). Revisit if/when one does — the file still isn't
+    // *findable* without knowing the random nonce, but that's weaker than a
+    // real ACL.
+
+    Ok(path)
 }
 
 /// The MCP listener thread body: JSON-RPC over loopback HTTP, plus the one
@@ -1905,11 +1960,16 @@ fn stop_agent_session(session: AgentSession) {
         child,
         stdin_tx,
         mcp_server,
+        mcp_config_path,
         ..
     } = session;
     drop(stdin_tx); // the writer thread's recv ends
     mcp_server.unblock(); // the listener's blocking incoming_requests() ends
     kill_child(child);
+    // Best-effort (F5 cleanup): a leftover temp file after a hard crash
+    // isn't worth failing shutdown over, but every normal stop/exit path
+    // reaches here and removes it.
+    let _ = std::fs::remove_file(&mcp_config_path);
 }
 
 /// Mirrors `AgentProbe` in `src/agent/types.ts`, where `version` and `error`
@@ -2010,9 +2070,19 @@ fn agent_start(
         });
     });
 
+    // F5: the bearer token goes into a 0600 temp file, not argv (see
+    // write_mcp_config_file's doc comment) — write it before spawning so its
+    // path can go straight into the child's --mcp-config.
+    let mcp_config_path = match write_mcp_config_file(port, &token) {
+        Ok(path) => path,
+        Err(e) => {
+            server.unblock();
+            return Err(e);
+        }
+    };
+
     let cfg = AgentCfg {
-        mcp_port: port,
-        mcp_token: token,
+        mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
         system_prompt_extra: system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref()),
     };
     let mut child = match std::process::Command::new("claude")
@@ -2028,9 +2098,14 @@ fn agent_start(
         Ok(child) => child,
         Err(e) => {
             server.unblock(); // never leave the listener thread parked
+            let _ = std::fs::remove_file(&mcp_config_path);
             return Err(claude_spawn_error(e));
         }
     };
+    // Captured before stdin/stdout/stderr are taken so the stdout-reader
+    // thread (below) can stamp `agent://closed` with the pid it's about,
+    // for the frontend to relay to `agent_stop` (F4 guard above).
+    let child_pid = child.id();
 
     // All three were just piped, so this cannot realistically fail — but if
     // it ever did, bailing with `?` would strand a live child and a parked
@@ -2041,6 +2116,7 @@ fn agent_start(
             _ => {
                 server.unblock();
                 kill_child(child);
+                let _ = std::fs::remove_file(&mcp_config_path);
                 return Err("the agent's stdio pipes were unavailable".to_string());
             }
         };
@@ -2081,7 +2157,7 @@ fn agent_start(
         }
         let _ = app_out.emit(
             "agent://closed",
-            serde_json::json!({ "reason": "the agent process ended" }),
+            serde_json::json!({ "reason": "the agent process ended", "pid": child_pid }),
         );
     });
 
@@ -2103,6 +2179,7 @@ fn agent_start(
         stdin_tx,
         mcp_server: server,
         sketch_dir,
+        mcp_config_path,
     });
     Ok(())
 }
@@ -2163,12 +2240,40 @@ fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
+/// Whether an `agent_stop` call for `requested_pid` should tear down
+/// `live_pid` (the pid of whatever session is actually running, if any).
+///
+/// `None` means "no pid given" — the user's explicit "stop"/"new session"
+/// action — and always proceeds, same as before this existed. `Some` means
+/// the call is *about* a specific child: `agent://closed`'s stdout-EOF
+/// notification carries the pid of the session that just exited, and the
+/// session that's live by the time the frontend's handler runs might already
+/// be a *different, newer* one (session A's `agent://closed` racing behind
+/// `agent_start` already having stored session B) — reaping session A must
+/// never kill session B.
+fn should_stop_agent(requested_pid: Option<u32>, live_pid: Option<u32>) -> bool {
+    match requested_pid {
+        None => true,
+        Some(pid) => live_pid == Some(pid),
+    }
+}
+
 /// Stop the session and reap the child. Idempotent: the frontend calls this
 /// on `agent://closed` to reap an already-exited child, so "not running" is
 /// success, not an error.
+///
+/// `pid`, when given, must match the *live* session's child pid or this is a
+/// no-op (`should_stop_agent` — guards the race above).
 #[tauri::command]
-fn agent_stop(state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.agent.lock().unwrap().take();
+fn agent_stop(state: State<'_, AppState>, pid: Option<u32>) -> Result<(), String> {
+    let session = {
+        let mut guard = state.agent.lock().unwrap();
+        let live_pid = guard.as_ref().map(|s| s.child.id());
+        if !should_stop_agent(pid, live_pid) {
+            return Ok(());
+        }
+        guard.take()
+    };
     if let Some(session) = session {
         stop_agent_session(session);
     }
@@ -2746,6 +2851,27 @@ mod tests {
         assert!(!bare.contains("FQBN"), "{bare}");
     }
 
+    // F4: a stale `agent://closed` for a superseded session must not kill a
+    // newer one that `agent_start` has since stored.
+    #[test]
+    fn should_stop_agent_with_no_pid_always_proceeds() {
+        assert!(should_stop_agent(None, None));
+        assert!(should_stop_agent(None, Some(42)));
+    }
+
+    #[test]
+    fn should_stop_agent_matches_the_live_pid() {
+        assert!(should_stop_agent(Some(42), Some(42)));
+    }
+
+    #[test]
+    fn should_stop_agent_refuses_a_pid_mismatch_or_no_live_session() {
+        // A newer session (a different live pid) must survive a stale close.
+        assert!(!should_stop_agent(Some(1), Some(2)));
+        // Nothing live at all — also not this call's session to reap.
+        assert!(!should_stop_agent(Some(1), None));
+    }
+
     #[test]
     fn tokens_are_hex_and_do_not_repeat() {
         let a = random_token();
@@ -2753,6 +2879,43 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.len() >= 32, "{a}");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+    }
+
+    // F5: the bearer token moved from argv into this file — pin its
+    // content/permissions/lifecycle directly.
+    #[test]
+    fn mcp_config_file_has_the_right_url_and_bearer_token() {
+        let path = write_mcp_config_file(54321, "sekrit").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        let server = &parsed["mcpServers"]["bancada"];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:54321/mcp");
+        assert_eq!(server["headers"]["Authorization"], "Bearer sekrit");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_config_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = write_mcp_config_file(1, "t").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        // Mask down to the permission bits; the type bits vary by platform.
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mcp_config_file_names_do_not_repeat() {
+        // Each call gets its own nonce-named file — two live sessions (or a
+        // stop/restart in quick succession) must never collide or overwrite
+        // each other's config before cleanup runs.
+        let a = write_mcp_config_file(1, "t").unwrap();
+        let b = write_mcp_config_file(1, "t").unwrap();
+        assert_ne!(a, b);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 
     #[test]
@@ -2787,6 +2950,31 @@ mod tests {
         );
     }
 
+    /// F5 end-to-end: `stop_agent_session` — the real cleanup path, not just
+    /// `write_mcp_config_file` in isolation — must remove the temp file, or
+    /// every session leaks one.
+    #[cfg(unix)]
+    #[test]
+    fn stop_agent_session_removes_the_mcp_config_file() {
+        let (server, port) = bind_mcp_server().unwrap();
+        let mcp_config_path = write_mcp_config_file(port, "t").unwrap();
+        assert!(mcp_config_path.exists());
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let (stdin_tx, _stdin_rx) = std::sync::mpsc::channel::<String>();
+        let session = AgentSession {
+            child,
+            stdin_tx,
+            mcp_server: server,
+            sketch_dir: "/nowhere".to_string(),
+            mcp_config_path: mcp_config_path.clone(),
+        };
+        stop_agent_session(session);
+        assert!(!mcp_config_path.exists());
+    }
+
     // ---------- live round trip (opt-in) ----------
 
     /// The Task 5 Step-0 prototype, kept as an opt-in regression test: a
@@ -2819,9 +3007,9 @@ mod tests {
         let cli = stub_cli(&dir, &format!("echo '{sentinel}' >&2\nexit 1"));
         let l = start_listener(cli, &sketch.path().to_string_lossy(), gate());
 
+        let mcp_config_path = write_mcp_config_file(l.port, &l.token).unwrap();
         let cfg = AgentCfg {
-            mcp_port: l.port,
-            mcp_token: l.token.clone(),
+            mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(
                 &sketch.path().to_string_lossy(),
                 Some("test"),
@@ -2860,6 +3048,7 @@ mod tests {
             }
         }
         let _ = child.wait();
+        let _ = std::fs::remove_file(&mcp_config_path);
 
         assert!(
             saw_sentinel,

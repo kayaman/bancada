@@ -274,13 +274,21 @@ describe("agent commands", () => {
     expect(called()).toEqual(["agent_send", { text: "make this build" }]);
   });
 
-  it("agentProbe, agentInterrupt and agentStop take no arguments", async () => {
+  it("agentProbe and agentInterrupt take no arguments", async () => {
     await api.agentProbe();
     expect(called()[0]).toBe("agent_probe");
     await api.agentInterrupt();
     expect(called()[0]).toBe("agent_interrupt");
+  });
+
+  it("agentStop nulls an omitted pid", async () => {
     await api.agentStop();
-    expect(called()[0]).toBe("agent_stop");
+    expect(called()).toEqual(["agent_stop", { pid: null }]);
+  });
+
+  it("agentStop forwards a given pid (F4 guard: agent_stop refuses a stale pid)", async () => {
+    await api.agentStop(4242);
+    expect(called()).toEqual(["agent_stop", { pid: 4242 }]);
   });
 
   it("onAgentEvent and onAgentClosed subscribe to the exact event names", async () => {

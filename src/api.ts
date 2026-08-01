@@ -605,8 +605,16 @@ export const agentStart = (sketchDir: string, profile?: string, fqbn?: string) =
 export const agentSend = (text: string) => invoke<void>("agent_send", { text });
 /** Best-effort control-protocol interrupt; the host kills the child if it doesn't land. */
 export const agentInterrupt = () => invoke<void>("agent_interrupt");
-/** Kills the child (if any) and stops the loopback MCP listener. */
-export const agentStop = () => invoke<void>("agent_stop");
+/**
+ * Kills the child (if any) and stops the loopback MCP listener.
+ *
+ * `pid`, when given, must match the *live* session's child pid or this is a
+ * no-op — guards a stale `agent://closed` (from a session already
+ * superseded by a newer `agentStart`) against killing the new one. Omit it
+ * for an explicit user stop ("New session"), which always proceeds.
+ */
+export const agentStop = (pid?: number) =>
+  invoke<void>("agent_stop", { pid: pid ?? null });
 
 // ---------- events ----------
 
@@ -626,9 +634,10 @@ export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
  * stderr/verify events — see `src/agent/types.ts`. */
 export const onAgentEvent = (cb: (ev: AgentEvent) => void): Promise<UnlistenFn> =>
   listen<AgentEvent>("agent://event", (e) => cb(e.payload));
-/** Fires once on child EOF; the frontend should call `agentStop` on receipt
- * so the exited child is reaped. */
+/** Fires once on child EOF; the frontend should call `agentStop(p.pid)` on
+ * receipt so the exited child is reaped — passing `pid` lets the backend
+ * refuse to kill a newer session that has since superseded this one. */
 export const onAgentClosed = (
-  cb: (p: { reason: string }) => void,
+  cb: (p: { reason: string; pid: number }) => void,
 ): Promise<UnlistenFn> =>
-  listen<{ reason: string }>("agent://closed", (e) => cb(e.payload));
+  listen<{ reason: string; pid: number }>("agent://closed", (e) => cb(e.payload));

@@ -312,8 +312,12 @@ export default function App() {
       }),
       api.onAgentClosed((p) => {
         agentStore.closed(p.reason);
-        // Reap the exited child (spec: "frontend calls agent_stop on receipt").
-        api.agentStop().catch(() => {});
+        // Reap the exited child (spec: "frontend calls agent_stop on
+        // receipt"). Pass the pid this event is about (F4): agent_start may
+        // already have stored a newer session by the time this handler
+        // runs, and agent_stop(pid) is a no-op unless pid still matches the
+        // live session, so a stale close can never kill the new one.
+        api.agentStop(p.pid).catch(() => {});
       }),
     ];
     api
@@ -477,6 +481,11 @@ export default function App() {
         next.delete(openFile);
         return next;
       });
+      // Same resolution point saveAll() is for the whole conflict set (F1):
+      // this file's buffer is no longer unsaved, so it's no longer a
+      // conflict either. Ctrl+S is the documented way to resolve one, so it
+      // has to actually do it.
+      agentConflictsRef.current.delete(openFile);
       notify(`Saved ${openFile}`);
     } catch (e) {
       notify(String(e), true);
@@ -720,10 +729,12 @@ export default function App() {
     if (rel !== openFileRef.current) return;
     if (buffersRef.current.has(rel)) {
       // The user has unsaved edits to the same file the agent just changed
-      // on disk — reading it in now would silently discard one side.
+      // on disk — reading it in now would silently discard one side. There
+      // is no "discard" action in this editor (a dirty buffer always wins on
+      // reopen), so the only real way out is to save it.
       agentConflictsRef.current.add(rel);
       notify(
-        `The assistant edited ${rel} while you had unsaved changes — save (Ctrl+S) or discard your edits to resolve the conflict before sending another message.`,
+        `The assistant edited ${rel} while you had unsaved changes — save the file (Ctrl+S) to resolve the conflict before sending another message.`,
         true,
       );
       return;
@@ -760,6 +771,10 @@ export default function App() {
         .messages.find((m) => m.kind === "tool" && m.id === toolUseId);
       if (!msg || msg.kind !== "tool") continue;
       if (msg.name !== "Edit" && msg.name !== "Write") continue;
+      // A failed Edit/Write (e.g. old_string not found) never touched the
+      // file — treating it as a change would raise a false-positive conflict
+      // on a file the agent never actually wrote.
+      if (msg.status === "error") continue;
       const input = msg.input;
       const filePath =
         typeof input === "object" && input !== null
@@ -778,7 +793,7 @@ export default function App() {
   const sendToAgent = async (text: string) => {
     if (agentConflictsRef.current.size > 0) {
       notify(
-        "Resolve the assistant's file conflict first — save or discard your edits, then try again.",
+        "Resolve the assistant's file conflict first — save the file (Ctrl+S), then try again.",
         true,
       );
       return;

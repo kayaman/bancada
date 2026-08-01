@@ -261,8 +261,15 @@ pub fn interrupt_json(request_id: &str) -> String {
 // ---------- agent_args ----------
 
 pub struct AgentCfg {
-    pub mcp_port: u16,
-    pub mcp_token: String,
+    /// Path to a JSON file holding the `--mcp-config` payload (the loopback
+    /// server's URL plus its bearer token). A *path*, never the token
+    /// itself: argv is visible to any local process via `/proc/<pid>/cmdline`
+    /// on Linux, so an inline `--mcp-config <json-with-the-token>` would leak
+    /// the one thing gating the `verify` listener. The caller (src-tauri's
+    /// `agent_start`) owns writing this file at 0600 and deleting it when
+    /// the session stops — core only embeds the path; it does no file I/O
+    /// of its own.
+    pub mcp_config_path: String,
     /// Project dir/profile context, composed by the caller and appended to
     /// the agent's system prompt via `--append-system-prompt`.
     pub system_prompt_extra: String,
@@ -276,7 +283,10 @@ pub struct AgentCfg {
 /// stalls forever on a permission prompt it has no way to answer.
 /// `--strict-mcp-config` keeps the user's personal MCP servers out of the
 /// embedded session, leaving only the loopback `bancada` server from
-/// `--mcp-config`.
+/// `--mcp-config`. `--mcp-config` takes `cfg.mcp_config_path` — a *file
+/// path*, not inline JSON — because inline JSON would put the loopback
+/// server's bearer token straight into argv, world-readable via
+/// `/proc/<pid>/cmdline` on Linux (fixed post-review; see `AgentCfg::mcp_config_path`).
 ///
 /// ## Why `--bare` is *not* here (risk R3, resolved by the Task 5 prototype)
 ///
@@ -299,19 +309,6 @@ pub struct AgentCfg {
 /// The residue is that the user's own hooks, skills and plugins do load
 /// into the embedded session.
 pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
-    let mcp_config = serde_json::json!({
-        "mcpServers": {
-            "bancada": {
-                "type": "http",
-                "url": format!("http://127.0.0.1:{}/mcp", cfg.mcp_port),
-                "headers": {
-                    "Authorization": format!("Bearer {}", cfg.mcp_token)
-                }
-            }
-        }
-    })
-    .to_string();
-
     vec![
         "-p".to_string(),
         "--verbose".to_string(),
@@ -327,7 +324,7 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--disallowedTools".to_string(),
         "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput".to_string(),
         "--mcp-config".to_string(),
-        mcp_config,
+        cfg.mcp_config_path.clone(),
         "--strict-mcp-config".to_string(),
         "--append-system-prompt".to_string(),
         cfg.system_prompt_extra.clone(),
@@ -783,8 +780,7 @@ mod tests {
         // tools/call for mcp__bancada__verify stalls on a permission
         // prompt that can never be answered.
         let cfg = AgentCfg {
-            mcp_port: 4321,
-            mcp_token: "secret-token".to_string(),
+            mcp_config_path: "/tmp/bancada-agent-mcp-abc.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
         };
         let args = agent_args(&cfg);
@@ -799,8 +795,7 @@ mod tests {
     #[test]
     fn agent_args_disallows_bash_and_friends() {
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -814,8 +809,7 @@ mod tests {
     #[test]
     fn agent_args_isolates_the_session_with_strict_mcp_config() {
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -830,8 +824,7 @@ mod tests {
         // with `authentication_failed` on turn one. See the `agent_args`
         // doc comment for the full rationale.
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -843,27 +836,30 @@ mod tests {
     }
 
     #[test]
-    fn agent_args_mcp_config_json_parses_with_the_right_url_and_bearer_token() {
+    fn agent_args_mcp_config_is_a_path_not_inline_json() {
+        // F5 (post-review security fix): the bearer token must never ride
+        // argv (world-readable via /proc/<pid>/cmdline) — --mcp-config takes
+        // the path to a file the caller wrote it into instead. Building and
+        // parsing that file's JSON is now src-tauri's job (it owns the
+        // token/port and the temp file), so this only pins that core embeds
+        // the given path verbatim and does not turn it into JSON itself.
         let cfg = AgentCfg {
-            mcp_port: 54321,
-            mcp_token: "sekrit".to_string(),
+            mcp_config_path: "/tmp/bancada-agent-mcp-sekrit-nonce.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
-        let parsed: Value =
-            serde_json::from_str(&args[idx + 1]).expect("mcp-config must be valid JSON");
-        let server = &parsed["mcpServers"]["bancada"];
-        assert_eq!(server["type"], "http");
-        assert_eq!(server["url"], "http://127.0.0.1:54321/mcp");
-        assert_eq!(server["headers"]["Authorization"], "Bearer sekrit");
+        assert_eq!(args[idx + 1], "/tmp/bancada-agent-mcp-sekrit-nonce.json");
+        assert!(
+            serde_json::from_str::<Value>(&args[idx + 1]).is_err(),
+            "the --mcp-config argv value must be a bare path, not JSON"
+        );
     }
 
     #[test]
     fn agent_args_carries_the_system_prompt_extra_verbatim() {
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: "project at /home/me/Blink, profile esp32s3".to_string(),
         };
         let args = agent_args(&cfg);
@@ -879,8 +875,7 @@ mod tests {
         // cwd is a std::process::Command concern set by the caller, not an
         // argv entry — arduino-cli's spec has no such flag either.
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -890,8 +885,7 @@ mod tests {
     #[test]
     fn agent_args_starts_with_the_documented_flag_sequence() {
         let cfg = AgentCfg {
-            mcp_port: 1,
-            mcp_token: "t".to_string(),
+            mcp_config_path: "/tmp/x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
