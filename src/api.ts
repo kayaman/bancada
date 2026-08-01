@@ -377,8 +377,10 @@ export const addPlatformToProfile = (
 
 // ---------- new projects ----------
 
-/** Sketchbook root — the default place to create a new project. */
+/** Sketchbook root — the conventional Arduino home for sketches. */
 export const sketchbookDir = () => invoke<string>("sketchbook_dir");
+/** ~/Projects when it exists, else the home directory. */
+export const defaultProjectParent = () => invoke<string>("default_project_parent");
 /** Every board of every installed platform, grouped-ready for a picker. */
 export const listAllBoards = () => invoke<BoardOption[]>("list_all_boards");
 /**

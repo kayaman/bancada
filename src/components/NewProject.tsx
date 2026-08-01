@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   createProject,
+  defaultProjectParent,
   listAllBoards,
   loadSettings,
   saveSettings,
   searchLibraries,
-  sketchbookDir,
   type BoardOption,
   type IndexedLibrary,
 } from "../api";
@@ -38,17 +38,17 @@ export default function NewProject({
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [working, setWorking] = useState(false);
 
-  // Default the location to wherever the last project went, falling back to the
-  // sketchbook — the conventional home, but not everyone keeps sketches there.
+  // Default the location to wherever the last project went, falling back to
+  // ~/Projects — or the home directory itself for users who don't keep one.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [settings, book] = await Promise.all([
+      const [settings, fallback] = await Promise.all([
         loadSettings().catch(() => ({}) as Awaited<ReturnType<typeof loadSettings>>),
-        sketchbookDir().catch(() => ""),
+        defaultProjectParent().catch(() => ""),
       ]);
       if (cancelled) return;
-      setParent(settings.last_new_project_parent || book);
+      setParent(settings.last_new_project_parent || fallback);
     })();
     listAllBoards()
       .then((b) => {
