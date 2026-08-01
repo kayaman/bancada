@@ -6,6 +6,13 @@
 //!   "serial://line"     { stream, line }
 //!   "serial://closed"   {}
 //!   "ports://changed"   {}  (the set of serial ports on the machine changed)
+//!   "agent://event"     the claude CLI's own stream-json event object,
+//!                       verbatim, plus these synthetic ones the host adds:
+//!                       { type: "stderr", line }        (child stderr)
+//!                       { type: "unparsed", line }      (non-JSON stdout)
+//!                       { type: "verify_started" }
+//!                       { type: "verify_done", success }
+//!   "agent://closed"    { reason }  (child stdout hit EOF)
 //!
 //! Scope commands (`docs/scope-architecture.md` §3): `scope_probe`,
 //! `scope_start`, `scope_single`, `scope_send`, `scope_stop`,
@@ -14,6 +21,18 @@
 //! events) over a `tauri::ipc::Channel` instead of events. The serial port
 //! has a single owner at a time — monitor child process or scope session —
 //! and acquiring it for one evicts the other.
+//!
+//! Agent commands (Assistant panel): `agent_probe`, `start_agent`,
+//! `agent_send`, `agent_interrupt`, `stop_agent`. One `claude` child per
+//! session, driven over stdio stream-json, with four detached threads —
+//! stdin writer (fed by an mpsc channel, so the `agent` mutex is never held
+//! across a pipe write), stdout reader, stderr drain, and a loopback
+//! `tiny_http` MCP listener serving the `verify` tool. The listener gets
+//! owned clones at spawn time and never locks `agent`; shutdown breaks its
+//! blocking `recv()` with `Server::unblock()`, which no atomic flag could
+//! do. The child never restarts on its own (same philosophy as the MQTT
+//! thread) — the panel shows "Session ended" and the frontend calls
+//! `stop_agent` on `agent://closed` so the child is reaped.
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
 //! `verify` tool all drive the same arduino-cli build cache, so they share
@@ -72,6 +91,8 @@ struct AppState {
     serial: Mutex<Option<SerialOwner>>,
     /// MQTT broker session — a sibling of `serial`, never coupled to it.
     mqtt: Mutex<Option<MqttSession>>,
+    /// Embedded `claude` session — another sibling slot, one at a time.
+    agent: Mutex<Option<AgentSession>>,
     /// Serialises every arduino-cli build in the process — user Verify,
     /// user Upload, and the agent's MCP `verify` tool all share one build
     /// cache, and nothing but the frontend's `busy` flag used to keep them
@@ -1617,6 +1638,528 @@ fn save_mqtt_config(app: AppHandle, cfg: mqtt::MqttConfig) -> Result<(), String>
     mqtt::save(&mqtt_config_path(&app)?, &cfg).map_err(err_str)
 }
 
+// ---------- agent (Assistant panel) ----------
+
+use bancada_core::agent::{self, AgentCfg};
+use bancada_core::mcp::{self, McpReply};
+use bancada_core::types::OutputLine;
+
+/// A running embedded `claude` session.
+///
+/// Thread discipline mirrors the monitor/scope/MQTT sessions: the handles
+/// that must be reachable from a command live under the `agent` mutex, and
+/// everything that *reads* or *blocks* lives on a detached thread that never
+/// touches that mutex. In particular `stdin_tx` is an mpsc sender rather
+/// than the child's `ChildStdin`: writing to the pipe under the mutex would
+/// deadlock the moment a message exceeds the 64 KB pipe buffer while the
+/// child is itself blocked waiting on an MCP reply.
+struct AgentSession {
+    child: Child,
+    /// Writer-thread channel. Commands clone this out of the mutex, drop
+    /// the guard, and only then send — the mutex is never held across a
+    /// write to the child.
+    stdin_tx: std::sync::mpsc::Sender<String>,
+    /// Kept solely so shutdown can call `unblock()`: the listener thread
+    /// parks in `incoming_requests()`, and no flag can break that recv.
+    mcp_server: Arc<tiny_http::Server>,
+    sketch_dir: String,
+}
+
+/// A cold ESP32 platform build runs for minutes — far longer than the
+/// default MCP tool timeout, which would abort `verify` mid-compile.
+const MCP_TIMEOUT_MS: &str = "600000";
+
+/// Hard cap on an MCP request body, enforced before anything is parsed.
+const MCP_MAX_BODY: usize = 1024 * 1024;
+
+/// Caps for the build summary handed back to the agent (spec decision #7).
+const VERIFY_MAX_LINES: usize = 200;
+const VERIFY_MAX_BYTES: usize = 50_000;
+
+/// Everything the MCP listener thread needs, owned outright.
+///
+/// Deliberately a set of **clones taken at `agent_start`**: the listener
+/// must never lock `state.agent`, or a `verify` arriving while a command
+/// holds that mutex would deadlock the compile against the UI. The
+/// trade-off is that a session keeps the profile/fqbn it was started with
+/// even if the user switches boards mid-session.
+struct McpVerifyCtx {
+    token: String,
+    cli: ArduinoCli,
+    sketch_dir: String,
+    profile: Option<String>,
+    fqbn: Option<String>,
+    build_gate: Arc<Mutex<()>>,
+}
+
+/// Bind the MCP listener on a kernel-assigned loopback port and read the
+/// real port back — no collision roulette over a hardcoded number.
+fn bind_mcp_server() -> Result<(Arc<tiny_http::Server>, u16), String> {
+    let server = tiny_http::Server::http("127.0.0.1:0")
+        .map_err(|e| format!("could not start the agent's MCP listener: {e}"))?;
+    let port = match server.server_addr() {
+        tiny_http::ListenAddr::IP(addr) => addr.port(),
+        other => return Err(format!("MCP listener bound to a non-IP address: {other:?}")),
+    };
+    Ok((Arc::new(server), port))
+}
+
+/// A per-session bearer token for the loopback MCP listener.
+///
+/// The workspace has no `rand` dependency (`mqtt::client_id` solves its own
+/// uniqueness problem the same way), so read 16 bytes from the OS entropy
+/// pool directly and fall back to a clock/ASLR mix where that file does not
+/// exist. The listener is bound to `127.0.0.1`, so this only has to keep
+/// *other local processes* from driving the user's compiler.
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok()
+    {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let heap = Box::new(0u8);
+    let addr = &*heap as *const u8 as usize;
+    format!("{nanos:032x}{addr:016x}")
+}
+
+/// The MCP listener thread body: JSON-RPC over loopback HTTP, plus the one
+/// tool that actually does work.
+///
+/// `emit` is the only way out of this thread — production passes
+/// `AppHandle::emit`, tests pass a collector, which is what makes the whole
+/// listener testable without standing up a Tauri app.
+///
+/// Returns when `unblock()` is called on the server (see [`AgentSession`]).
+fn mcp_listener_loop(
+    server: Arc<tiny_http::Server>,
+    ctx: McpVerifyCtx,
+    emit: impl Fn(&str, serde_json::Value),
+) {
+    let tools = vec![mcp::verify_tool_def()];
+
+    for mut request in server.incoming_requests() {
+        // The CLI's MCP client opens a `GET /mcp` server->client SSE stream
+        // alongside its POSTs. This server offers no such stream, and the
+        // spec's answer for that is 405 — feeding the empty GET body through
+        // `handle_request` instead returns a JSON-RPC parse error, which the
+        // client treats as a broken stream and reconnects from in a tight
+        // busy-loop (observed during the Task 5 prototype).
+        if request.method() != &tiny_http::Method::Post {
+            let _ = request.respond(tiny_http::Response::empty(405));
+            continue;
+        }
+
+        let auth = request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("Authorization"))
+            .map(|h| h.value.as_str().to_string());
+        if !mcp::check_bearer(auth.as_deref(), &ctx.token) {
+            let _ = request.respond(tiny_http::Response::empty(401));
+            continue;
+        }
+
+        // Size cap *before* parsing: a request body is attacker-controlled
+        // in the sense that any local process can POST here, and
+        // `read_to_string` on an unbounded reader would otherwise let one
+        // of them push the whole app into swap.
+        let mut body = String::new();
+        let read = request
+            .as_reader()
+            .take(MCP_MAX_BODY as u64 + 1)
+            .read_to_string(&mut body);
+        if read.is_err() || body.len() > MCP_MAX_BODY {
+            let _ = request.respond(tiny_http::Response::empty(413));
+            continue;
+        }
+
+        match mcp::handle_request(&body, &tools) {
+            // Spec-required: a JSON-RPC notification has no id to correlate
+            // a reply with, so it gets 202 and an empty body, never JSON.
+            McpReply::NoContent => {
+                let _ = request.respond(tiny_http::Response::empty(202));
+            }
+            McpReply::Json(json) => {
+                let _ = request.respond(json_response(json));
+            }
+            McpReply::CallTool { id, name, .. } => {
+                let (text, is_error) = if name == "verify" {
+                    run_verify(&ctx, &emit)
+                } else {
+                    // Unreachable via `handle_request`, which rejects tools
+                    // outside `tools` — belt and braces.
+                    (format!("unknown tool: {name}"), true)
+                };
+                let _ = request.respond(json_response(mcp::tool_result_json(&id, &text, is_error)));
+            }
+        }
+    }
+}
+
+/// The `verify` tool: the same `cli.compile` path the toolbar's Verify
+/// button runs, with the same `build://line` stream, so agent builds show up
+/// in the Console for free.
+fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (String, bool) {
+    // Shared with compile_sketch/upload_sketch: an agent build must not race
+    // a user build through the same arduino-cli build cache (risk R5).
+    let _gate = match try_build_gate(&ctx.build_gate) {
+        Ok(guard) => guard,
+        Err(busy) => return (busy, true),
+    };
+
+    emit(
+        "agent://event",
+        serde_json::json!({ "type": "verify_started" }),
+    );
+
+    let mut collected: Vec<OutputLine> = Vec::new();
+    let run = ctx.cli.compile(
+        &ctx.sketch_dir,
+        ctx.profile.as_deref(),
+        ctx.fqbn.as_deref(),
+        &[],
+        |line| {
+            if let Ok(value) = serde_json::to_value(&line) {
+                emit("build://line", value);
+            }
+            collected.push(line);
+        },
+    );
+
+    match run {
+        Ok(result) => {
+            emit(
+                "agent://event",
+                serde_json::json!({ "type": "verify_done", "success": result.success }),
+            );
+            let summary =
+                agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
+            let text = format!(
+                "success: {}\nexit_code: {}\n\n{summary}",
+                result.success, result.exit_code
+            );
+            // `isError` is false even for a *failed* build: the tool itself
+            // ran fine, and the whole point of the session is to iterate on
+            // compiler errors. Flagging the normal path of a fix-the-build
+            // loop as a tool failure invites the model to stop calling the
+            // tool. `isError` is reserved for "the tool could not run".
+            (text, false)
+        }
+        Err(e) => {
+            emit(
+                "agent://event",
+                serde_json::json!({ "type": "verify_done", "success": false }),
+            );
+            (format!("verify could not run: {e}"), true)
+        }
+    }
+}
+
+fn json_response(json: String) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+        .expect("static header is valid");
+    tiny_http::Response::from_string(json).with_header(header)
+}
+
+/// The project context appended to the agent's system prompt.
+fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&str>) -> String {
+    let mut out = format!(
+        "You are embedded in Bancada, an Arduino workbench. The Arduino \
+         project you are working on is at {sketch_dir}, which is also your \
+         working directory."
+    );
+    if let Some(profile) = profile {
+        out.push_str(&format!(" The active sketch.yaml profile is {profile}."));
+    }
+    if let Some(fqbn) = fqbn {
+        out.push_str(&format!(" The active board FQBN is {fqbn}."));
+    }
+    out.push_str(
+        " To compile, use the mcp__bancada__verify tool — never shell out to \
+         arduino-cli, and never try to upload to the board. After every edit, \
+         run mcp__bancada__verify and iterate until the build passes.",
+    );
+    out
+}
+
+/// Tear a session down: close the writer channel, stop the listener, then
+/// kill and reap the child so no zombie is left behind.
+fn stop_agent_session(session: AgentSession) {
+    let AgentSession {
+        child,
+        stdin_tx,
+        mcp_server,
+        ..
+    } = session;
+    drop(stdin_tx); // the writer thread's recv ends
+    mcp_server.unblock(); // the listener's blocking incoming_requests() ends
+    kill_child(child);
+}
+
+#[derive(serde::Serialize)]
+struct AgentProbe {
+    ok: bool,
+    version: Option<String>,
+    error: Option<String>,
+}
+
+/// Is the `claude` CLI available? Resolved from PATH, like arduino-cli and
+/// esptool; a settings override can follow later if users need one.
+#[tauri::command]
+async fn agent_probe() -> Result<AgentProbe, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        match std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+        {
+            Ok(out) if out.status.success() => AgentProbe {
+                ok: true,
+                version: Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+                error: None,
+            },
+            Ok(out) => AgentProbe {
+                ok: false,
+                version: None,
+                error: Some(format!(
+                    "`claude --version` failed ({}): {}",
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+            },
+            Err(e) => AgentProbe {
+                ok: false,
+                version: None,
+                error: Some(claude_spawn_error(e)),
+            },
+        }
+    })
+    .await
+    .map_err(err_str)
+}
+
+fn claude_spawn_error(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "Claude Code is not installed (no `claude` on PATH) — install it and \
+         log in with `claude` once, then try again"
+            .to_string()
+    } else {
+        format!("could not start Claude Code: {e}")
+    }
+}
+
+/// Start an embedded agent session for `sketch_dir`.
+///
+/// Spawns, in order: the loopback MCP listener (bound first, because its
+/// real port goes into the child's `--mcp-config`), the `claude` child with
+/// cwd = the sketch dir, and the three pipe threads. Nothing here blocks,
+/// so this stays a sync command like `start_monitor`.
+#[tauri::command]
+fn start_agent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sketch_dir: String,
+    profile: Option<String>,
+    fqbn: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state.agent.lock().unwrap();
+    if let Some(existing) = guard.as_ref() {
+        return Err(format!(
+            "an agent session is already running for {}",
+            existing.sketch_dir
+        ));
+    }
+
+    let (server, port) = bind_mcp_server()?;
+    let token = random_token();
+
+    // ---------- thread 1 of 4: MCP listener (owned clones, never locks agent)
+    let ctx = McpVerifyCtx {
+        token: token.clone(),
+        cli: state.cli.clone(),
+        sketch_dir: sketch_dir.clone(),
+        profile: profile.clone(),
+        fqbn: fqbn.clone(),
+        build_gate: state.build_gate.clone(),
+    };
+    let listener_server = server.clone();
+    let listener_app = app.clone();
+    std::thread::spawn(move || {
+        mcp_listener_loop(listener_server, ctx, move |event, payload| {
+            let _ = listener_app.emit(event, payload);
+        });
+    });
+
+    let cfg = AgentCfg {
+        mcp_port: port,
+        mcp_token: token,
+        system_prompt_extra: system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref()),
+    };
+    let mut child = match std::process::Command::new("claude")
+        .args(agent::agent_args(&cfg))
+        .current_dir(&sketch_dir)
+        .env("MCP_TOOL_TIMEOUT", MCP_TIMEOUT_MS)
+        .env("MCP_TIMEOUT", MCP_TIMEOUT_MS)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            server.unblock(); // never leave the listener thread parked
+            return Err(claude_spawn_error(e));
+        }
+    };
+
+    // All three were just piped, so this cannot realistically fail — but if
+    // it ever did, bailing with `?` would strand a live child and a parked
+    // listener thread with no handle left to stop either.
+    let (mut child_stdin, stdout, stderr) =
+        match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
+            (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
+            _ => {
+                server.unblock();
+                kill_child(child);
+                return Err("the agent's stdio pipes were unavailable".to_string());
+            }
+        };
+
+    // ---------- thread 2 of 4: stdin writer
+    // The mutex is never held across a pipe write; commands hand lines here.
+    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in stdin_rx {
+            if writeln!(child_stdin, "{line}").is_err() || child_stdin.flush().is_err() {
+                break; // child gone; agent_stop reaps it
+            }
+        }
+    });
+
+    // ---------- thread 3 of 4: stdout reader (stream-json)
+    let app_out = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            // `parse_event` is the validity gate, but what reaches the
+            // frontend is the CLI's own event object verbatim: the panel's
+            // contract is the wire shape, not a re-modelled subset that
+            // would silently drop fields core doesn't happen to name.
+            match agent::parse_event(&line) {
+                Ok(_) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let _ = app_out.emit("agent://event", value);
+                    }
+                }
+                // The only `Err` case is a line that isn't JSON at all.
+                Err(_) => {
+                    let _ = app_out.emit(
+                        "agent://event",
+                        serde_json::json!({ "type": "unparsed", "line": line }),
+                    );
+                }
+            }
+        }
+        let _ = app_out.emit(
+            "agent://closed",
+            serde_json::json!({ "reason": "the agent process ended" }),
+        );
+    });
+
+    // ---------- thread 4 of 4: stderr drain
+    // Not optional: an undrained pipe fills and wedges the child, the same
+    // reason `start_monitor` runs two reader threads.
+    let app_err = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            let _ = app_err.emit(
+                "agent://event",
+                serde_json::json!({ "type": "stderr", "line": line }),
+            );
+        }
+    });
+
+    *guard = Some(AgentSession {
+        child,
+        stdin_tx,
+        mcp_server: server,
+        sketch_dir,
+    });
+    Ok(())
+}
+
+/// Queue a user message for the child's stdin.
+#[tauri::command]
+fn agent_send(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    // Clone the sender out and drop the guard *before* sending: no write to
+    // the child ever happens while the agent mutex is held.
+    let tx = {
+        let guard = state.agent.lock().unwrap();
+        let Some(session) = guard.as_ref() else {
+            return Err("the agent is not running".to_string());
+        };
+        session.stdin_tx.clone()
+    };
+    tx.send(agent::user_message_json(&text))
+        .map_err(|_| "the agent's stdin writer has stopped".to_string())
+}
+
+/// Interrupt the current turn.
+///
+/// Sends the CLI's undocumented `control_request` interrupt line
+/// best-effort, then kills the child after a short grace period. The kill is
+/// **unconditional** — the trade-off is deliberate: the control protocol is
+/// unverified, so the only reliable stop is the one the OS guarantees, and
+/// the cost is that interrupting ends the session (the stdout reader emits
+/// `agent://closed`, and the next message needs a fresh `start_agent`)
+/// rather than merely ending the turn.
+#[tauri::command]
+fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let (tx, pid) = {
+        let guard = state.agent.lock().unwrap();
+        let Some(session) = guard.as_ref() else {
+            return Err("the agent is not running".to_string());
+        };
+        (session.stdin_tx.clone(), session.child.id())
+    };
+    let _ = tx.send(agent::interrupt_json(&format!("int-{}", now_millis())));
+
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        let state = app.state::<AppState>();
+        let session = {
+            let mut guard = state.agent.lock().unwrap();
+            // Only kill the session this interrupt was aimed at: two seconds
+            // is long enough for the user to have stopped it and started a
+            // new one, which must not be collateral damage.
+            match guard.as_ref() {
+                Some(session) if session.child.id() == pid => guard.take(),
+                _ => None,
+            }
+        }; // guard dropped before the blocking kill/wait below
+        if let Some(session) = session {
+            stop_agent_session(session);
+        }
+    });
+    Ok(())
+}
+
+/// Stop the session and reap the child. Idempotent: the frontend calls this
+/// on `agent://closed` to reap an already-exited child, so "not running" is
+/// success, not an error.
+#[tauri::command]
+fn stop_agent(state: State<'_, AppState>) -> Result<(), String> {
+    let session = state.agent.lock().unwrap().take();
+    if let Some(session) = session {
+        stop_agent_session(session);
+    }
+    Ok(())
+}
+
 // ---------- entry point ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1628,6 +2171,7 @@ pub fn run() {
                 cli: ArduinoCli::default(),
                 serial: Mutex::new(None),
                 mqtt: Mutex::new(None),
+                agent: Mutex::new(None),
                 build_gate: Arc::new(Mutex::new(())),
             });
             // Hotplug watcher: enumeration (does the port exist?) is orders of
@@ -1712,7 +2256,12 @@ pub fn run() {
             mqtt_unsubscribe,
             mqtt_disconnect,
             load_mqtt_config,
-            save_mqtt_config
+            save_mqtt_config,
+            agent_probe,
+            start_agent,
+            agent_send,
+            agent_interrupt,
+            stop_agent
         ])
         .build(tauri::generate_context!())
         .expect("error while building Bancada")
@@ -1727,6 +2276,579 @@ pub fn run() {
                 if let Some(session) = mqtt_session {
                     stop_mqtt_session(session);
                 }
+                // ---------- agent ---------- same teardown as `stop_agent`:
+                // kill and reap the child rather than orphan it.
+                let agent_session = state.agent.lock().unwrap().take();
+                if let Some(session) = agent_session {
+                    stop_agent_session(session);
+                }
             }
         });
+}
+
+// ---------- tests ----------
+
+/// The agent panel's host-side plumbing, exercised over real loopback HTTP
+/// against a stub `arduino-cli` (the `with_stub` script trick from
+/// `core/src/cli.rs`'s tests). None of this needs Tauri: `mcp_listener_loop`
+/// takes its emitter as a closure precisely so a test can collect events
+/// where production calls `AppHandle::emit`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    use std::sync::mpsc;
+
+    // ---------- harness ----------
+
+    type Events = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// A listener thread plus the handles a test needs to talk to it. Dropping
+    /// it unblocks and joins the thread, so no test leaks a listener.
+    struct TestListener {
+        port: u16,
+        token: String,
+        server: Arc<tiny_http::Server>,
+        events: Events,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestListener {
+        fn auth(&self) -> String {
+            format!("Bearer {}", self.token)
+        }
+
+        fn event_types(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name == "agent://event")
+                .filter_map(|(_, v)| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                .collect()
+        }
+
+        fn build_lines(&self) -> Vec<serde_json::Value> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name == "build://line")
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+    }
+
+    impl Drop for TestListener {
+        fn drop(&mut self) {
+            self.server.unblock();
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    fn start_listener(cli: ArduinoCli, sketch_dir: &str, gate: Arc<Mutex<()>>) -> TestListener {
+        let (server, port) = bind_mcp_server().expect("bind loopback");
+        let token = random_token();
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+
+        let ctx = McpVerifyCtx {
+            token: token.clone(),
+            cli,
+            sketch_dir: sketch_dir.to_string(),
+            profile: None,
+            fqbn: None,
+            build_gate: gate,
+        };
+        let thread_server = server.clone();
+        let thread_events = events.clone();
+        let join = std::thread::spawn(move || {
+            mcp_listener_loop(thread_server, ctx, move |name, payload| {
+                thread_events
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), payload));
+            });
+        });
+
+        TestListener {
+            port,
+            token,
+            server,
+            events,
+            join: Some(join),
+        }
+    }
+
+    /// One HTTP round trip, hand-rolled: the workspace has no HTTP client and
+    /// this needs to send exactly what it says it sends (including a missing
+    /// Authorization header, and a body far past the size cap).
+    fn http(
+        port: u16,
+        method: &str,
+        auth: Option<&str>,
+        body: Option<&str>,
+    ) -> (u16, String, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(120)))
+            .unwrap();
+
+        let mut head =
+            format!("{method} /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+        if let Some(auth) = auth {
+            head.push_str(&format!("Authorization: {auth}\r\n"));
+        }
+        if let Some(body) = body {
+            head.push_str(&format!(
+                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                body.len()
+            ));
+        }
+        head.push_str("\r\n");
+
+        stream.write_all(head.as_bytes()).expect("write head");
+        if let Some(body) = body {
+            stream.write_all(body.as_bytes()).expect("write body");
+        }
+        stream.flush().unwrap();
+
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).expect("read response");
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let (headers, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+        let status: u16 = headers
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        (status, headers.to_lowercase(), body.to_string())
+    }
+
+    fn post(listener: &TestListener, body: &str) -> (u16, String, String) {
+        http(listener.port, "POST", Some(&listener.auth()), Some(body))
+    }
+
+    /// A fake `arduino-cli` whose body is `sh` source, in its own tempdir.
+    #[cfg(unix)]
+    fn stub_cli(dir: &tempfile::TempDir, body: &str) -> ArduinoCli {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.path().join("fake-arduino-cli");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ArduinoCli::new(script.to_string_lossy().into_owned())
+    }
+
+    fn gate() -> Arc<Mutex<()>> {
+        Arc::new(Mutex::new(()))
+    }
+
+    // ---------- JSON-RPC over HTTP ----------
+
+    /// Task 5 Step-0 finding (a): the CLI advertises `Accept:
+    /// application/json, text/event-stream` but is perfectly happy with a
+    /// plain JSON body — no SSE framing needed.
+    #[cfg(unix)]
+    #[test]
+    fn initialize_answers_200_with_plain_application_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, headers, body) = post(
+            &l,
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        );
+        assert_eq!(status, 200);
+        assert!(
+            headers.contains("content-type: application/json"),
+            "{headers}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["result"]["serverInfo"]["name"], "bancada");
+        assert_eq!(value["id"], 0);
+    }
+
+    /// Spec-required: a notification has no id to correlate a reply with, so
+    /// it must get an empty body, never JSON.
+    #[cfg(unix)]
+    #[test]
+    fn a_notification_answers_202_with_an_empty_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, _, body) = post(
+            &l,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        );
+        assert_eq!(status, 202);
+        assert!(body.is_empty(), "expected an empty body, got {body:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_list_advertises_the_verify_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, _, body) = post(&l, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        assert_eq!(status, 200);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["result"]["tools"][0]["name"], "verify");
+    }
+
+    // ---------- auth ----------
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_bearer_token_is_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, _, _) = http(
+            l.port,
+            "POST",
+            None,
+            Some(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+        );
+        assert_eq!(status, 401);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wrong_bearer_token_is_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, _, _) = http(
+            l.port,
+            "POST",
+            Some("Bearer not-the-token"),
+            Some(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+        );
+        assert_eq!(status, 401);
+    }
+
+    // ---------- request-shape guards ----------
+
+    /// Regression for a Task 5 Step-0 observation: the CLI opens a
+    /// `GET /mcp` server->client SSE stream. Answering it with a JSON-RPC
+    /// parse error (what happens if GETs are routed through
+    /// `handle_request`) made the client reconnect in a tight busy-loop —
+    /// hundreds of requests per turn. 405 is the correct answer for a
+    /// server that offers no such stream.
+    #[cfg(unix)]
+    #[test]
+    fn a_get_is_405_and_never_a_jsonrpc_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let (status, _, body) = http(l.port, "GET", Some(&l.auth()), None);
+        assert_eq!(status, 405);
+        assert!(!body.contains("jsonrpc"), "{body}");
+    }
+
+    /// Any local process can POST here, so the body is capped before it is
+    /// parsed — `read_to_string` on an unbounded reader would let one of
+    /// them push the whole app into swap.
+    #[cfg(unix)]
+    #[test]
+    fn an_oversized_body_is_rejected_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+
+        let huge = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"pad":"{}"}}}}"#,
+            "x".repeat(MCP_MAX_BODY + 1024)
+        );
+        let (status, _, _) = post(&l, &huge);
+        assert_eq!(status, 413);
+    }
+
+    // ---------- the verify tool ----------
+
+    const CALL_VERIFY: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"verify","arguments":{}}}"#;
+
+    fn tool_text(body: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn tool_is_error(body: &str) -> bool {
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["result"]["isError"].as_bool().unwrap_or(true)
+    }
+
+    /// The point of the whole tool: compiler errors reach the agent. The
+    /// stub writes to stderr, which `summarize_build_output` never drops.
+    #[cfg(unix)]
+    #[test]
+    fn verify_runs_the_compile_and_keeps_every_stderr_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = stub_cli(
+            &dir,
+            "echo 'Compiling sketch...'\n\
+             echo \"Blink.ino:3:1: error: expected ';' before '}' token\" >&2\n\
+             exit 1",
+        );
+        let l = start_listener(cli, "/nowhere", gate());
+
+        let (status, _, body) = post(&l, CALL_VERIFY);
+        assert_eq!(status, 200);
+
+        let text = tool_text(&body);
+        assert!(text.contains("success: false"), "{text}");
+        assert!(text.contains("exit_code: 1"), "{text}");
+        assert!(text.contains("expected ';'"), "{text}");
+        assert!(text.contains("Compiling sketch..."), "{text}");
+        // A failed build is a valid tool *result*, not a tool failure —
+        // flagging it would invite the model to give up on the tool.
+        assert!(!tool_is_error(&body));
+
+        assert_eq!(
+            l.event_types(),
+            vec!["verify_started".to_string(), "verify_done".to_string()]
+        );
+        let lines = l.build_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|v| v["stream"] == "stderr" && v["line"].as_str().unwrap().contains("error:")),
+            "the console stream must carry the stderr line too: {lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_reports_a_successful_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(
+            stub_cli(&dir, "echo 'Sketch uses 1234 bytes'\nexit 0"),
+            "/nowhere",
+            gate(),
+        );
+
+        let (_, _, body) = post(&l, CALL_VERIFY);
+        let text = tool_text(&body);
+        assert!(text.contains("success: true"), "{text}");
+        assert!(text.contains("exit_code: 0"), "{text}");
+        assert!(text.contains("Sketch uses 1234 bytes"), "{text}");
+        assert!(!tool_is_error(&body));
+
+        let done = l
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, v)| v["type"] == "verify_done")
+            .map(|(_, v)| v.clone())
+            .expect("a verify_done event");
+        assert_eq!(done["success"], true);
+    }
+
+    /// Risk R5: the agent must not race a user Verify/Upload through the
+    /// same build cache. Contention fails fast instead of queueing.
+    #[cfg(unix)]
+    #[test]
+    fn verify_is_refused_while_the_build_gate_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = gate();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate.clone());
+
+        let held = gate.lock().unwrap();
+        let (status, _, body) = post(&l, CALL_VERIFY);
+        drop(held);
+
+        assert_eq!(status, 200);
+        assert!(tool_is_error(&body), "{body}");
+        assert!(tool_text(&body).contains(BUILD_BUSY), "{body}");
+        // The compile never started, so neither did its events.
+        assert!(l.event_types().is_empty(), "{:?}", l.event_types());
+    }
+
+    /// A missing arduino-cli is the tool genuinely failing to run — that is
+    /// what `isError` is for.
+    #[test]
+    fn verify_reports_a_tool_error_when_arduino_cli_is_missing() {
+        let l = start_listener(
+            ArduinoCli::new("bancada-definitely-no-such-binary"),
+            "/nowhere",
+            gate(),
+        );
+
+        let (_, _, body) = post(&l, CALL_VERIFY);
+        assert!(tool_is_error(&body), "{body}");
+        assert!(tool_text(&body).contains("verify could not run"), "{body}");
+        assert_eq!(
+            l.event_types(),
+            vec!["verify_started".to_string(), "verify_done".to_string()]
+        );
+    }
+
+    // ---------- build gate ----------
+
+    #[test]
+    fn the_build_gate_reports_busy_when_it_is_already_held() {
+        let gate = Mutex::new(());
+        let held = gate.lock().unwrap();
+        assert_eq!(try_build_gate(&gate).unwrap_err(), BUILD_BUSY);
+        drop(held);
+        assert!(try_build_gate(&gate).is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_build_gate_still_lets_the_next_build_through() {
+        // A build that panicked must not wedge every later build: the gate
+        // guards `()`, so there is no corrupt state to protect.
+        let gate = Arc::new(Mutex::new(()));
+        let poisoner = gate.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("a build panicked");
+        })
+        .join();
+        assert!(gate.is_poisoned());
+        assert!(try_build_gate(&gate).is_ok());
+    }
+
+    // ---------- misc ----------
+
+    #[test]
+    fn the_system_prompt_names_the_project_the_profile_and_the_verify_tool() {
+        let prompt = system_prompt_extra("/home/me/Blink", Some("esp32s3"), Some("esp32:esp32:x"));
+        assert!(prompt.contains("/home/me/Blink"), "{prompt}");
+        assert!(prompt.contains("esp32s3"), "{prompt}");
+        assert!(prompt.contains("esp32:esp32:x"), "{prompt}");
+        assert!(prompt.contains("mcp__bancada__verify"), "{prompt}");
+        // No profile/fqbn must not produce dangling text.
+        let bare = system_prompt_extra("/home/me/Blink", None, None);
+        assert!(!bare.contains("profile is"), "{bare}");
+        assert!(!bare.contains("FQBN"), "{bare}");
+    }
+
+    #[test]
+    fn tokens_are_hex_and_do_not_repeat() {
+        let a = random_token();
+        let b = random_token();
+        assert_ne!(a, b);
+        assert!(a.len() >= 32, "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+    }
+
+    #[test]
+    fn each_listener_binds_its_own_kernel_assigned_port() {
+        let (a, port_a) = bind_mcp_server().unwrap();
+        let (b, port_b) = bind_mcp_server().unwrap();
+        assert_ne!(port_a, 0);
+        assert_ne!(port_a, port_b);
+        a.unblock();
+        b.unblock();
+    }
+
+    /// `unblock()` is the only thing that can end a listener parked in
+    /// `incoming_requests()` — an `AtomicBool` cannot break that recv.
+    #[cfg(unix)]
+    #[test]
+    fn unblocking_the_server_ends_the_listener_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+        let (tx, rx) = mpsc::channel::<()>();
+        let server = l.server.clone();
+        // Drop runs unblock + join; if unblock did not work, the join would
+        // hang forever and this recv_timeout would fire first.
+        std::thread::spawn(move || {
+            drop(l);
+            let _ = tx.send(());
+        });
+        server.unblock();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the listener thread did not exit after unblock()"
+        );
+    }
+
+    // ---------- live round trip (opt-in) ----------
+
+    /// The Task 5 Step-0 prototype, kept as an opt-in regression test: a
+    /// real `claude` child calling `mcp__bancada__verify` against this
+    /// listener, with a stub arduino-cli standing in for the compiler.
+    ///
+    /// Needs the CLI installed, a logged-in account and network, and it
+    /// spends real tokens — hence `#[ignore]` *and* an env gate:
+    ///
+    /// ```text
+    /// BANCADA_AGENT_LIVE=1 cargo test -p bancada -- --ignored --nocapture
+    /// ```
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "spawns the real claude CLI: needs login, network and tokens"]
+    fn live_claude_calls_the_verify_tool_end_to_end() {
+        if std::env::var("BANCADA_AGENT_LIVE").is_err() {
+            eprintln!("skipped: set BANCADA_AGENT_LIVE=1 to run the live round trip");
+            return;
+        }
+        let sentinel = "BANCADA_LIVE_SENTINEL_4711";
+        let dir = tempfile::tempdir().unwrap();
+        let sketch = tempfile::tempdir().unwrap();
+        std::fs::write(
+            sketch.path().join("Blink.ino"),
+            "void setup(){}\nvoid loop(){}\n",
+        )
+        .unwrap();
+
+        let cli = stub_cli(&dir, &format!("echo '{sentinel}' >&2\nexit 1"));
+        let l = start_listener(cli, &sketch.path().to_string_lossy(), gate());
+
+        let cfg = AgentCfg {
+            mcp_port: l.port,
+            mcp_token: l.token.clone(),
+            system_prompt_extra: system_prompt_extra(
+                &sketch.path().to_string_lossy(),
+                Some("test"),
+                None,
+            ),
+        };
+        let mut child = std::process::Command::new("claude")
+            .args(agent::agent_args(&cfg))
+            .current_dir(sketch.path())
+            .env("MCP_TOOL_TIMEOUT", MCP_TIMEOUT_MS)
+            .env("MCP_TIMEOUT", MCP_TIMEOUT_MS)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn claude");
+
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            agent::user_message_json(
+                "Call the mcp__bancada__verify tool now and report what it returned."
+            )
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        drop(stdin); // single turn: EOF lets the child finish
+
+        let stdout = child.stdout.take().unwrap();
+        let mut saw_sentinel = false;
+        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            eprintln!("{line}");
+            if line.contains(sentinel) {
+                saw_sentinel = true;
+            }
+        }
+        let _ = child.wait();
+
+        assert!(
+            saw_sentinel,
+            "the stub's stderr never came back through a tool_result"
+        );
+        assert!(l.event_types().contains(&"verify_done".to_string()));
+    }
 }
