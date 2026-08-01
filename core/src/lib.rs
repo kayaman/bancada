@@ -13,6 +13,7 @@ pub mod agent;
 pub mod boards;
 pub mod cli;
 pub mod esptool;
+pub mod files;
 pub mod fleet;
 pub mod ghlib;
 pub mod library;
