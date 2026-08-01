@@ -5,6 +5,7 @@
 //!   "build://line"      { stream: "stdout"|"stderr", line: string }
 //!   "serial://line"     { stream, line }
 //!   "serial://closed"   {}
+//!   "ports://changed"   {}  (the set of serial ports on the machine changed)
 //!
 //! Scope commands (`docs/scope-architecture.md` §3): `scope_probe`,
 //! `scope_start`, `scope_single`, `scope_send`, `scope_stop`,
@@ -1574,6 +1575,29 @@ pub fn run() {
                 cli: ArduinoCli::default(),
                 serial: Mutex::new(None),
                 mqtt: Mutex::new(None),
+            });
+            // Hotplug watcher: enumeration (does the port exist?) is orders of
+            // magnitude cheaper than identification (arduino-cli), so poll the
+            // former and let the frontend run the latter only on a change. The
+            // first tick only seeds `prev` — the frontend does its own initial
+            // scan, and boards present at launch are not arrivals.
+            let watcher = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut prev: Option<std::collections::BTreeSet<String>> = None;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // A failed enumeration keeps the previous set: never emit
+                    // on error, never die.
+                    let Ok(ports) = serialport::available_ports() else {
+                        continue;
+                    };
+                    let names: std::collections::BTreeSet<String> =
+                        ports.into_iter().map(|p| p.port_name).collect();
+                    if prev.as_ref().is_some_and(|p| *p != names) {
+                        let _ = watcher.emit("ports://changed", ());
+                    }
+                    prev = Some(names);
+                }
             });
             Ok(())
         })

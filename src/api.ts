@@ -589,3 +589,6 @@ export const onSerialLine = (
   listen<OutputLine>("serial://line", (e) => cb(e.payload));
 export const onSerialClosed = (cb: () => void): Promise<UnlistenFn> =>
   listen("serial://closed", () => cb());
+/** Fires when the set of serial ports on the machine changes (hotplug). */
+export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen("ports://changed", () => cb());
