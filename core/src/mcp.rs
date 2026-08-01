@@ -30,7 +30,7 @@
 //! stream-json lines: it never panics, and degrades to a JSON-RPC error
 //! response rather than propagating a Rust `Err`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 // ---------- tool definitions ----------
@@ -73,20 +73,44 @@ pub fn verify_tool_def() -> ToolDef {
 // ---------- JSON-RPC wire types ----------
 
 /// A JSON-RPC 2.0 request. `id` is kept as a raw [`Value`] because the spec
-/// allows either a number or a string (and, for notifications, absence
-/// entirely — modelled by `id` being `None` after deserialization). `params`
-/// is tolerated as missing.
+/// allows either a number or a string. `params` is tolerated as missing.
+///
+/// `id`'s `Option` here means "was the `id` key present at all", **not**
+/// "is the id non-null" — those are different questions per JSON-RPC 2.0.
+/// A key that is wholly absent is a notification (`None`). A key present
+/// with an explicit JSON `null` (`"id": null`) is still a *request* that
+/// must be answered, just one whose id happens to be `Value::Null`
+/// (`Some(Value::Null)`) — plain `#[serde(default)]` on `Option<Value>`
+/// can't distinguish these two cases on its own, because serde's `Option<T>`
+/// deserializes a present-but-null value the same way as an absent one
+/// (`None`). [`deserialize_present_id`] is the standard "double option"
+/// workaround: it only runs when the key is present, so it can
+/// unconditionally wrap the decoded value — even `Value::Null` itself — in
+/// `Some`, leaving `#[serde(default)]` to supply `None` for the truly
+/// separate "key absent" case.
 #[derive(Debug, Clone, Deserialize)]
 struct RpcRequest {
     #[serde(default)]
     #[allow(dead_code)]
     jsonrpc: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_id")]
     id: Option<Value>,
     #[serde(default)]
     method: String,
     #[serde(default)]
     params: Value,
+}
+
+/// See the `id` field doc on [`RpcRequest`]: only invoked when the `id` key
+/// is present in the JSON object, so it wraps whatever value was decoded —
+/// including a literal JSON `null` — in `Some`, preserving the distinction
+/// from a wholly absent key (which `#[serde(default)]` alone maps to
+/// `None`).
+fn deserialize_present_id<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// A JSON-RPC 2.0 error object.
@@ -138,8 +162,11 @@ pub fn handle_request(body: &str, tools: &[ToolDef]) -> McpReply {
         Err(_) => return McpReply::Json(error_response(&Value::Null, -32600, "invalid request")),
     };
 
-    // No `id` field at all => JSON-RPC notification. Must never get a JSON
-    // body (see module doc).
+    // Only a wholly *absent* `id` key is a JSON-RPC notification and must
+    // never get a JSON body (see module doc). An explicit `"id": null` is
+    // still a request — `deserialize_present_id` already turned that case
+    // into `Some(Value::Null)`, so it falls through to a real reply below
+    // with `id` echoed back as `null`, same as any other method.
     let Some(id) = request.id else {
         return McpReply::NoContent;
     };
@@ -335,6 +362,24 @@ mod tests {
         assert_eq!(handle_request(body, &tools()), McpReply::NoContent);
     }
 
+    #[test]
+    fn explicit_null_id_is_a_real_request_not_a_notification() {
+        // Per JSON-RPC 2.0, a request with an explicit `"id": null` is a
+        // request, not a notification — a client sending one is waiting
+        // for a reply and would hang forever against NoContent.
+        let body = r#"{"jsonrpc":"2.0","id":null,"method":"initialize","params":{}}"#;
+        match handle_request(body, &tools()) {
+            McpReply::Json(json) => {
+                let value: Value = serde_json::from_str(&json).unwrap();
+                assert_eq!(value["id"], Value::Null);
+                assert_eq!(value["result"]["protocolVersion"], "2025-06-18");
+            }
+            other => panic!(
+                "expected a real Json reply (explicit null id is still a request), got {other:?}"
+            ),
+        }
+    }
+
     // ---------- tools/list ----------
 
     #[test]
@@ -354,6 +399,7 @@ mod tests {
                 assert!(tool.get("inputSchema").is_some());
                 assert!(tool.get("input_schema").is_none());
                 assert_eq!(tool["inputSchema"]["type"], "object");
+                assert_eq!(tool["inputSchema"]["properties"], serde_json::json!({}));
                 assert_eq!(tool["inputSchema"]["additionalProperties"], false);
             }
             other => panic!("expected Json, got {other:?}"),
