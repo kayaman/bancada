@@ -561,6 +561,55 @@ body {
   content: "";
 }
 
+.tree-create {
+  padding: 2px 8px;
+}
+
+.tree-create-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  padding: 4px 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ctx-item:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.ctx-item:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
 .tree-item.file.active {
   background: var(--bg-raised);
   color: var(--accent);

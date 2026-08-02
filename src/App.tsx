@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
-import { checkNewFile } from "./newFile";
+import { checkNewEntry, checkNewFile } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
 import { arrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
@@ -474,8 +474,42 @@ export default function App() {
     }
   };
 
-  /** Validate, create empty, refresh the list and open — the file must show
-   *  up in tree and tabs immediately or creation looks like it failed. */
+  /** Create a validated entry via the backend (which refuses collisions and
+   *  returns the fresh listing), then reveal it — files also open. */
+  const doCreate = async (relPath: string, kind: "file" | "dir") => {
+    if (!sketchDir) return;
+    try {
+      const fs =
+        kind === "file"
+          ? await api.createSketchFile(sketchDir, relPath)
+          : await api.createSketchDir(sketchDir, relPath);
+      setFiles(fs);
+      useExplorerStore.getState().expandTo(relPath);
+      if (kind === "file") await openFileInEditor(sketchDir, relPath);
+      else useExplorerStore.getState().select(relPath);
+      notify(`Created ${relPath}`);
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
+
+  /** Tree create row (context menu → New File / New Folder). */
+  const handleCreateEntry = (
+    raw: string,
+    parentDir: string,
+    kind: "file" | "dir",
+  ): boolean => {
+    if (!sketchDir) return false;
+    const check = checkNewEntry(raw, parentDir, files);
+    if (!check.ok) {
+      notify(check.reason, true);
+      return false;
+    }
+    void doCreate(check.relPath, kind);
+    return true;
+  };
+
+  /** Editor tab strip ＋ — files only, root-relative. */
   const createNewFile = (raw: string): boolean => {
     if (!sketchDir) return false;
     const check = checkNewFile(raw, files);
@@ -483,16 +517,7 @@ export default function App() {
       notify(check.reason, true);
       return false;
     }
-    (async () => {
-      try {
-        await api.writeSketchFile(sketchDir, check.relPath, "");
-        setFiles(await api.listSketchFiles(sketchDir));
-        await openFileInEditor(sketchDir, check.relPath);
-        notify(`Created ${check.relPath}`);
-      } catch (e) {
-        notify(String(e), true);
-      }
-    })();
+    void doCreate(check.relPath, "file");
     return true;
   };
 
@@ -1068,7 +1093,7 @@ export default function App() {
               openFile={openFile}
               dirtyFiles={dirtyFiles}
               onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
-              onCreate={createNewFile}
+              onCreateEntry={handleCreateEntry}
             />
           )}
           {sideTab === "libraries" && (
