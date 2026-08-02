@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { AgentStore } from "../agentStore";
 import type { AgentEvent } from "../types";
 import { AGENT_STREAM_PONG_FIXTURE } from "./fixtures/agentStreamPong";
+import { AGENT_VERIFY_ROUNDTRIP_FIXTURE } from "./fixtures/agentVerifyRoundtrip";
+import { parseVerifyResult } from "../verifyResult";
 
 // Fixture provenance: see fixtures/agentStreamPong.ts — copied verbatim from
 // core/src/testdata/agent_stream_pong.ndjson (real `claude` 2.1.220 output
@@ -589,5 +591,55 @@ describe("AgentStore: security_alarm", () => {
     s.clear();
     expect(s.snapshot().alarm).toBeUndefined();
     expect(s.snapshot().pid).toBeUndefined();
+  });
+});
+
+// ---------- FE-I1, against recorded traffic ----------
+
+describe("AgentStore: real mcp__bancada__verify round trip", () => {
+  // The end-to-end assertion the unit tests above approximate: replay the
+  // recorded CLI stream and confirm the Verify cards come out readable by
+  // parseVerifyResult. If `toResultText` regresses to JSON.stringify-ing
+  // the content-block array, every expectation here fails at once.
+  it("produces tool cards whose result text parseVerifyResult can read", () => {
+    const s = new AgentStore();
+    for (const line of AGENT_VERIFY_ROUNDTRIP_FIXTURE.split("\n")) {
+      if (line.trim().length === 0) continue;
+      s.push(JSON.parse(line) as AgentEvent);
+    }
+
+    const cards = s
+      .snapshot()
+      .messages.filter(
+        (m): m is Extract<typeof m, { kind: "tool" }> => m.kind === "tool",
+      );
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      expect(card.name).toBe("mcp__bancada__verify");
+      expect(card.result?.startsWith("success:")).toBe(true);
+    }
+
+    const failing = parseVerifyResult(cards[0].result ?? "");
+    expect(failing.success).toBe(false);
+    expect(failing.exitCode).toBe(1);
+    expect(failing.summary).toContain("BANCADA_LIVE_SENTINEL_4711");
+
+    const passing = parseVerifyResult(cards[1].result ?? "");
+    expect(passing.success).toBe(true);
+    expect(passing.exitCode).toBe(0);
+    expect(passing.summary).toContain("Sketch uses");
+  });
+
+  it("confirms the recorded MCP result really is a content-block array", () => {
+    // The premise of the bug — pinned so a future reader does not "simplify"
+    // toResultText back on the assumption that content is always a string.
+    const resultLine = AGENT_VERIFY_ROUNDTRIP_FIXTURE.split("\n").find(
+      (l) => l.includes('"tool_result"') && l.includes("success:"),
+    );
+    expect(resultLine).toBeDefined();
+    const ev = JSON.parse(resultLine as string);
+    const block = ev.message.content[0];
+    expect(Array.isArray(block.content)).toBe(true);
+    expect(block.content[0].type).toBe("text");
   });
 });
