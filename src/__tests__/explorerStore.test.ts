@@ -56,6 +56,24 @@ describe("setFilesAfterRename", () => {
   });
 });
 
+describe("setFilesAfterRename without a selection", () => {
+  it("keeps selected null", () => {
+    store().setFiles(SAMPLE);
+    store().setFilesAfterRename(SAMPLE, "src", "lib");
+    expect(store().selected).toBe(null);
+  });
+});
+
+describe("drag state", () => {
+  it("clearing the drag also clears the drop target", () => {
+    store().setDragging("src/util.h");
+    store().setDropTarget("src/sensors");
+    store().setDragging(null);
+    expect(store().dragging).toBe(null);
+    expect(store().dropTarget).toBe(null);
+  });
+});
+
 describe("expansion", () => {
   it("toggleExpanded flips a dir open and closed", () => {
     store().setFiles(SAMPLE);

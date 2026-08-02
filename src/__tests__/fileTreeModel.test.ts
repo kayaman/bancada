@@ -36,6 +36,15 @@ describe("buildTree", () => {
     expect(tree.map((n) => n.name)).toEqual(["adir", "zdir", "A.txt", "b.txt"]);
   });
 
+  it("orders case-insensitive name ties deterministically", () => {
+    // "A.txt" and "a.txt" tie in the base-sensitivity pass; the exact
+    // tiebreaker must give the same order on every build.
+    const once = buildTree([f("a.txt"), f("A.txt")]).map((n) => n.name);
+    const twice = buildTree([f("A.txt"), f("a.txt")]).map((n) => n.name);
+    expect([...once].sort()).toEqual(["A.txt", "a.txt"]);
+    expect(once).toEqual(twice);
+  });
+
   it("represents empty dirs as leaf dir nodes", () => {
     const tree = buildTree(SAMPLE);
     const assets = tree.find((n) => n.relPath === "assets");

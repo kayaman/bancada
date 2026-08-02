@@ -104,6 +104,18 @@ describe("checkRename", () => {
     expect(check("src/util.h", "../out").ok).toBe(false);
   });
 
+  it("rejects an empty target", () => {
+    expect(check("src/util.h", "   ").ok).toBe(false);
+  });
+
+  it("rejects a genuine collision with a non-protected entry", () => {
+    // "assets" exists and is not protected — this must reach the
+    // already-exists guard, not be masked by the protected-target one.
+    const r = check("src/util.h", "assets");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("already exists");
+  });
+
   it("rejects renaming onto a protected name", () => {
     // sketch.yaml exists so it is also a collision — but even if it were
     // deleted, taking a protected name must be blocked.

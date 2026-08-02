@@ -330,3 +330,199 @@ describe("agent commands", () => {
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("agent://closed");
   });
 });
+
+// Contract sweep for the remaining plain wrappers: every test pins the
+// command name and exact camelCase key set (see the file-top comment for
+// why that mismatch class is worth a cheap test each).
+
+describe("argument-less commands", () => {
+  it.each([
+    ["cliVersion", "cli_version"],
+    ["listBoards", "list_boards"],
+    ["listCores", "list_cores"],
+    ["listInstalledLibraries", "list_installed_libraries"],
+    ["updateCoreIndex", "update_core_index"],
+    ["defaultProjectParent", "default_project_parent"],
+    ["loadSettings", "load_settings"],
+    ["stopMonitor", "stop_monitor"],
+    ["scopeStop", "scope_stop"],
+    ["mqttDisconnect", "mqtt_disconnect"],
+    ["loadMqttConfig", "load_mqtt_config"],
+  ] as const)("%s invokes %s with no arguments", async (fn, command) => {
+    await (api as unknown as Record<string, () => Promise<unknown>>)[fn]();
+    expect(called()[0]).toBe(command);
+    expect(called()[1]).toBeUndefined();
+  });
+});
+
+describe("profiles and cores", () => {
+  it("initProfile passes sketchDir, profile and fqbn", async () => {
+    await api.initProfile("/s", "esp32s3", "esp32:esp32:esp32s3");
+    expect(called()).toEqual([
+      "init_profile",
+      { sketchDir: "/s", profile: "esp32s3", fqbn: "esp32:esp32:esp32s3" },
+    ]);
+  });
+
+  it("searchCores and searchLibraries pass the query", async () => {
+    await api.searchCores("esp32");
+    expect(called()).toEqual(["search_cores", { query: "esp32" }]);
+    await api.searchLibraries("json");
+    expect(called()).toEqual(["search_libraries", { query: "json" }]);
+  });
+
+  it("installCore nulls every omitted optional", async () => {
+    await api.installCore("esp32:esp32");
+    expect(called()).toEqual([
+      "install_core",
+      { id: "esp32:esp32", version: null, sketchDir: null, profile: null },
+    ]);
+  });
+
+  it("installCore forwards version, sketch and profile for profile pinning", async () => {
+    await api.installCore("esp32:esp32", "3.3.0", "/s", "esp32s3");
+    expect(called()).toEqual([
+      "install_core",
+      { id: "esp32:esp32", version: "3.3.0", sketchDir: "/s", profile: "esp32s3" },
+    ]);
+  });
+
+  it("uninstallCore and uninstallLibrary pass their identifier", async () => {
+    await api.uninstallCore("esp32:esp32");
+    expect(called()).toEqual(["uninstall_core", { id: "esp32:esp32" }]);
+    await api.uninstallLibrary("ArduinoJson");
+    expect(called()).toEqual(["uninstall_library", { name: "ArduinoJson" }]);
+  });
+
+  it("addPlatformToProfile passes all four fields", async () => {
+    await api.addPlatformToProfile("/s", "p", "esp32:esp32", "3.3.0");
+    expect(called()).toEqual([
+      "add_platform_to_profile",
+      { sketchDir: "/s", profile: "p", id: "esp32:esp32", version: "3.3.0" },
+    ]);
+  });
+});
+
+describe("build, upload and monitor", () => {
+  it("compileSketch nulls omitted profile and fqbn", async () => {
+    await api.compileSketch("/s");
+    expect(called()).toEqual([
+      "compile_sketch",
+      { sketchDir: "/s", profile: null, fqbn: null },
+    ]);
+  });
+
+  it("uploadSketch passes the port and nulls the omitted rest", async () => {
+    await api.uploadSketch("/s", "/dev/ttyACM0", "esp32s3");
+    expect(called()).toEqual([
+      "upload_sketch",
+      { sketchDir: "/s", port: "/dev/ttyACM0", profile: "esp32s3", fqbn: null },
+    ]);
+  });
+
+  it("startMonitor and monitorSend pass their payloads", async () => {
+    await api.startMonitor("/dev/ttyACM0", 115200);
+    expect(called()).toEqual([
+      "start_monitor",
+      { port: "/dev/ttyACM0", baudrate: 115200 },
+    ]);
+    await api.monitorSend("AT\n");
+    expect(called()).toEqual(["monitor_send", { data: "AT\n" }]);
+  });
+
+  it("readBoardMac passes the port", async () => {
+    await api.readBoardMac("/dev/ttyACM0");
+    expect(called()).toEqual(["read_board_mac", { port: "/dev/ttyACM0" }]);
+  });
+});
+
+describe("fleet and settings", () => {
+  it("fleetSync passes the detected ports through", async () => {
+    const ports = [{ port: { address: "/dev/ttyUSB0", protocol: "serial" } }];
+    await api.fleetSync(ports as never);
+    expect(called()).toEqual(["fleet_sync", { ports }]);
+  });
+
+  it("setBoardNickname nulls a cleared nickname", async () => {
+    await api.setBoardNickname("id1");
+    expect(called()).toEqual(["set_board_nickname", { id: "id1", nickname: null }]);
+    await api.setBoardNickname("id1", "bench-s3");
+    expect(called()).toEqual([
+      "set_board_nickname",
+      { id: "id1", nickname: "bench-s3" },
+    ]);
+  });
+
+  it("identifyBoard sends previousId (camelCase), nulled when absent", async () => {
+    await api.identifyBoard("/dev/ttyACM0");
+    expect(called()).toEqual([
+      "identify_board",
+      { port: "/dev/ttyACM0", previousId: null },
+    ]);
+    await api.identifyBoard("/dev/ttyACM0", "old-id");
+    expect(called()).toEqual([
+      "identify_board",
+      { port: "/dev/ttyACM0", previousId: "old-id" },
+    ]);
+  });
+
+  it("noteBoardFqbn and forgetBoard pass their fields", async () => {
+    await api.noteBoardFqbn("/dev/ttyACM0", "esp32:esp32:esp32s3");
+    expect(called()).toEqual([
+      "note_board_fqbn",
+      { port: "/dev/ttyACM0", fqbn: "esp32:esp32:esp32s3" },
+    ]);
+    await api.forgetBoard("id1");
+    expect(called()).toEqual(["forget_board", { id: "id1" }]);
+  });
+
+  it("saveSettings nests the settings object", async () => {
+    const settings = { last_sketch_dir: "/s" } as never;
+    await api.saveSettings(settings);
+    expect(called()).toEqual(["save_settings", { settings }]);
+  });
+
+  it("sketchHasGit passes sketchDir", async () => {
+    await api.sketchHasGit("/s");
+    expect(called()).toEqual(["sketch_has_git", { sketchDir: "/s" }]);
+  });
+});
+
+describe("scope and mqtt payloads", () => {
+  it("scopeProbe, scopeSend and scopeSingle pin their keys", async () => {
+    await api.scopeProbe("/dev/ttyACM0");
+    expect(called()).toEqual(["scope_probe", { port: "/dev/ttyACM0" }]);
+    await api.scopeSend("CFG\n");
+    expect(called()).toEqual(["scope_send", { line: "CFG\n" }]);
+    const cfg = { channel: 0 } as never;
+    await api.scopeSingle(cfg);
+    expect(called()).toEqual(["scope_single", { cfg }]);
+  });
+
+  it("mqtt publish/subscribe/unsubscribe pin their keys", async () => {
+    await api.mqttPublish("t/1", "on", true);
+    expect(called()).toEqual([
+      "mqtt_publish",
+      { topic: "t/1", payload: "on", retain: true },
+    ]);
+    await api.mqttSubscribe("t/#");
+    expect(called()).toEqual(["mqtt_subscribe", { filter: "t/#" }]);
+    await api.mqttUnsubscribe("t/#");
+    expect(called()).toEqual(["mqtt_unsubscribe", { filter: "t/#" }]);
+  });
+
+  it("saveMqttConfig nests the config", async () => {
+    const cfg = { url: "mqtt://localhost" } as never;
+    await api.saveMqttConfig(cfg);
+    expect(called()).toEqual(["save_mqtt_config", { cfg }]);
+  });
+});
+
+describe("port events", () => {
+  it("onSerialClosed and onPortsChanged subscribe to the exact event names", async () => {
+    await api.onSerialClosed(() => {});
+    expect(listenMock.mock.calls.at(-1)?.[0]).toBe("serial://closed");
+    await api.onPortsChanged(() => {});
+    expect(listenMock.mock.calls.at(-1)?.[0]).toBe("ports://changed");
+  });
+});
