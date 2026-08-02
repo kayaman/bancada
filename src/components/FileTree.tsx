@@ -1,7 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useExplorerStore } from "../explorerStore";
 import { buildTree, visibleNodes } from "../fileTreeModel";
-import { isDescendant, protectedPaths } from "../explorerOps";
+import { createAnchorDir, isDescendant, protectedPaths } from "../explorerOps";
 
 const parentOf = (p: string) => p.split("/").slice(0, -1).join("/");
 const basename = (p: string) => p.split("/").pop() ?? p;
@@ -165,7 +165,30 @@ export default function FileTree({
       />
     );
 
+  // Header buttons create in the selected folder (or a selected file's
+  // parent); the context menu stays for targeted creation.
+  const anchor = createAnchorDir(selected, files);
+
   return (
+    <div className="file-tree-panel">
+      <div className="tree-header">
+        <button
+          className="btn icon"
+          title={`New file in ${anchor || "the sketch"}…`}
+          disabled={!sketchDir}
+          onClick={() => beginCreate(anchor, "file")}
+        >
+          ＋<span className="tree-header-kind">file</span>
+        </button>
+        <button
+          className="btn icon"
+          title={`New folder in ${anchor || "the sketch"}…`}
+          disabled={!sketchDir}
+          onClick={() => beginCreate(anchor, "dir")}
+        >
+          ＋<span className="tree-header-kind">folder</span>
+        </button>
+      </div>
     <div
       className={`file-tree ${dropTarget === "" && dragging ? "drop-target" : ""}`}
       onContextMenu={(e) => {
@@ -294,6 +317,7 @@ export default function FileTree({
         onRename={startRename}
         onDelete={onDelete}
       />
+    </div>
     </div>
   );
 }

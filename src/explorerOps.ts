@@ -36,6 +36,19 @@ export function isNonEmptyDir(files: SketchFile[], dir: string): boolean {
   return files.some((f) => f.rel_path.startsWith(dir + "/"));
 }
 
+/** Where the explorer header's New File / New Folder buttons create:
+ *  the selected dir, a selected file's parent, else the sketch root. */
+export function createAnchorDir(
+  selected: string | null,
+  files: SketchFile[],
+): string {
+  if (!selected) return "";
+  const entry = files.find((f) => f.rel_path === selected);
+  if (!entry) return "";
+  if (entry.is_dir) return selected;
+  return selected.split("/").slice(0, -1).join("/");
+}
+
 export function isDescendant(child: string, dir: string): boolean {
   return child.startsWith(dir + "/");
 }

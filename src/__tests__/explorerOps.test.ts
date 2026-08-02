@@ -3,6 +3,7 @@ import type { SketchFile } from "../api";
 import {
   affectedByDelete,
   checkRename,
+  createAnchorDir,
   isDescendant,
   isNonEmptyDir,
   pathAfterRename,
@@ -58,6 +59,22 @@ describe("isNonEmptyDir", () => {
   it("is true when any entry lives under the dir", () => {
     expect(isNonEmptyDir(FILES, "src")).toBe(true);
     expect(isNonEmptyDir(FILES, "assets")).toBe(false);
+  });
+});
+
+describe("createAnchorDir", () => {
+  it("uses the selected dir itself", () => {
+    expect(createAnchorDir("src", FILES)).toBe("src");
+  });
+
+  it("uses a selected file's parent", () => {
+    expect(createAnchorDir("src/util.h", FILES)).toBe("src");
+    expect(createAnchorDir("demo.ino", FILES)).toBe("");
+  });
+
+  it("falls back to the root for no or stale selection", () => {
+    expect(createAnchorDir(null, FILES)).toBe("");
+    expect(createAnchorDir("gone/x.h", FILES)).toBe("");
   });
 });
 

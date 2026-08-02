@@ -561,6 +561,26 @@ body {
   content: "";
 }
 
+.file-tree-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.tree-header {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-header-kind {
+  margin-left: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .tree-create {
   padding: 2px 8px;
 }
