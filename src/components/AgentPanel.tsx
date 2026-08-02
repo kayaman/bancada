@@ -12,9 +12,15 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import type { AgentProbe } from "../api";
-import type { AgentMessage, AgentStatus, AgentStore } from "../agent/agentStore";
+import type {
+  AgentAlarm,
+  AgentMessage,
+  AgentStatus,
+  AgentStore,
+} from "../agent/agentStore";
 import { diffForToolInput, type DiffLine } from "../agent/diff";
 import { splitFences } from "../agent/fences";
+import { alarmConsequence } from "../agent/alarmCopy";
 import { parseVerifyResult } from "../agent/verifyResult";
 import type { BottomTab } from "../bottomTabs";
 
@@ -154,18 +160,7 @@ export default function AgentPanel({
             mistake for a normal card: this is the host having *refused*
             something and killed the child, not the session merely finishing.
             See AgentSecurityAlarmEvent in src/agent/types.ts. */}
-        {snap.alarm && (
-          <div className="agent-alarm" role="alert">
-            <div className="agent-alarm-head">
-              ⛔ Bancada stopped the assistant
-            </div>
-            <p className="agent-alarm-detail">{snap.alarm.detail}</p>
-            <p className="agent-alarm-hint">
-              Nothing outside this project was changed. Start a new session to
-              continue.
-            </p>
-          </div>
-        )}
+        {snap.alarm && <AlarmView alarm={snap.alarm} />}
         {snap.closedReason && (
           <div className="agent-closed">
             Session ended — {snap.closedReason}
@@ -227,6 +222,24 @@ export default function AgentPanel({
         </button>
       </div>
     </section>
+  );
+}
+
+// ---------- security alarm ----------
+
+/**
+ * The alarm banner. The wording lives in `../agent/alarmCopy` — it is the
+ * only safety text a real user sees, so it is a tested pure function rather
+ * than string literals in JSX. See that module for why the copy is per-kind
+ * and why nothing here reassures.
+ */
+function AlarmView({ alarm }: { alarm: AgentAlarm }) {
+  return (
+    <div className="agent-alarm" role="alert">
+      <div className="agent-alarm-head">⛔ Bancada stopped the assistant</div>
+      <p className="agent-alarm-detail">{alarm.detail}</p>
+      <p className="agent-alarm-hint">{alarmConsequence(alarm.kind)}</p>
+    </div>
   );
 }
 

@@ -1227,6 +1227,25 @@ body {
   text-align: center;
 }
 
+/* Unresolved agent/user edit conflict. Persistent (the status bar is not)
+   and full-width above the editor, because Compile and Upload refuse while
+   it is up and the user needs to know why. */
+.conflict-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--error);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.conflict-banner-icon {
+  color: var(--error);
+  flex: none;
+}
+
 /* The host refused something and killed the child — deliberately the loudest
    thing in the panel, and nothing like a tool card, because it means a
    safety boundary fired rather than a session merely finishing. */

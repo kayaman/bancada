@@ -60,25 +60,41 @@
 //! CLI runs it as a shell command. Closing it needs the *write* leg, since
 //! the *hooks* leg cannot be closed without losing auth or the compiler.
 //!
-//! Two enforcement layers, in order of strength:
+//! **Four** enforcement layers, in order of strength — all set up by
+//! `write_agent_settings_file`/`agent_start`, whose docs carry the detail:
 //!
-//! 1. **Refusal (the boundary).** `write_agent_settings_file` generates a
-//!    `--settings` file whose `PreToolUse` hook is *this very binary*
-//!    re-invoked as `bancada --agent-guard <sketch_dir>`
-//!    (`run_agent_guard`), adjudicating every `Write`/`Edit`/`MultiEdit`/
-//!    `NotebookEdit` with `core::agent::guard_decision`. An edit outside the
-//!    sketch dir, or touching a `.claude/` component below it, is *denied* —
-//!    the CLI reports it in `permission_denials` and nothing reaches disk.
-//!    Probe-verified end to end, including that a permissive hook running
-//!    alongside does not override the deny.
-//! 2. **Detect-and-stop (the backstop).** The stdout reader independently
-//!    re-checks every `Edit`/`Write` `tool_use` against the same
-//!    `path_is_confined`, and checks the `system`/`init` `tools` array
-//!    against `core::agent::EXPECTED_TOOLS`. Either check failing emits
-//!    `{type:"security_alarm"}` and stops the session. This exists because
-//!    layer 1 depends on the CLI honouring `--settings` hooks: if a future
-//!    release changed that, or the guard binary could not run, the boundary
-//!    would fail *open* with no other signal.
+//! 1. **`permissions.deny` rules (the anchor).** `core::agent::deny_rules`
+//!    protects the project's `.claude/**`, `.git/**`, `.mcp.json`, the
+//!    session's own 0600 temp files, and the user's `~/.claude/**`. These
+//!    are evaluated **before** hooks and are unaffected by
+//!    `disableAllHooks`, which is precisely why the hook below cannot be
+//!    what protects `.claude/`: a project settings file setting
+//!    `disableAllHooks` stops the hook firing at all (verified live). Note
+//!    a deny-rule refusal does **not** appear in the CLI's
+//!    `permission_denials` — only hook refusals do, so that field is not an
+//!    audit signal.
+//! 2. **The `PreToolUse` hook (subtree containment).** A `--settings` hook
+//!    whose command is *this very binary* re-invoked as
+//!    `bancada --agent-guard <sketch_dir>` (`run_agent_guard`), adjudicating
+//!    every `Write`/`Edit`/`MultiEdit`/`NotebookEdit` with
+//!    `core::agent::guard_decision`. It does the "inside this subtree only"
+//!    check that deny rules cannot express, since a denylist has no
+//!    "everything except here" form. Probe-verified end to end, including
+//!    that a permissive hook alongside it does not override the deny; its
+//!    refusals *do* show up in `permission_denials`.
+//! 3. **The pre-flight refusal.** `check_hooks_are_enabled` refuses to start
+//!    a session at all when any settings file from the sketch dir up to the
+//!    filesystem root — or the user's own — sets `disableAllHooks`, because
+//!    layer 2 would silently not exist.
+//! 4. **Detect-and-stop (the backstop).** The stdout reader independently
+//!    re-checks every `Edit`/`Write` `tool_use` against `path_is_confined`,
+//!    and the `system`/`init` `tools` array against
+//!    `core::agent::EXPECTED_TOOLS`. Either failing emits
+//!    `{type:"security_alarm"}` and stops the session. This is genuinely
+//!    weaker than 1–3: it runs *after* the model emitted the `tool_use`, so
+//!    a write it reports may already have happened. It exists because 1–3
+//!    all depend on the CLI's own policy engine behaving as probed, and
+//!    without it a regression there would fail *open* with no signal at all.
 //!
 //! What is **not** a boundary: `--disallowedTools` (a permission-layer
 //! nudge — a session with it set still lists 25 built-in tools). What is:
@@ -86,7 +102,9 @@
 //! `Read,Edit,Write,Glob,Grep` while leaving the MCP `verify` tool intact.
 //! Residual risk: a *pre-existing* hostile hook in the user's own config
 //! still runs — Bancada stops the agent from installing one, it cannot stop
-//! one that is already there.
+//! one that is already there. Reads are not confined at all. And none of
+//! this is OS-level: it is in-process policy inside the process the model
+//! drives (see the spec's risk R6).
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
 //! `verify` tool all drive the same arduino-cli build cache, so they share
@@ -1956,7 +1974,7 @@ fn write_agent_settings_file_with_exe(sketch_dir: &str, exe: &Path) -> Result<Pa
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| sketch_dir.to_string());
     let settings = serde_json::json!({
-        "permissions": { "deny": agent::deny_rules(&canonical) },
+        "permissions": { "deny": agent::deny_rules(&canonical, &canonical_temp_dir()) },
         "hooks": {
             "PreToolUse": [{
                 "matcher": agent::guard_hook_matcher(),
@@ -2000,6 +2018,17 @@ fn check_hooks_are_enabled(sketch_dir: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The temp dir the session's 0600 policy files live in, canonicalised so a
+/// symlinked `TMPDIR` (`/tmp` → `/private/tmp` on macOS) still produces deny
+/// patterns that match the paths the CLI resolves.
+fn canonical_temp_dir() -> String {
+    let dir = std::env::temp_dir();
+    std::fs::canonicalize(&dir)
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// POSIX single-quoting: wrap in `'...'` and replace each embedded `'` with
@@ -2919,9 +2948,17 @@ pub fn run() {
             // exit so the port is immediately free for other tools.
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
-                evict_owner(&mut state.serial.lock().unwrap());
+                // Poison recovery on *every* slot, not just the agent's (I4
+                // residual): these run first, so a panic here would abort
+                // shutdown before the agent teardown below ever ran —
+                // orphaning the child and leaking both its 0600 temp files,
+                // which is the exact failure I4 named. Every one of these
+                // slots holds a session whose invariants a panic has already
+                // broken; there is nothing left to protect by refusing the
+                // lock, and plenty to lose.
+                evict_owner(&mut state.serial.lock().unwrap_or_else(|e| e.into_inner()));
                 // ---------- mqtt ---------- send the broker a clean DISCONNECT.
-                let mqtt_session = state.mqtt.lock().unwrap().take();
+                let mqtt_session = state.mqtt.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(session) = mqtt_session {
                     stop_mqtt_session(session);
                 }
@@ -4246,6 +4283,19 @@ mod tests {
     /// is not installed, the test skips with an explicit message rather
     /// than failing — installing platforms is out of scope for an opt-in
     /// test (same convention as `core/tests/new_project_builds.rs`).
+    ///
+    /// **Note on the confinement hook in this test.** It builds its settings
+    /// via `write_agent_settings_file`, whose hook command is
+    /// `current_exe()` — under libtest that is the *test harness* binary,
+    /// which has no `--agent-guard` entry point. So the hook exits non-zero,
+    /// the CLI treats that as "log and continue", and **layer 2 fails open
+    /// for the duration of this test**. Harmless here (this test is about
+    /// the `verify` round trip and never attempts an out-of-project write),
+    /// but do not read it as evidence about the confinement. The deny rules
+    /// still apply, and the real end-to-end proof is
+    /// `live_the_confinement_hook_refuses_an_out_of_project_write`, which
+    /// passes the actual `bancada` binary via
+    /// `write_agent_settings_file_with_exe` for exactly this reason.
     ///
     /// ```text
     /// BANCADA_AGENT_LIVE=1 cargo test -p bancada -- --ignored --nocapture

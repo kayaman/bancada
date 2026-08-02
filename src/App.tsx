@@ -8,6 +8,7 @@ import * as api from "./api";
 import { nextSelectedPort } from "./ports";
 import { checkNewFile } from "./newFile";
 import { arrivals } from "./portWatch";
+import { blockedByConflict, conflictMessage } from "./conflicts";
 import type {
   AgentEvent,
   DetectedPort,
@@ -112,6 +113,10 @@ export default function App() {
   /** rel_paths the agent edited while a local buffer was dirty — sendToAgent
    *  refuses until the conflict is resolved (cleared inside saveAll()). */
   const agentConflictsRef = useRef<Set<string>>(new Set());
+  /** Render mirror of `agentConflictsRef` — the ref is written from the
+   *  agent event listener (registered once, no access to state), so the
+   *  banner needs a state copy kept in step with it. */
+  const [conflicts, setConflicts] = useState<string[]>([]);
 
   // boards
   const [ports, setPorts] = useState<DetectedPort[]>([]);
@@ -507,6 +512,7 @@ export default function App() {
       // conflict either. Ctrl+S is the documented way to resolve one, so it
       // has to actually do it.
       agentConflictsRef.current.delete(openFile);
+      setConflicts([...agentConflictsRef.current]);
       notify(`Saved ${openFile}`);
     } catch (e) {
       notify(String(e), true);
@@ -548,15 +554,29 @@ export default function App() {
       if (!buffersRef.current.has(path)) conflicted.delete(path);
     }
     setDirtyFiles(new Set(skipped));
+    // Mirror the ref into state so the banner renders. The ref stays the
+    // source of truth for the synchronous guards below (it is written from
+    // the agent event listener, which has no access to state).
+    setConflicts([...conflicted]);
     if (skipped.length > 0) {
-      notify(
-        `Not saved: ${skipped.join(", ")} — the assistant changed ${
-          skipped.length === 1 ? "it" : "them"
-        } on disk while you had unsaved edits. Open the file and press Ctrl+S to keep your version, which resolves the conflict.`,
-        true,
-      );
+      notify(conflictMessage(skipped), true);
     }
   }, [sketchDir, notify]);
+
+  /** Refuse a build/flash while the agent's edits and the user's disagree.
+   *
+   *  `saveAll` already declines to overwrite a conflicted buffer, but that
+   *  alone is not enough for Verify/Upload: its warning is a transient
+   *  `notify`, immediately overwritten by "Compiling…", and the build then
+   *  ran anyway. The user would see a compile — or a **flash** — of the
+   *  agent's on-disk version while their own unsaved edits were invisible
+   *  and unmentioned. Both callers now stop here, the same way
+   *  `sendToAgent` already did. */
+  const refuseOnConflict = (action: string): boolean => {
+    const block = blockedByConflict([...agentConflictsRef.current], action);
+    if (block.blocked) notify(block.message ?? "", true);
+    return block.blocked;
+  };
 
   // Ctrl+S
   useEffect(() => {
@@ -594,6 +614,9 @@ export default function App() {
     const target = resolveTarget();
     if (!target) return;
     await saveAll();
+    // After saveAll, not before: saveAll is what discovers which buffers it
+    // could not flush.
+    if (refuseOnConflict("Compile")) return;
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
@@ -613,6 +636,10 @@ export default function App() {
     const target = resolveTarget();
     if (!target) return;
     await saveAll();
+    // Before freeing the serial port and before anything reaches the board:
+    // flashing the agent's on-disk version while the user's edits sit
+    // unsaved and unmentioned is the worst outcome this guard prevents.
+    if (refuseOnConflict("Upload")) return;
     if (monitorOn) await toggleMonitor(); // free the serial port
     setBuildLines([]);
     openBottomTab("build");
@@ -785,6 +812,7 @@ export default function App() {
       // is no "discard" action in this editor (a dirty buffer always wins on
       // reopen), so the only real way out is to save it.
       agentConflictsRef.current.add(rel);
+      setConflicts([...agentConflictsRef.current]);
       notify(
         `The assistant edited ${rel} while you had unsaved changes — save the file (Ctrl+S) to resolve the conflict before sending another message.`,
         true,
@@ -896,6 +924,7 @@ export default function App() {
     api.agentStop().catch(() => {});
     agentStore.clear();
     agentConflictsRef.current.clear();
+    setConflicts([]);
     // The stopped session's verify (if any) will never emit `verify_done`
     // now — the backend cancels it — so release the flag here rather than
     // leaving the toolbar disabled forever.
@@ -935,6 +964,24 @@ export default function App() {
           onCancel={() => setCreatingProfile(false)}
           notify={notify}
         />
+      )}
+
+      {/* Persistent, because the status bar is not. `saveAll` used to warn
+          about an unflushed conflicted buffer with a transient notify that
+          "Compiling…" overwrote a moment later, leaving the user looking at
+          a build of the assistant's on-disk version with no sign their own
+          edits were still unsaved. This stays until the conflict is
+          actually resolved, and Verify/Upload refuse while it is up. */}
+      {conflicts.length > 0 && (
+        <div className="conflict-banner" role="alert">
+          <span className="conflict-banner-icon" aria-hidden="true">
+            ⚠
+          </span>
+          <span>
+            <strong>Unresolved edit conflict</strong> — {conflictMessage(conflicts)}{" "}
+            Compile and Upload are blocked until then.
+          </span>
+        </div>
       )}
 
       <div className="main" style={bottomMax ? { display: "none" } : undefined}>

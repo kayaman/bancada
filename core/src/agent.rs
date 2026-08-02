@@ -430,16 +430,27 @@ pub fn path_is_confined(sketch_dir: &Path, candidate: &str) -> bool {
 ///   dir, so a `/`-anchored rule would silently protect nothing. `~/` is the
 ///   home directory.
 ///
-/// `project_dir` must already be absolute and canonical; the caller resolves
-/// it. Gitignore-style glob metacharacters in the project path (`*`, `?`,
-/// `[`) would confuse these patterns — an exotic-enough directory name that
+/// `project_dir` and `temp_dir` must already be absolute and canonical; the
+/// caller resolves them. Gitignore-style glob metacharacters in either path
+/// (`*`, `?`, `[`) would confuse these patterns — an exotic-enough directory name that
 /// the hook layer is the answer for it, not more escaping.
-pub fn deny_rules(project_dir: &str) -> Vec<String> {
+pub fn deny_rules(project_dir: &str, temp_dir: &str) -> Vec<String> {
     // `//` *is* the filesystem-root anchor, so the path is appended without
     // its own leading slash — `///home/me` would be a different (and wrong)
     // pattern.
     let project_dir = project_dir.trim_end_matches('/').trim_start_matches('/');
+    let temp_dir = temp_dir.trim_end_matches('/').trim_start_matches('/');
     vec![
+        // The session's own 0600 policy files (defence in depth). They live
+        // outside the project, so the hook already refuses them — but the
+        // hook is exactly what stops working if hooks get disabled, and a
+        // mid-session rewrite of the `--settings` file is a chained
+        // escalation: edit the policy, and the CLI's settings watcher picks
+        // up the new hooks. Anchoring them with a deny rule keeps them
+        // protected by the layer that survives `disableAllHooks`. Matches
+        // the `bancada-agent-{mcp,settings}-<nonce>.json` naming in
+        // src-tauri's `write_mcp_config_file`/`write_agent_settings_file`.
+        format!("Edit(//{temp_dir}/bancada-agent-*)"),
         // The project's own config — the disableAllHooks vector, plus any
         // hook a settings file could add.
         format!("Edit(//{project_dir}/.claude/**)"),
@@ -1677,7 +1688,7 @@ mod tests {
     /// nothing at runtime would say so.
     #[test]
     fn deny_rules_never_use_the_inert_write_pattern() {
-        for rule in deny_rules("/home/me/Blink") {
+        for rule in deny_rules("/home/me/Blink", "/tmp") {
             assert!(
                 !rule.starts_with("Write("),
                 "Write(...) rules are silently never evaluated: {rule}"
@@ -1695,7 +1706,7 @@ mod tests {
     /// rules must use `//`.
     #[test]
     fn deny_rules_anchor_absolute_paths_with_a_double_slash() {
-        for rule in deny_rules("/home/me/Blink") {
+        for rule in deny_rules("/home/me/Blink", "/tmp") {
             let pattern = rule
                 .trim_start_matches("Edit(")
                 .trim_end_matches(')')
@@ -1713,7 +1724,7 @@ mod tests {
 
     #[test]
     fn deny_rules_cover_the_hook_disabling_vectors() {
-        let rules = deny_rules("/home/me/Blink");
+        let rules = deny_rules("/home/me/Blink", "/tmp");
         // The decisive one: `{"disableAllHooks": true}` in a project
         // .claude/settings.json stops the confinement hook firing entirely,
         // so the hook cannot be what protects it.
@@ -1724,8 +1735,22 @@ mod tests {
     }
 
     #[test]
+    fn deny_rules_protect_the_sessions_own_policy_files() {
+        // Defence in depth: the settings file lives outside the project, so
+        // the hook already refuses it — but the hook is exactly what stops
+        // working when hooks are disabled, and rewriting the `--settings`
+        // file mid-session is a chained escalation (the CLI's settings
+        // watcher picks up new hooks). The anchor layer must cover it.
+        let rules = deny_rules("/home/me/Blink", "/tmp");
+        assert!(
+            rules.contains(&"Edit(//tmp/bancada-agent-*)".to_string()),
+            "{rules:?}"
+        );
+    }
+
+    #[test]
     fn deny_rules_tolerate_a_trailing_slash_on_the_project_dir() {
-        let rules = deny_rules("/home/me/Blink/");
+        let rules = deny_rules("/home/me/Blink/", "/tmp/");
         assert!(
             rules.contains(&"Edit(//home/me/Blink/.claude/**)".to_string()),
             "{rules:?}"
@@ -1738,7 +1763,7 @@ mod tests {
     #[test]
     fn the_deny_rules_and_the_hook_refuse_the_same_project_dirs() {
         let dir = sketch();
-        let rules = deny_rules(dir.path().to_str().unwrap());
+        let rules = deny_rules(dir.path().to_str().unwrap(), "/tmp");
         for name in REFUSED_DIRS {
             assert!(
                 !path_is_confined(dir.path(), &format!("{name}/x")),
