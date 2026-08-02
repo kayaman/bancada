@@ -358,7 +358,9 @@ body {
   min-width: 0;
 }
 
-.board-picker .board-search {
+/* input.board-search so this outranks `.np-body .input`'s width: 100%,
+   which otherwise stretches the filter and crushes the select to a sliver. */
+.board-picker input.board-search {
   width: 130px;
   flex: none;
 }
