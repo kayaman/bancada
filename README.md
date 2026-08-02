@@ -45,8 +45,10 @@ pip install --user esptool
 sudo zypper install git
 
 # claude CLI (for the AI Assistant panel) — resolved from PATH like the two
-# above; install it, then run `claude` once and follow the login prompt
-npm install -g @anthropic-ai/claude-code
+# above; install it, then run `claude` once and follow the login prompt.
+# See https://claude.com/product/claude-code for the current install options
+# (the native installer drops it in ~/.local/bin; npm is also supported).
+curl -fsSL https://claude.ai/install.sh | bash
 
 # Serial port access
 sudo usermod -aG dialout $USER   # check group with: ls -l /dev/ttyACM0
