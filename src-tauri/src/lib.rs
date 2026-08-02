@@ -1883,7 +1883,31 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
     write_private_file(&path, &mcp_config, "MCP config")
 }
 
-/// The `--settings` payload: Bancada's `PreToolUse` confinement hook (A1).
+/// The `--settings` payload: Bancada's write-confinement policy (A1).
+///
+/// **Two layers, and the order between them is the whole point.**
+///
+/// 1. `permissions.deny` rules (`core::agent::deny_rules`) protecting the
+///    project's `.claude/`, `.git/`, `.mcp.json` and the user's own
+///    `~/.claude/**`. Deny rules are evaluated *before* hooks and are
+///    unaffected by `disableAllHooks`.
+/// 2. A `PreToolUse` hook doing the subtree containment deny rules cannot
+///    express — a denylist has no "everything except this directory" form.
+///
+/// A hook alone is **not** sufficient, and this was the red-team finding
+/// against the first version of this code: a project `.claude/settings.json`
+/// containing `{"disableAllHooks": true}` makes a `--settings`-supplied
+/// `PreToolUse` hook never fire at all (verified against 2.1.220 —
+/// instrumented hook log empty, out-of-tree write landed). A hook that is
+/// the only thing protecting `.claude/` is one write away from being
+/// switched off, so the deny rules anchor the hook rather than the reverse.
+///
+/// `--managed-settings` (a hidden "policy-tier settings JSON from a spawning
+/// parent process, SDK use only" flag) would be the theoretically stronger
+/// tier, being the one `disableAllHooks` cannot override. It is not used:
+/// probed clean against 2.1.220 with no hostile settings anywhere, a
+/// `PreToolUse` hook supplied through it **never fired** and the write went
+/// straight through. It does not carry hooks.
 ///
 /// The hook's `command` is **this very binary**, re-invoked as
 /// `bancada --agent-guard <sketch_dir>` (see `run_agent_guard`). Using
@@ -1898,10 +1922,13 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
 /// not turn into two arguments, and must certainly not turn into a second
 /// command.
 ///
-/// Written with the same 0600 `create_new` discipline as the MCP config: the
-/// file names a hook the CLI will *execute*, so a world-writable temp file
-/// at a predictable path would be a way to make Bancada run someone else's
-/// command.
+/// **The file is written to the temp dir, deliberately outside the project
+/// tree**: the policy must not live somewhere the thing it constrains can
+/// edit, or an agent that got past the hook could rewrite its own rules.
+/// Same 0600 `create_new` discipline as the MCP config, and for a sharper
+/// reason — this file names a command the CLI will *execute*, so a
+/// world-writable file at a predictable path would be a way to make Bancada
+/// run someone else's command.
 fn write_agent_settings_file(sketch_dir: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("could not resolve Bancada's own executable path: {e}"))?;
@@ -1910,11 +1937,18 @@ fn write_agent_settings_file(sketch_dir: &str) -> Result<PathBuf, String> {
         shell_quote(&exe.to_string_lossy()),
         shell_quote(sketch_dir)
     );
+    // Deny patterns are matched against resolved paths, so they must be
+    // built from the *canonical* project dir: a project opened through a
+    // symlink would otherwise get rules that never match anything.
+    let canonical = std::fs::canonicalize(sketch_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| sketch_dir.to_string());
     let settings = serde_json::json!({
+        "permissions": { "deny": agent::deny_rules(&canonical) },
         "hooks": {
             "PreToolUse": [{
                 "matcher": agent::guard_hook_matcher(),
-                "hooks": [{ "type": "command", "command": command }]
+                "hooks": [{ "type": "command", "command": command, "timeout": 15 }]
             }]
         }
     })
@@ -2496,6 +2530,13 @@ fn agent_start(
         .current_dir(&sketch_dir)
         .env("MCP_TOOL_TIMEOUT", MCP_TIMEOUT_MS)
         .env("MCP_TIMEOUT", MCP_TIMEOUT_MS)
+        // Auto-memory is written with ordinary Write/Edit and loaded into
+        // the system prompt of every *later* session of this project. It is
+        // not code execution, so the confinement hook has no reason to refuse
+        // it — but it is prompt injection that outlives the session, which a
+        // write boundary alone does not address. The embedded agent has no
+        // use for it either way.
+        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3496,6 +3537,63 @@ mod tests {
     }
 
     // ---------- A1: the --settings confinement hook ----------
+
+    /// The `permissions.deny` half of the policy — the layer that survives
+    /// `disableAllHooks` and is therefore what actually keeps
+    /// `.claude/settings.json` out of reach.
+    #[test]
+    fn the_settings_file_carries_the_deny_rule_anchor() {
+        let sketch = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(sketch.path()).unwrap();
+        let path = write_agent_settings_file(&sketch.path().to_string_lossy()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let deny: Vec<String> = parsed["permissions"]["deny"]
+            .as_array()
+            .expect("a deny array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        // `//` is itself the filesystem-root anchor, so the canonical path
+        // contributes its components without a second leading slash.
+        let anchored = canonical
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        assert!(
+            deny.contains(&format!("Edit(//{anchored}/.claude/**)")),
+            "the project's own .claude must be denied by *rule*, not only by \
+             the hook — a hook cannot protect the file that can disable it: \
+             {deny:?}"
+        );
+        assert!(
+            deny.iter().any(|r| r.contains(".git/**")),
+            ".git/hooks/* is code the next git operation runs: {deny:?}"
+        );
+        // Verified against 2.1.220: Write(...) patterns are accepted and
+        // never evaluated, so one here would be an invisible no-op.
+        assert!(
+            !deny.iter().any(|r| r.starts_with("Write(")),
+            "Write(...) rules are silently never consulted: {deny:?}"
+        );
+    }
+
+    /// The policy file must not be reachable by the thing it constrains: if
+    /// it lived in the sketch dir, an agent that got past the hook could
+    /// rewrite its own rules (and the hook allows writes there by design).
+    #[test]
+    fn the_settings_file_lives_outside_the_project_tree() {
+        let sketch = tempfile::tempdir().unwrap();
+        let path = write_agent_settings_file(&sketch.path().to_string_lossy()).unwrap();
+        let inside = agent::path_is_confined(sketch.path(), &path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            !inside,
+            "the policy file must be somewhere the agent cannot write: {path:?}"
+        );
+    }
 
     /// The hook file is the boundary. If it stops naming this binary, or
     /// stops matching the write tools, the session silently loses its

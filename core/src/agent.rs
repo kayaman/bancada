@@ -334,11 +334,30 @@ pub fn unexpected_tools(tools: &[String]) -> Vec<String> {
 
 // ---------- path confinement (A1) ----------
 
+/// Directory names the agent may never write into, as components *below* the
+/// project root.
+///
+/// Both are code-execution vectors reachable from inside the very subtree the
+/// agent is otherwise allowed to edit:
+///
+/// - `.claude` — a project `settings.json` there can add hooks (shell
+///   commands, picked up mid-session by the settings watcher) or, worse, set
+///   `disableAllHooks`, which turns off the confinement hook itself. Verified
+///   against 2.1.220: with `{"disableAllHooks": true}` in a project
+///   `.claude/settings.json`, a `--settings`-supplied `PreToolUse` hook never
+///   fires at all.
+/// - `.git` — `.git/hooks/*` are shell scripts the next git operation runs.
+///
+/// This is the second of two layers for these paths: the `permissions.deny`
+/// rules Bancada also generates are evaluated *before* hooks and survive
+/// `disableAllHooks`, which is what makes them the anchor rather than this.
+pub const REFUSED_DIRS: &[&str] = &[".claude", ".git"];
+
 /// Is `candidate` a path the embedded agent is allowed to write?
 ///
 /// Bancada's confinement rule, in one pure function so it is testable without
 /// a CLI: a write is allowed only if it lands **inside `sketch_dir`** and no
-/// path component *below* `sketch_dir` is `.claude`.
+/// path component *below* `sketch_dir` is one of [`REFUSED_DIRS`].
 ///
 /// - Relative candidates are resolved against `sketch_dir` (the agent's cwd).
 /// - `..` traversal is normalised away lexically *before* the prefix test, so
@@ -355,13 +374,13 @@ pub fn unexpected_tools(tools: &[String]) -> Vec<String> {
 ///   through a symlinked parent (`/tmp` → `/private/tmp` on macOS, a
 ///   symlinked home) compares equal instead of spuriously failing.
 ///
-/// The `.claude` rule is scoped to components *below* the root on purpose:
-/// Bancada projects can legitimately live under a `.claude/` path (git
-/// worktrees created by Claude Code itself do exactly that), so testing the
-/// whole absolute path would refuse every write in such a checkout. What the
-/// rule is actually for is the agent rewriting the *project's own*
-/// `.claude/settings.json` — hooks, permissions, this very confinement — from
-/// inside the session it constrains.
+/// The [`REFUSED_DIRS`] rule is scoped to components *below* the root on
+/// purpose: Bancada projects can legitimately live under a `.claude/` path
+/// (git worktrees created by Claude Code itself do exactly that) and every
+/// git checkout has a `.git` above or at its root, so testing the whole
+/// absolute path would refuse every write in such a checkout. What the rule
+/// is actually for is the agent rewriting the *project's own* config from
+/// inside the session that config constrains.
 ///
 /// Fails closed: an empty candidate, or a `sketch_dir` that cannot be
 /// resolved to an absolute path, is not confined.
@@ -385,7 +404,58 @@ pub fn path_is_confined(sketch_dir: &Path, candidate: &str) -> bool {
     let Ok(below) = resolved.strip_prefix(&root) else {
         return false;
     };
-    !below.components().any(|c| c.as_os_str() == ".claude")
+    !below
+        .components()
+        .any(|c| REFUSED_DIRS.iter().any(|d| c.as_os_str() == *d))
+}
+
+/// The `permissions.deny` rules that anchor the confinement (red-team R1/R2).
+///
+/// The `PreToolUse` hook cannot protect `.claude/` on its own, because a
+/// project `.claude/settings.json` containing `{"disableAllHooks": true}`
+/// stops the hook firing at all — verified against 2.1.220. Deny rules are
+/// evaluated *before* hooks and are unaffected by `disableAllHooks`, so they
+/// are what keeps that file out of reach; the hook then provides the subtree
+/// containment deny rules cannot express (a denylist has no "everything
+/// except here" form).
+///
+/// Two syntax traps, both verified:
+///
+/// - **`Edit(...)`, never `Write(...)`.** Since 2.1.210 only `Edit(path)` and
+///   `Read(path)` patterns are consulted for file permission checks;
+///   `Write(...)` rules are accepted silently and never evaluated. `Edit(...)`
+///   covers `Write`/`NotebookEdit`/`MultiEdit` too.
+/// - **`//` means the filesystem root.** A single leading `/` anchors to *the
+///   directory containing the settings file* — which for Bancada is a temp
+///   dir, so a `/`-anchored rule would silently protect nothing. `~/` is the
+///   home directory.
+///
+/// `project_dir` must already be absolute and canonical; the caller resolves
+/// it. Gitignore-style glob metacharacters in the project path (`*`, `?`,
+/// `[`) would confuse these patterns — an exotic-enough directory name that
+/// the hook layer is the answer for it, not more escaping.
+pub fn deny_rules(project_dir: &str) -> Vec<String> {
+    // `//` *is* the filesystem-root anchor, so the path is appended without
+    // its own leading slash — `///home/me` would be a different (and wrong)
+    // pattern.
+    let project_dir = project_dir.trim_end_matches('/').trim_start_matches('/');
+    vec![
+        // The project's own config — the disableAllHooks vector, plus any
+        // hook a settings file could add.
+        format!("Edit(//{project_dir}/.claude/**)"),
+        format!("Edit(//{project_dir}/.mcp.json)"),
+        format!("Edit(//{project_dir}/.claude.json)"),
+        // Git hooks are shell scripts the next git operation runs.
+        format!("Edit(//{project_dir}/.git/**)"),
+        // The user's config — a hook here would run in every future session
+        // of every project, the largest blast radius available.
+        "Edit(~/.claude/**)".to_string(),
+        "Edit(~/.claude.json)".to_string(),
+        "Edit(~/.bashrc)".to_string(),
+        "Edit(~/.zshrc)".to_string(),
+        "Edit(~/.profile)".to_string(),
+        "Edit(//etc/**)".to_string(),
+    ]
 }
 
 /// Normalise `p` lexically (drop `.`, fold `..`), then canonicalise the
@@ -494,8 +564,9 @@ pub fn guard_decision(sketch_dir: &Path, hook_stdin: &str) -> Option<String> {
     }
     deny(format!(
         "Bancada refuses this edit: {file_path} is outside the project directory {} \
-         (or is part of its .claude configuration). Only files inside the project may be edited.",
-        sketch_dir.display()
+         (or is part of its {} configuration). Only files inside the project may be edited.",
+        sketch_dir.display(),
+        REFUSED_DIRS.join("/")
     ))
 }
 
@@ -1377,6 +1448,35 @@ mod tests {
     }
 
     #[test]
+    fn confined_rejects_a_dot_git_component_below_the_project() {
+        // `.git/hooks/pre-commit` is a shell script the next git operation
+        // runs — a code-execution vector entirely inside the subtree the
+        // agent is otherwise allowed to edit.
+        let dir = sketch();
+        assert!(!path_is_confined(dir.path(), ".git/hooks/pre-commit"));
+        assert!(!path_is_confined(dir.path(), ".git/config"));
+        assert!(!path_is_confined(
+            dir.path(),
+            dir.path()
+                .join(".git/hooks/post-checkout")
+                .to_str()
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn confined_allows_a_project_inside_a_git_checkout() {
+        // Every git project has a `.git` at or above its root; only
+        // components *below* the project root are refused, or no Bancada
+        // project under version control could be edited at all.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let project = repo.path().join("sketches/Blink");
+        std::fs::create_dir_all(&project).unwrap();
+        assert!(path_is_confined(&project, "Blink.ino"));
+    }
+
+    #[test]
     fn confined_allows_a_project_that_itself_lives_under_a_dot_claude_path() {
         // Claude Code's own git worktrees live at
         // `<repo>/.claude/worktrees/<name>` — testing `.claude` against the
@@ -1498,6 +1598,89 @@ mod tests {
             assert!(matcher.contains(tool), "{matcher} is missing {tool}");
         }
         assert_eq!(matcher.split('|').count(), GUARDED_TOOLS.len());
+    }
+
+    // ---------- A1: the permissions.deny anchor ----------
+
+    /// Verified against 2.1.220: `Write(...)` path rules are accepted
+    /// silently and **never evaluated** — only `Edit(...)` and `Read(...)`
+    /// are consulted for file permission checks. A deny rule written as
+    /// `Write(...)` is therefore not a weaker rule, it is *no rule*, and
+    /// nothing at runtime would say so.
+    #[test]
+    fn deny_rules_never_use_the_inert_write_pattern() {
+        for rule in deny_rules("/home/me/Blink") {
+            assert!(
+                !rule.starts_with("Write("),
+                "Write(...) rules are silently never evaluated: {rule}"
+            );
+            assert!(
+                rule.starts_with("Edit(") || rule.starts_with("Read("),
+                "only Edit(...)/Read(...) are consulted: {rule}"
+            );
+        }
+    }
+
+    /// A single leading `/` anchors to the directory containing the settings
+    /// file — a temp dir, for Bancada — so a `/`-anchored rule would protect
+    /// nothing at all while looking exactly like one that did. Absolute
+    /// rules must use `//`.
+    #[test]
+    fn deny_rules_anchor_absolute_paths_with_a_double_slash() {
+        for rule in deny_rules("/home/me/Blink") {
+            let pattern = rule
+                .trim_start_matches("Edit(")
+                .trim_end_matches(')')
+                .to_string();
+            if pattern.starts_with('~') {
+                continue; // home-anchored, correct as-is
+            }
+            assert!(
+                pattern.starts_with("//"),
+                "an absolute deny pattern must start with // or it anchors to \
+                 the settings file's own directory: {rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn deny_rules_cover_the_hook_disabling_vectors() {
+        let rules = deny_rules("/home/me/Blink");
+        // The decisive one: `{"disableAllHooks": true}` in a project
+        // .claude/settings.json stops the confinement hook firing entirely,
+        // so the hook cannot be what protects it.
+        assert!(rules.contains(&"Edit(//home/me/Blink/.claude/**)".to_string()));
+        assert!(rules.contains(&"Edit(//home/me/Blink/.git/**)".to_string()));
+        assert!(rules.contains(&"Edit(~/.claude/**)".to_string()));
+        assert!(rules.contains(&"Edit(~/.claude.json)".to_string()));
+    }
+
+    #[test]
+    fn deny_rules_tolerate_a_trailing_slash_on_the_project_dir() {
+        let rules = deny_rules("/home/me/Blink/");
+        assert!(
+            rules.contains(&"Edit(//home/me/Blink/.claude/**)".to_string()),
+            "{rules:?}"
+        );
+    }
+
+    /// The two layers must agree about what is off limits: a directory the
+    /// deny rules protect but the hook waves through (or vice versa) is a
+    /// gap that only shows up when one layer is disabled.
+    #[test]
+    fn the_deny_rules_and_the_hook_refuse_the_same_project_dirs() {
+        let dir = sketch();
+        let rules = deny_rules(dir.path().to_str().unwrap());
+        for name in REFUSED_DIRS {
+            assert!(
+                !path_is_confined(dir.path(), &format!("{name}/x")),
+                "the hook must refuse {name}/"
+            );
+            assert!(
+                rules.iter().any(|r| r.contains(&format!("/{name}/"))),
+                "the deny rules must refuse {name}/: {rules:?}"
+            );
+        }
     }
 
     // ---------- A2: unexpected_tools ----------
