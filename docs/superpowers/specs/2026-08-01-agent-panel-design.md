@@ -57,8 +57,10 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   auto-restart on crash (same philosophy as the MQTT thread) — panel shows
   "Session ended".
 - Argv (built by pure, tested `agent_args()` in core): `-p --verbose
-  --include-partial-messages --permission-mode acceptEdits --allowedTools
-  Read,Edit,Write,Glob,Grep,mcp__bancada__verify --disallowedTools
+  --include-partial-messages --permission-mode acceptEdits
+  --tools Read,Edit,Write,Glob,Grep
+  --allowedTools Read,Edit,Write,Glob,Grep,mcp__bancada__verify
+  --disallowedTools
   "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput"
   --mcp-config <path to a 0600 temp file containing the loopback HTTP URL +
   bearer token as JSON — a path, not inline JSON: a post-review fix (F5)
@@ -66,18 +68,27 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
   Linux, which defeats the point of a bearer token. `write_mcp_config_file`
   writes and chmods the file; `agent_start`/`stop_agent_session` delete it
   on every exit path>
-  --strict-mcp-config --append-system-prompt <project dir, profile, "use
-  mcp__bancada__verify; iterate until it passes">`. The
-  `mcp__bancada__verify` entry in `--allowedTools` is load-bearing (without
-  it a headless `tools/call` stalls on a permission prompt) — unit-test its
-  presence. ~~**Isolation: use `--bare`**~~ **`--bare` was dropped** after
+  --strict-mcp-config
+  --settings <path to a 0600 temp file, OUTSIDE the project tree, carrying
+  the write-confinement policy: `permissions.deny` rules plus the
+  `PreToolUse` guard hook — see Safety model>
+  --append-system-prompt <project dir, profile, "use
+  mcp__bancada__verify; iterate until it passes">`, plus env
+  `MCP_TOOL_TIMEOUT`/`MCP_TIMEOUT` and
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The `mcp__bancada__verify` entry in
+  `--allowedTools` is load-bearing (without it a headless `tools/call`
+  stalls on a permission prompt) — unit-test its presence.
+  ~~**Isolation: use `--bare`**~~ **`--bare` was dropped** after
   the milestone-5 prototype: `claude --help` (2.1.220) documents that under
   `--bare` "Anthropic auth is strictly `ANTHROPIC_API_KEY` or `apiKeyHelper`
   via `--settings` (OAuth and keychain are never read)", and the prototype
   reproduced `authentication_failed` on turn one. Since decision #2 is that
   auth comes free from the user's existing login, R3's isolation is traded
-  for working auth; `--strict-mcp-config` plus the explicit
-  `--allowedTools`/`--disallowedTools` pair remain.
+  for working auth. **`--safe-mode` was evaluated as its replacement and
+  also rejected** (0.8.0): it does stop the user's hooks firing, but the
+  same probe showed it disables `--mcp-config` servers, so
+  `mcp__bancada__verify` disappears. The confinement therefore comes from
+  `--settings` + `--tools`, not from dropping the user's config.
 - **Process plumbing** (from adversarial review of the real code):
   - **Stdin writer thread** fed by an mpsc channel — never write to child
     stdin while holding the `agent` mutex (large pasted messages > 64 KB
@@ -130,13 +141,30 @@ React AgentPanel ── invoke/events ── src-tauri (thin) ── stdio strea
 
 - **`agent://event`** — emitted for every parsed line from the child's
   stdout (`parse_event`), plus synthetic events the host adds:
-  - `{type:"stderr"}` from the stderr drain thread.
-  - `{type:"verify_started"}` / `{type:"verify_done"}` around an MCP
-    `verify` call, so the frontend can set `busy` during agent builds.
+  - `{type:"stderr", line}` from the stderr drain thread.
+  - `{type:"unparsed", line}` for a stdout line that is not valid JSON at
+    all — `parse_event`'s only `Err` case. The raw line is preserved rather
+    than dropped, because a CLI that starts printing non-JSON on stdout is
+    something the transcript should show, not swallow. The store tolerates
+    unknown types, so this is additive.
+  - `{type:"verify_started", pid}` / `{type:"verify_done", success, pid}`
+    around an MCP `verify` call, so the frontend can set `busy` during agent
+    builds.
+  - `{type:"security_alarm", kind, detail, pid}` when the host's backstop
+    refuses something and kills the session (`kind` is `path_escape` or
+    `unexpected_tools`).
+  - **`pid` on the three synthetic host events** is the session's child pid
+    (C1). The MCP listener thread and the stdout reader can both outlive the
+    session that started them, so an unstamped event from a stopped session
+    could repaint a *newer* session's panel — spinner stuck on, or a stale
+    "done" clearing a live build. The store drops any whose pid is not the
+    session it is showing.
 - **`agent://closed`** — emitted on child EOF, carries `{reason, pid}`. The
-  frontend calls `agent_stop(pid)` on receipt so the exited child is reaped;
-  `pid` (post-review fix F4) lets `agent_stop` refuse a stale close whose
-  session has since been superseded by a newer `agent_start`.
+  backend's own stdout reader reaps the session at EOF; the frontend also
+  calls `agent_stop(pid)` on receipt as a second path. `pid` (post-review
+  fix F4) lets `agent_stop` — and, since 0.8.0, `agentStore.closed()` —
+  refuse a stale close whose session has since been superseded by a newer
+  `agent_start`.
 
 ### stream-json `AgentEvent` (core/src/agent.rs)
 
@@ -170,34 +198,140 @@ since the wire protocol is undocumented (see Risk R1):
 - Notifications (no `id`, e.g. `notifications/initialized`) map to
   `McpReply::NoContent` → HTTP 202 with an empty body (spec-required).
 - `tools/call verify` result: `success`, `exit_code`, and a capped output
-  summary (decision 7 above: all stderr + stdout tail, ~200 lines / 50 KB).
+  summary (decision 7 above: all stderr + stdout tail, ~200 lines / 50 KB),
+  formatted as `"success: <bool>\nexit_code: <n>\n\n<summary>"` and parsed
+  back by `src/agent/verifyResult.ts`.
+- **`isError` semantics (decision, previously only in code comments):**
+  `isError` means *the tool could not run* — build gate contention, a
+  missing `arduino-cli`, a session stopped mid-flight. A compile that ran
+  and **failed** is reported with `isError: false`, because a fix-the-build
+  loop is the normal path of this whole feature and flagging it as a tool
+  failure invites the model to stop calling the tool. Pass/fail for a
+  completed verify therefore lives in the `success:` line of the text, not
+  in `isError` — which is exactly why that text format has its own parser
+  module and tests.
 
 ## Safety model
 
-- The agent's cwd is the sketch dir. **Prototype finding (milestone 5):
-  `--permission-mode acceptEdits` does NOT confine built-in file tools to
-  the cwd** — a `-p` session asked to `Write /tmp/bancada-probe-outofcwd.txt`
-  created it with `"permission_denials":[]`. The sandbox is therefore
-  weaker than this spec assumed; tightening it (a `PreToolUse` hook or a
-  path-scoped deny rule that still permits absolute paths *inside* the
-  project) is an open follow-up, not something slice 1 provides.
-- `Bash`, `WebFetch`, `WebSearch`, `Task`, `NotebookEdit`, `KillShell`, and
-  `BashOutput` are explicitly disallowed via `--disallowedTools`.
-- `--strict-mcp-config` keeps the user's personal MCP servers out of the
-  embedded session.
-- The user's own hooks/skills/plugins **do** load (see the `--bare` note in
-  Architecture): `--setting-sources` alone does not block user hooks
-  (doc-verified) and `--bare`, which would, breaks auth.
+> Rewritten for 0.8.0 after the final review established that the composed
+> risk was **arbitrary command execution as the user**, not merely
+> out-of-project edits. Everything below is stated as verified-against-2.1.220
+> or not stated at all.
+
+### The risk being managed
+
+Three facts compose:
+
+1. **The user's own configuration loads into the embedded session.** `--bare`
+   would prevent it but breaks keychain auth (verified); `--safe-mode` would
+   prevent it but disables `--mcp-config`, taking the `verify` tool with it
+   (verified: `mcp_servers: []`, no `mcp__bancada__verify`). Neither is
+   usable, so user hooks/skills/plugins load. A `SessionStart` hook firing in
+   the embedded session was observed directly.
+2. **Hooks are shell commands.**
+3. **`Write` was not confined to the project.**
+
+(1)+(2)+(3) means: the agent writes a settings file containing a hook, and
+the CLI runs it as a shell command, as the user. Bancada cannot close (1) or
+(2) without losing auth or the compiler, so **(3) is what gets closed**.
+
+### What actually enforces it
+
+Four layers, strongest first. Each is annotated with what verified it, and
+**`--disallowedTools` is deliberately absent from this list** — see below.
+
+1. **`permissions.deny` rules** (`core::agent::deny_rules`, delivered via
+   `--settings`) protecting `<project>/.claude/**`, `<project>/.git/**`,
+   `<project>/.mcp.json`, `~/.claude/**`, `~/.claude.json`, shell rc files
+   and `/etc/**`. This is the *anchor*: deny rules are evaluated **before**
+   hooks and are unaffected by `disableAllHooks`. Two syntax traps, both
+   verified and both silent when got wrong:
+   - only `Edit(...)` and `Read(...)` patterns are consulted for file
+     permission checks since 2.1.210; **`Write(...)` rules are accepted and
+     never evaluated**;
+   - `//` anchors at the filesystem root, while a single `/` anchors at *the
+     directory containing the settings file*.
+2. **A `PreToolUse` hook** doing subtree containment — the thing deny rules
+   cannot express, since a denylist has no "everything except here" form.
+   Its command is the Bancada binary itself (`bancada --agent-guard <dir>`),
+   so the policy is the same tested `core::agent::path_is_confined`. It
+   fails closed on unparseable input, passes by printing nothing (never by
+   `permissionDecision: "allow"`, which would bypass the deny rules; and
+   never `"defer"`, which is broken in 2.1.220), and always exits 0 because
+   a hook that exits non-zero is "log and continue", i.e. fail *open*.
+3. **A pre-flight refusal.** `agent_start` reads every
+   `.claude/settings.json` / `settings.local.json` from the sketch dir up to
+   the filesystem root, plus `~/.claude/`, and **refuses to start** if any
+   sets `disableAllHooks` — because that switches layer 2 off entirely.
+4. **A detect-and-stop backstop.** The stdout reader independently re-checks
+   every `Edit`/`Write` `tool_use` against `path_is_confined`, and the
+   `system`/`init` `tools` array against `EXPECTED_TOOLS`; either failing
+   emits `{type:"security_alarm"}` and kills the session. This is weaker
+   than a refusal — the write may already have happened — and exists because
+   layers 1–3 all depend on the CLI's own policy engine behaving as probed.
+
+**Live verification of the whole production configuration** (one turn, agent
+asked to make four writes):
+
+| attempt | result | blocked by |
+|---|---|---|
+| out-of-project `/tmp/…` | refused, nothing on disk | layer 2 (hook) |
+| `<project>/.claude/settings.json` | refused | layer 1 (deny rule) |
+| `<project>/.git/hooks/pre-commit` | refused | layer 1 (deny rule) |
+| `<project>/helper.h` | **created** | — (the main use case still works) |
+
+The hook denial appears in the CLI's `permission_denials`; **deny-rule
+denials do not** — do not use that field as an audit signal.
+
+### Tool restriction
+
+- **`--tools Read,Edit,Write,Glob,Grep` is a real restriction.** Verified by
+  reading the `system`/`init` `tools` array: without it a session lists 25
+  built-ins including `Skill`, `Task*`, `Monitor`, `Workflow`, `SendMessage`,
+  `LSP` and `Cron*`. It does not filter MCP tools, so `mcp__bancada__verify`
+  survives.
+- **`--disallowedTools` is NOT a boundary.** With it set and `--tools`
+  absent, all 25 of those tools were still offered. It is a permission-layer
+  nudge, kept only because defence in depth is free. No document, comment or
+  code should present it as isolation.
+- `--strict-mcp-config` keeps the user's personal MCP servers out (and
+  closes the `.mcp.json` vector).
+- On `system/init` the tool list is **asserted** against the expected set;
+  anything unexpected stops the session (closes I3).
+
+### What remains open — stated plainly
+
+- **Reads are not confined at all.** The agent can `Read` anything the user's
+  uid can, including `~/.ssh` and `~/.claude/.credentials.json`. Only writes
+  are confined.
+- **This is in-process policy, in the process the model drives.** A bug in
+  path normalisation, a new file-writing tool, or a tool-input schema change
+  is a bypass. A *real* boundary requires wrapping the whole `claude`
+  process — container, dedicated uid, or bubblewrap. That is the only thing
+  that would make the guarantee independent of the CLI's own policy engine,
+  and Bancada does not do it.
+- **A pre-existing hostile hook in the user's own config still runs.**
+  Bancada stops the agent from *installing* one; it cannot stop one already
+  there.
+- **`--managed-settings`** (the one tier `disableAllHooks` cannot override)
+  does not carry hooks — probed clean, the hook never fired.
+- **Prompt injection persists via `CLAUDE.md` and project files**, which are
+  legitimately inside the writable subtree. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`
+  is set on the child to close the auto-memory variant of this.
+
+### Unchanged from earlier slices
+
 - `verify` is compile-only — it never runs `-u` (upload).
 - Edits auto-apply with no per-edit approval gate (decision 4); the panel
   warns when the project is not under git, since there is no undo path
   without it (see Risk R4).
 - The MCP listener is bearer-token protected and bound to `127.0.0.1`. The
-  token itself is written to a 0600 temp file and referenced by path in
-  `--mcp-config`, never placed inline in argv (post-review fix F5 — argv is
-  readable by any local process via `/proc/<pid>/cmdline` on Linux, which
-  would have handed the token to exactly the "other local processes" the
-  token exists to keep out).
+  token is written to a 0600 temp file and referenced by path in
+  `--mcp-config`, never inline in argv (F5 — argv is readable by any local
+  process via `/proc/<pid>/cmdline` on Linux). The `--settings` file gets the
+  same 0600 treatment and lives **outside the project tree**, so the agent
+  cannot rewrite its own policy. `random_token()` fails the session rather
+  than falling back to a guessable clock/ASLR mix.
 
 ## Risks
 
@@ -217,10 +351,23 @@ since the wire protocol is undocumented (see Risk R1):
   stream must answer **405**; answering it with a JSON-RPC body instead put
   the client into a tight reconnect busy-loop.
 - **R3** User-level settings/hooks leaking into the embedded agent →
-  **partly unmitigated**: `--strict-mcp-config` covers MCP servers, but
-  `--bare` (the only thing that blocks user hooks/skills/plugins) breaks
-  auth and was dropped, and `--setting-sources` does NOT block hooks
-  (doc-verified). Accepted for slice 1.
+  **still true, and now compensated rather than accepted.**
+  `--strict-mcp-config` covers MCP servers, but neither `--bare` (breaks
+  auth) nor `--safe-mode` (kills `--mcp-config`, so no `verify`) can be
+  used, and `--setting-sources` does NOT block hooks (doc-verified). The
+  user's hooks/skills/plugins do load. Since hooks are shell commands, R3
+  composed with an unconfined `Write` into **arbitrary command execution**;
+  0.8.0 closes the write leg (see Safety model) so the agent can no longer
+  install a hook, and asserts the session's tool list so an unexpected
+  plugin-provided tool stops the session. A hostile hook *already present*
+  in the user's config still runs — that is the residue.
+- **R6 (new, 0.8.0)** The confinement is **in-process policy inside the
+  process the model drives**, and reads are not confined at all. A hard
+  boundary needs the whole `claude` process wrapped (container, dedicated
+  uid, bubblewrap). Out of scope for 0.8.0; the honest description of what
+  ships is "the agent cannot write outside the project or escalate into
+  code execution through the CLI's own config", not "the agent is
+  sandboxed".
 - **R4** No undo without git → UI hint in slice 1; optional pre-session
   snapshot as fast-follow.
 - **R5** Concurrent user/agent builds racing the arduino-cli build cache →
