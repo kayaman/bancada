@@ -106,11 +106,22 @@ export default function NewProject({
       );
       // Remembering the parent is a convenience; never fail creation over it.
       saveSettings({ last_new_project_parent: parent }).catch(() => {});
+      // Both are non-fatal: the sketch exists and builds either way, so say
+      // what fell short rather than hiding it behind a plain success.
+      const warnings: string[] = [];
+      if (res.library_errors.length) {
+        warnings.push(
+          `${res.library_errors.length} librar${res.library_errors.length === 1 ? "y" : "ies"} failed: ${res.library_errors.join("; ")}`,
+        );
+      }
+      if (res.git_error) {
+        warnings.push(`not put under git: ${res.git_error}`);
+      }
       notify(
-        res.library_errors.length
-          ? `Created ${res.dir}, but ${res.library_errors.length} librar${res.library_errors.length === 1 ? "y" : "ies"} failed: ${res.library_errors.join("; ")}`
+        warnings.length
+          ? `Created ${res.dir}, but ${warnings.join("; ")}`
           : `✓ Created ${res.dir} (profile ${res.profile})`,
-        res.library_errors.length > 0,
+        warnings.length > 0,
       );
       onCreated(res.dir);
     } catch (e) {

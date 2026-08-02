@@ -14,7 +14,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -262,23 +261,8 @@ impl Manifest {
 
 // ---------- git ----------
 
-fn git(args: &[&str]) -> Result<String> {
-    let out = Command::new("git").args(args).output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::ToolMissing("git".into())
-        } else {
-            Error::Io(e)
-        }
-    })?;
-    if !out.status.success() {
-        return Err(Error::ToolFailed {
-            tool: "git".into(),
-            status: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
+/// One git runner for the crate; see `crate::git::run`.
+use crate::git::run as git;
 
 /// Tags available in a remote, ranked for the given library name.
 pub fn list_remote_tags(url: &str, lib_name: &str) -> Result<Vec<RemoteTag>> {
