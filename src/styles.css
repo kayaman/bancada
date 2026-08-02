@@ -604,6 +604,12 @@ body {
   cursor: default;
 }
 
+.tree-item.drop-target,
+.file-tree.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 .ctx-sep {
   height: 1px;
   margin: 4px 0;

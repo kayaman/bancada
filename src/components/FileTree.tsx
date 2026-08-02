@@ -1,7 +1,10 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useExplorerStore } from "../explorerStore";
 import { buildTree, visibleNodes } from "../fileTreeModel";
-import { protectedPaths } from "../explorerOps";
+import { isDescendant, protectedPaths } from "../explorerOps";
+
+const parentOf = (p: string) => p.split("/").slice(0, -1).join("/");
+const basename = (p: string) => p.split("/").pop() ?? p;
 import TreeContextMenu from "./TreeContextMenu";
 
 interface Props {
@@ -103,6 +106,8 @@ export default function FileTree({
   const selected = useExplorerStore((s) => s.selected);
   const creating = useExplorerStore((s) => s.creating);
   const renaming = useExplorerStore((s) => s.renaming);
+  const dragging = useExplorerStore((s) => s.dragging);
+  const dropTarget = useExplorerStore((s) => s.dropTarget);
   const {
     toggleExpanded,
     select,
@@ -112,7 +117,24 @@ export default function FileTree({
     startRename,
     cancelRename,
     expandTo,
+    setDragging,
+    setDropTarget,
   } = useExplorerStore.getState();
+
+  /** A drop is a move into `dir` ("" = root): rejected when nothing is
+   *  dragged, the target is the item, its own subtree, or a no-op. */
+  const validDrop = (dir: string): boolean =>
+    dragging !== null &&
+    dir !== dragging &&
+    !isDescendant(dir, dragging) &&
+    parentOf(dragging) !== dir;
+
+  const dropInto = (dir: string) => {
+    if (!dragging || !validDrop(dir)) return;
+    const to = dir ? `${dir}/${basename(dragging)}` : basename(dragging);
+    void onRenameTo(dragging, to);
+    setDragging(null);
+  };
 
   const rows = useMemo(
     () => visibleNodes(buildTree(files), expanded),
@@ -145,12 +167,23 @@ export default function FileTree({
 
   return (
     <div
-      className="file-tree"
+      className={`file-tree ${dropTarget === "" && dragging ? "drop-target" : ""}`}
       onContextMenu={(e) => {
         // background only — rows call openContextMenu themselves and stop
         // propagation before this handler sees the event
         e.preventDefault();
         if (sketchDir) openContextMenu(e.clientX, e.clientY, null);
+      }}
+      onDragOver={(e) => {
+        if (validDrop("")) {
+          e.preventDefault();
+          setDropTarget("");
+        }
+      }}
+      onDragLeave={() => dropTarget === "" && setDropTarget(null)}
+      onDrop={(e) => {
+        e.preventDefault();
+        dropInto("");
       }}
     >
       {creating?.parentDir === "" && createRow(0)}
@@ -179,7 +212,9 @@ export default function FileTree({
           return (
             <div key={node.relPath}>
               <button
-                className={`tree-item dir ${selected === node.relPath ? "selected" : ""}`}
+                className={`tree-item dir ${selected === node.relPath ? "selected" : ""} ${
+                  dropTarget === node.relPath ? "drop-target" : ""
+                }`}
                 style={{ paddingLeft: pad }}
                 title={node.relPath}
                 onClick={() => {
@@ -187,6 +222,26 @@ export default function FileTree({
                   select(node.relPath);
                 }}
                 onContextMenu={onCtx}
+                draggable
+                onDragStart={(e) => {
+                  setDragging(node.relPath);
+                  e.dataTransfer.setData("text/plain", node.relPath);
+                  e.dataTransfer.effectAllowed = "move";
+                }}
+                onDragEnd={() => setDragging(null)}
+                onDragOver={(e) => {
+                  if (validDrop(node.relPath)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDropTarget(node.relPath);
+                  }
+                }}
+                onDragLeave={() => dropTarget === node.relPath && setDropTarget(null)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  dropInto(node.relPath);
+                }}
               >
                 <span className="chevron">{open ? "▾" : "▸"}</span>
                 {node.name}
@@ -214,6 +269,13 @@ export default function FileTree({
               onOpen(node.relPath);
             }}
             onContextMenu={onCtx}
+            draggable={!isProt}
+            onDragStart={(e) => {
+              setDragging(node.relPath);
+              e.dataTransfer.setData("text/plain", node.relPath);
+              e.dataTransfer.effectAllowed = "move";
+            }}
+            onDragEnd={() => setDragging(null)}
           >
             <span className="chevron spacer" />
             {node.name}
