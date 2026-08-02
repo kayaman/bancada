@@ -536,11 +536,29 @@ body {
 
 .tree-item.dir {
   color: var(--text-dim);
-  cursor: default;
 }
 
-.tree-item.file:hover {
+.tree-item:hover {
   background: var(--bg-raised);
+}
+
+.tree-item.selected {
+  background: var(--bg-raised);
+}
+
+.tree-item.protected {
+  opacity: 0.75;
+}
+
+.chevron {
+  display: inline-block;
+  width: 13px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.chevron.spacer::before {
+  content: "";
 }
 
 .tree-item.file.active {

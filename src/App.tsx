@@ -7,15 +7,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
 import { checkNewFile } from "./newFile";
+import { useExplorerStore } from "./explorerStore";
 import { arrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
-import type {
-  AgentEvent,
-  DetectedPort,
-  OutputLine,
-  SketchFile,
-  SketchYaml,
-} from "./api";
+import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
 import { AgentStore } from "./agent/agentStore";
 import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
@@ -85,7 +80,10 @@ const relativeToSketchDir = (filePath: string, dir: string): string => {
 export default function App() {
   // project
   const [sketchDir, setSketchDir] = useState<string | null>(null);
-  const [files, setFiles] = useState<SketchFile[]>([]);
+  // File listing lives in the explorer store (tree state travels with it);
+  // setFiles below is the store action, same call sites as before.
+  const files = useExplorerStore((s) => s.files);
+  const setFiles = useExplorerStore((s) => s.setFiles);
   const [sketchYaml, setSketchYaml] = useState<SketchYaml | null>(null);
   const [profile, setProfile] = useState<string | null>(null);
   /** When true the editor area shows the New Project form instead. */
@@ -465,6 +463,9 @@ export default function App() {
         (await api.readSketchFile(dir, relPath));
       setOpenFile(relPath);
       setContent(text);
+      // keep the tree oriented: reveal the file's folder chain
+      useExplorerStore.getState().expandTo(relPath);
+      useExplorerStore.getState().select(relPath);
       api
         .saveSettings({ last_sketch_dir: dir, last_open_file: relPath })
         .catch(() => {});
@@ -1063,7 +1064,7 @@ export default function App() {
           </div>
           {sideTab === "files" && (
             <FileTree
-              files={files}
+              sketchDir={sketchDir}
               openFile={openFile}
               dirtyFiles={dirtyFiles}
               onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}

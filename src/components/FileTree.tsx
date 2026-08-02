@@ -1,8 +1,11 @@
-import type { SketchFile } from "../api";
+import { useMemo } from "react";
+import { useExplorerStore } from "../explorerStore";
+import { buildTree, visibleNodes } from "../fileTreeModel";
+import { protectedPaths } from "../explorerOps";
 import NewFileInput from "./NewFileInput";
 
 interface Props {
-  files: SketchFile[];
+  sketchDir: string | null;
   openFile: string | null;
   dirtyFiles: Set<string>;
   onOpen: (relPath: string) => void;
@@ -10,7 +13,27 @@ interface Props {
   onCreate?: (raw: string) => boolean;
 }
 
-export default function FileTree({ files, openFile, dirtyFiles, onOpen, onCreate }: Props) {
+export default function FileTree({
+  sketchDir,
+  openFile,
+  dirtyFiles,
+  onOpen,
+  onCreate,
+}: Props) {
+  const files = useExplorerStore((s) => s.files);
+  const expanded = useExplorerStore((s) => s.expanded);
+  const selected = useExplorerStore((s) => s.selected);
+  const { toggleExpanded, select } = useExplorerStore.getState();
+
+  const rows = useMemo(
+    () => visibleNodes(buildTree(files), expanded),
+    [files, expanded],
+  );
+  const prot = useMemo(
+    () => (sketchDir ? protectedPaths(sketchDir) : new Set<string>()),
+    [sketchDir],
+  );
+
   return (
     <div className="file-tree">
       {onCreate && (
@@ -18,31 +41,48 @@ export default function FileTree({ files, openFile, dirtyFiles, onOpen, onCreate
           <NewFileInput title="New file in this sketch" onSubmit={onCreate} />
         </div>
       )}
-      {files.map((f) => {
-        const depth = f.rel_path.split("/").length - 1;
-        const name = f.rel_path.split("/").pop();
-        if (f.is_dir) {
+      {rows.map(({ node, depth }) => {
+        const pad = 8 + depth * 14;
+        if (node.isDir) {
+          const open = expanded.has(node.relPath);
           return (
-            <div
-              key={f.rel_path}
-              className="tree-item dir"
-              style={{ paddingLeft: 8 + depth * 14 }}
+            <button
+              key={node.relPath}
+              className={`tree-item dir ${selected === node.relPath ? "selected" : ""}`}
+              style={{ paddingLeft: pad }}
+              title={node.relPath}
+              onClick={() => {
+                toggleExpanded(node.relPath);
+                select(node.relPath);
+              }}
             >
-              {name}/
-            </div>
+              <span className="chevron">{open ? "▾" : "▸"}</span>
+              {node.name}
+            </button>
           );
         }
-        const active = f.rel_path === openFile;
-        const dirty = dirtyFiles.has(f.rel_path);
+        const isProt = prot.has(node.relPath);
+        const active = node.relPath === openFile;
+        const dirty = dirtyFiles.has(node.relPath);
         return (
           <button
-            key={f.rel_path}
-            className={`tree-item file ${active ? "active" : ""}`}
-            style={{ paddingLeft: 8 + depth * 14 }}
-            onClick={() => onOpen(f.rel_path)}
-            title={f.rel_path}
+            key={node.relPath}
+            className={`tree-item file ${active ? "active" : ""} ${
+              selected === node.relPath ? "selected" : ""
+            } ${isProt ? "protected" : ""}`}
+            style={{ paddingLeft: pad }}
+            title={
+              isProt
+                ? `${node.relPath} — required by the sketch; cannot be renamed, moved or deleted`
+                : node.relPath
+            }
+            onClick={() => {
+              select(node.relPath);
+              onOpen(node.relPath);
+            }}
           >
-            {name}
+            <span className="chevron spacer" />
+            {node.name}
             {dirty ? " ●" : ""}
           </button>
         );
