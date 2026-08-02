@@ -594,9 +594,18 @@ export const saveMqttConfig = (cfg: MqttConfig) =>
 
 /** `claude --version` + a min-version gate — whether the CLI is usable at all. */
 export const agentProbe = () => invoke<AgentProbe>("agent_probe");
-/** Spawns the `claude` child for `sketchDir`, scoped to its file tools. */
+/**
+ * Spawns the `claude` child for `sketchDir`, confined to it by a PreToolUse
+ * guard hook the host generates (`write_agent_settings_file`).
+ *
+ * Resolves to the **child pid**. Every host event that can outlive its
+ * session is stamped with it (`agent://closed`, `verify_started`,
+ * `verify_done`, `security_alarm`), so the caller must hand it to
+ * `agentStore.sessionStarted` — otherwise a stale event from a session the
+ * user already stopped repaints the new one's panel.
+ */
 export const agentStart = (sketchDir: string, profile?: string, fqbn?: string) =>
-  invoke<void>("agent_start", {
+  invoke<number>("agent_start", {
     sketchDir,
     profile: profile ?? null,
     fqbn: fqbn ?? null,
@@ -631,7 +640,7 @@ export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen("ports://changed", () => cb());
 
 /** One parsed line from the agent child's stdout, plus bancada's synthetic
- * stderr/verify events — see `src/agent/types.ts`. */
+ * stderr/unparsed/verify/security_alarm events — see `src/agent/types.ts`. */
 export const onAgentEvent = (cb: (ev: AgentEvent) => void): Promise<UnlistenFn> =>
   listen<AgentEvent>("agent://event", (e) => cb(e.payload));
 /** Fires once on child EOF; the frontend should call `agentStop(p.pid)` on

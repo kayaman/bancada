@@ -176,7 +176,22 @@ export default function App() {
   const [mqttMounted, setMqttMounted] = useState(false);
   const [wsMounted, setWsMounted] = useState(false);
   const [agentMounted, setAgentMounted] = useState(false);
-  const [busy, setBusy] = useState(false);
+  /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
+  const [userBusy, setUserBusy] = useState(false);
+  /**
+   * The agent's MCP `verify` is compiling (between `verify_started` and
+   * `verify_done`).
+   *
+   * Deliberately a second flag rather than a second writer of the same one:
+   * both used to call `setBusy`, so a user Verify click that failed fast on
+   * the build gate ran its `finally { setBusy(false) }` while the agent's
+   * compile was still going — clearing `busy` under the agent and
+   * re-opening the port-rescan-during-build hazard the flag exists to
+   * prevent. Two owners, OR'd into one effective value, cannot clear each
+   * other's state.
+   */
+  const [agentBuilding, setAgentBuilding] = useState(false);
+  const busy = userBusy || agentBuilding;
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
@@ -311,12 +326,18 @@ export default function App() {
         handleAgentSideEffects(ev);
       }),
       api.onAgentClosed((p) => {
-        agentStore.closed(p.reason);
-        // Reap the exited child (spec: "frontend calls agent_stop on
-        // receipt"). Pass the pid this event is about (F4): agent_start may
-        // already have stored a newer session by the time this handler
-        // runs, and agent_stop(pid) is a no-op unless pid still matches the
-        // live session, so a stale close can never kill the new one.
+        // `p.pid` names the child that exited. The store ignores a close for
+        // a session it is no longer showing (FE-C1): `newAgentSession()`
+        // stops without awaiting, so session A's stdout EOF can land after
+        // session B is already live and would otherwise flip B to "ended"
+        // — Send disabled, panel saying "Session ended", child alive and
+        // still streaming.
+        agentStore.closed(p.reason, p.pid);
+        // Belt and braces: the backend's own stdout reader already reaps its
+        // session at EOF (so a closed window no longer leaks a listener), but
+        // this stays as the second path. Pid-scoped for the same reason —
+        // `agent_stop(pid)` is a no-op unless pid still matches the live
+        // session, so a stale close can never kill the new one (F4).
         api.agentStop(p.pid).catch(() => {});
       }),
     ];
@@ -493,18 +514,49 @@ export default function App() {
   }, [sketchDir, openFile, notify]);
 
   /** Flush every dirty buffer to disk (before compile/upload, or before a
-   *  message to the agent). Also the resolution point for an agent
-   *  dirty-conflict (see agentConflictsRef): once every buffer is flushed,
-   *  nothing is unsaved anymore, so the whole conflict set clears. */
+   *  message to the agent), **except** buffers flagged as agent conflicts.
+   *
+   *  A conflict means the agent rewrote a file on disk while the user had
+   *  unsaved edits to it, and the banner tells the user to save (Ctrl+S) to
+   *  resolve. But `saveAll` has three callers, and only `sendToAgent`
+   *  checked `agentConflictsRef` — so a user who clicked Verify or Upload
+   *  instead of saving would silently write the *stale* buffer over the
+   *  agent's on-disk fix, "resolve" the conflict by clobbering it, and then
+   *  compile (or flash!) the pre-fix code. Skipping conflicted paths here
+   *  rather than gating in each caller means no future caller can clobber
+   *  by forgetting to check: the conflicted file stays dirty and conflicted,
+   *  every other buffer still flushes, and `saveCurrent` (Ctrl+S) remains
+   *  the one deliberate way to resolve it. */
   const saveAll = useCallback(async () => {
     if (!sketchDir) return;
+    const conflicted = agentConflictsRef.current;
+    const skipped: string[] = [];
     for (const [path, text] of buffersRef.current) {
+      if (conflicted.has(path)) {
+        skipped.push(path);
+        continue;
+      }
       await api.writeSketchFile(sketchDir, path, text);
+      // Safe during `for...of` over a Map: deleting the current key does
+      // not disturb the iteration order of the ones still to come.
+      buffersRef.current.delete(path);
     }
-    buffersRef.current.clear();
-    setDirtyFiles(new Set());
-    agentConflictsRef.current.clear();
-  }, [sketchDir]);
+    // A conflict only exists while there is an unsaved buffer to lose. Drop
+    // any whose buffer is gone (saved via Ctrl+S, or the file closed), so a
+    // stale entry cannot wedge `sendToAgent` forever.
+    for (const path of [...conflicted]) {
+      if (!buffersRef.current.has(path)) conflicted.delete(path);
+    }
+    setDirtyFiles(new Set(skipped));
+    if (skipped.length > 0) {
+      notify(
+        `Not saved: ${skipped.join(", ")} — the assistant changed ${
+          skipped.length === 1 ? "it" : "them"
+        } on disk while you had unsaved edits. Open the file and press Ctrl+S to keep your version, which resolves the conflict.`,
+        true,
+      );
+    }
+  }, [sketchDir, notify]);
 
   // Ctrl+S
   useEffect(() => {
@@ -544,7 +596,7 @@ export default function App() {
     await saveAll();
     setBuildLines([]);
     openBottomTab("build");
-    setBusy(true);
+    setUserBusy(true);
     notify("Compiling…");
     try {
       const r = await api.compileSketch(sketchDir, target.profile, target.fqbn);
@@ -552,7 +604,7 @@ export default function App() {
     } catch (e) {
       notify(String(e), true);
     } finally {
-      setBusy(false);
+      setUserBusy(false);
     }
   };
 
@@ -564,7 +616,7 @@ export default function App() {
     if (monitorOn) await toggleMonitor(); // free the serial port
     setBuildLines([]);
     openBottomTab("build");
-    setBusy(true);
+    setUserBusy(true);
     notify(`Building and flashing to ${selectedPort}…`);
     try {
       // Compiles as part of the flash — a sketch that fails to build stops
@@ -605,7 +657,7 @@ export default function App() {
     } catch (e) {
       notify(String(e), true);
     } finally {
-      setBusy(false);
+      setUserBusy(false);
     }
   };
 
@@ -681,7 +733,7 @@ export default function App() {
       await stopMonitorIfOn().catch(() => {});
       setBuildLines([]);
       openBottomTab("build");
-      setBusy(true);
+      setUserBusy(true);
       notify("Compiling companion firmware…");
       try {
         const c = await api.compileSketch(dir, chipProfile);
@@ -702,7 +754,7 @@ export default function App() {
         notify(String(e), true);
         return false;
       } finally {
-        setBusy(false);
+        setUserBusy(false);
       }
     },
     [selectedPort, stopMonitorIfOn, notify],
@@ -751,12 +803,20 @@ export default function App() {
    *  mount effect) — must not close over component state, only refs and
    *  stable setters/callbacks. */
   const handleAgentSideEffects = (ev: AgentEvent) => {
-    if (ev.type === "verify_started") {
-      setBusy(true);
+    // Only this session's verify events move the flag: one from a session
+    // the user already stopped would otherwise leave the toolbar disabled
+    // (verify_started with no matching done) or clear it under a live build
+    // (a stale done). `agentStore` applies the same guard to what it renders.
+    if (ev.type === "verify_started" || ev.type === "verify_done") {
+      const pid = typeof ev.pid === "number" ? ev.pid : undefined;
+      const ours = agentStore.snapshot().pid;
+      if (pid !== undefined && ours !== undefined && pid !== ours) return;
+      setAgentBuilding(ev.type === "verify_started");
       return;
     }
-    if (ev.type === "verify_done") {
-      setBusy(false);
+    // The host has already killed the child, so no verify_done is coming.
+    if (ev.type === "security_alarm") {
+      setAgentBuilding(false);
       return;
     }
     if (ev.type !== "user") return;
@@ -803,11 +863,17 @@ export default function App() {
       return;
     }
     await saveAll();
+    // saveAll refuses to flush a conflicted buffer, so re-check: a conflict
+    // raised between the guard above and here still blocks the send.
+    if (agentConflictsRef.current.size > 0) return; // saveAll already notified
     if (agentStore.snapshot().status === "idle") {
       const target = resolveTarget();
       if (!target) return; // resolveTarget already notified
       try {
-        await api.agentStart(sketchDir, target.profile, target.fqbn);
+        // The pid identifies this session for every host event that can
+        // outlive it (FE-C1) — record it before any of them can arrive.
+        const pid = await api.agentStart(sketchDir, target.profile, target.fqbn);
+        agentStore.sessionStarted(pid);
       } catch (e) {
         notify(String(e), true);
         return;
@@ -830,6 +896,10 @@ export default function App() {
     api.agentStop().catch(() => {});
     agentStore.clear();
     agentConflictsRef.current.clear();
+    // The stopped session's verify (if any) will never emit `verify_done`
+    // now — the backend cancels it — so release the flag here rather than
+    // leaving the toolbar disabled forever.
+    setAgentBuilding(false);
   };
 
   // ---------- render ----------

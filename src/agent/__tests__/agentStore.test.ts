@@ -375,3 +375,219 @@ function toolResult(toolUseId: string, content: unknown, isError: boolean): Agen
     },
   };
 }
+
+// ---------- FE-C1: session identity ----------
+
+describe("AgentStore: a stale close must not end a live newer session", () => {
+  // The reachable sequence, all of it real app behaviour:
+  //   1. session A is running
+  //   2. "New session" fires agentStop() WITHOUT awaiting and clears the store
+  //   3. the user sends again -> sendToAgent sees status "idle" -> session B
+  //   4. session A's stdout EOF (its own thread, unsynchronised with
+  //      agent_stop's return) finally delivers agent://closed{pid: A}
+  // Step 4 used to flip B to "ended": panel says "Session ended", Send goes
+  // disabled, while B's child is alive and still pushing events. The backend
+  // already guarded its *kill* path with should_stop_agent; this is the same
+  // guard for the store.
+  it("ignores agent://closed for a session it is no longer showing", () => {
+    const s = new AgentStore();
+    s.sessionStarted(1001); // session A
+    s.userSent("first");
+    s.push({ type: "system", subtype: "init", session_id: "a" });
+    expect(s.snapshot().status).toBe("running");
+
+    s.clear(); // "New session"
+    s.sessionStarted(2002); // session B
+    s.userSent("second");
+    s.push({ type: "system", subtype: "init", session_id: "b" });
+    expect(s.snapshot().status).toBe("running");
+
+    s.closed("the agent process ended", 1001); // session A's late EOF
+
+    const snap = s.snapshot();
+    expect(snap.status).toBe("running");
+    expect(snap.closedReason).toBeUndefined();
+  });
+
+  it("still ends the session when the close is its own", () => {
+    const s = new AgentStore();
+    s.sessionStarted(2002);
+    s.closed("the agent process ended", 2002);
+    expect(s.snapshot().status).toBe("ended");
+  });
+
+  it("accepts a close with no pid, and any close before the pid is known", () => {
+    // Backwards compatible in both directions: an unstamped event, and an
+    // event arriving between `agent_start` being invoked and resolving.
+    const noPid = new AgentStore();
+    noPid.sessionStarted(7);
+    noPid.closed("ended");
+    expect(noPid.snapshot().status).toBe("ended");
+
+    const noSession = new AgentStore();
+    noSession.closed("ended", 42);
+    expect(noSession.snapshot().status).toBe("ended");
+  });
+
+  it("drops verify events from a superseded session", () => {
+    const s = new AgentStore();
+    s.sessionStarted(2002);
+    s.push({ type: "verify_started", pid: 1001 }); // session A's listener
+    expect(s.snapshot().verifyRunning).toBe(false);
+    s.push({ type: "verify_started", pid: 2002 });
+    expect(s.snapshot().verifyRunning).toBe(true);
+    s.push({ type: "verify_done", success: true, pid: 1001 });
+    expect(s.snapshot().verifyRunning).toBe(true);
+    s.push({ type: "verify_done", success: true, pid: 2002 });
+    expect(s.snapshot().verifyRunning).toBe(false);
+  });
+});
+
+// ---------- FE-I1: MCP tool results arrive as content blocks ----------
+
+describe("AgentStore: tool_result content shapes", () => {
+  // bancada's own mcp::tool_result_json sends
+  //   content: [{"type":"text","text":"success: true\nexit_code: 0\n\n..."}]
+  // so JSON.stringify-ing the array (what this used to do) handed
+  // parseVerifyResult a blob starting `[{"type":"text"...` — no `success:`
+  // line — and every Verify card degraded to a bare "Verify finished".
+  const toolUse: AgentEvent = {
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", id: "t1", name: "mcp__bancada__verify", input: {} },
+      ],
+    },
+  };
+
+  it("unwraps a content-block array to its text", () => {
+    const s = new AgentStore();
+    s.push(toolUse);
+    s.push({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [
+              { type: "text", text: "success: true\nexit_code: 0\n\nfine" },
+            ],
+          },
+        ],
+      },
+    });
+    const msg = s.snapshot().messages.find((m) => m.kind === "tool");
+    expect(msg).toBeDefined();
+    if (msg?.kind !== "tool") throw new Error("expected a tool card");
+    expect(msg.result).toBe("success: true\nexit_code: 0\n\nfine");
+    expect(msg.result?.startsWith("success:")).toBe(true);
+  });
+
+  it("joins multiple text blocks", () => {
+    const s = new AgentStore();
+    s.push(toolUse);
+    s.push({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [
+              { type: "text", text: "first" },
+              { type: "text", text: "second" },
+            ],
+          },
+        ],
+      },
+    });
+    const msg = s.snapshot().messages.find((m) => m.kind === "tool");
+    if (msg?.kind !== "tool") throw new Error("expected a tool card");
+    expect(msg.result).toBe("first\nsecond");
+  });
+
+  it("still passes a plain string through untouched", () => {
+    const s = new AgentStore();
+    s.push(toolUse);
+    s.push({
+      type: "user",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "plain text" },
+        ],
+      },
+    });
+    const msg = s.snapshot().messages.find((m) => m.kind === "tool");
+    if (msg?.kind !== "tool") throw new Error("expected a tool card");
+    expect(msg.result).toBe("plain text");
+  });
+
+  it("falls back to JSON for a shape that is not all text blocks", () => {
+    // A mixed array must not silently lose the non-text block.
+    const s = new AgentStore();
+    s.push(toolUse);
+    s.push({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "text", text: "hi" }, { type: "image" }],
+          },
+        ],
+      },
+    });
+    const msg = s.snapshot().messages.find((m) => m.kind === "tool");
+    if (msg?.kind !== "tool") throw new Error("expected a tool card");
+    expect(msg.result).toContain("image");
+  });
+});
+
+// ---------- A1/A2: the security alarm ----------
+
+describe("AgentStore: security_alarm", () => {
+  it("records the alarm and ends the session", () => {
+    const s = new AgentStore();
+    s.sessionStarted(5);
+    s.push({ type: "verify_started", pid: 5 });
+    s.push({
+      type: "security_alarm",
+      kind: "path_escape",
+      detail: "The assistant tried to Write /etc/passwd",
+      pid: 5,
+    });
+    const snap = s.snapshot();
+    expect(snap.alarm).toEqual({
+      kind: "path_escape",
+      detail: "The assistant tried to Write /etc/passwd",
+    });
+    // The host has already killed the child, so no verify_done is coming.
+    expect(snap.status).toBe("ended");
+    expect(snap.verifyRunning).toBe(false);
+  });
+
+  it("ignores an alarm from a superseded session", () => {
+    const s = new AgentStore();
+    s.sessionStarted(2);
+    s.push({ type: "security_alarm", kind: "path_escape", detail: "x", pid: 1 });
+    expect(s.snapshot().alarm).toBeUndefined();
+    expect(s.snapshot().status).not.toBe("ended");
+  });
+
+  it("describes an alarm whose detail is missing rather than rendering undefined", () => {
+    const s = new AgentStore();
+    s.push({ type: "security_alarm" } as AgentEvent);
+    expect(s.snapshot().alarm?.kind).toBe("unknown");
+    expect(typeof s.snapshot().alarm?.detail).toBe("string");
+  });
+
+  it("is cleared by clear()", () => {
+    const s = new AgentStore();
+    s.push({ type: "security_alarm", kind: "path_escape", detail: "x" });
+    s.clear();
+    expect(s.snapshot().alarm).toBeUndefined();
+    expect(s.snapshot().pid).toBeUndefined();
+  });
+});

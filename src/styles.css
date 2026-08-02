@@ -1227,6 +1227,36 @@ body {
   text-align: center;
 }
 
+/* The host refused something and killed the child — deliberately the loudest
+   thing in the panel, and nothing like a tool card, because it means a
+   safety boundary fired rather than a session merely finishing. */
+.agent-alarm {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--error);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  font-size: 12px;
+}
+
+.agent-alarm-head {
+  font-weight: 600;
+  color: var(--error);
+  margin-bottom: 4px;
+}
+
+.agent-alarm-detail {
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+}
+
+.agent-alarm-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .agent-tool {
   margin: 4px 0;
   padding: 4px 8px;

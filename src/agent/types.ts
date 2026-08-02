@@ -4,7 +4,8 @@
 // event contracts) the payload is the RAW `claude` CLI stream-json object for
 // each line — types `system` (subtype `init`), `assistant`, `user`,
 // `stream_event`, `result` — PLUS bancada-synthetic events the host adds:
-// `stderr`, `verify_started`, `verify_done`. This is NOT a re-serialisation
+// `stderr`, `unparsed`, `verify_started`, `verify_done` and
+// `security_alarm`. This is NOT a re-serialisation
 // of core/src/agent.rs's `AgentEvent` enum; it is the parsed line's own
 // shape, one field of which (`type`) core's tolerant parser also switches
 // on.
@@ -14,7 +15,7 @@
 // subtype under `system`, a bare top-level `rate_limit_event`, hook
 // lifecycle events...). Every interface below carries an index signature so
 // an unrecognised *field* is preserved rather than dropped. A genuinely
-// unrecognised `type` (not one of the nine literals below) is a value this
+// unrecognised `type` (not one of the literals below) is a value this
 // file cannot type — it is still valid `AgentEvent` at the type level (the
 // listener has no way to validate untrusted JSON against a union), but
 // agentStore's `push` switches on `.type` with a `default` branch so at
@@ -138,20 +139,42 @@ export interface AgentStderrEvent {
   [key: string]: unknown;
 }
 
-/** Synthetic — brackets an MCP `verify` tool call. */
+/** Synthetic — brackets an MCP `verify` tool call.
+ *
+ * `pid` is the session's child pid (C1): the MCP listener thread can outlive
+ * the session that started it, so the store drops one whose pid is not the
+ * session it is showing. */
 export interface AgentVerifyStartedEvent {
   type: "verify_started";
+  pid?: number;
   [key: string]: unknown;
 }
 
 export interface AgentVerifyDoneEvent {
   type: "verify_done";
   success: boolean;
+  pid?: number;
+  [key: string]: unknown;
+}
+
+/** Synthetic — the host refused something and stopped the session.
+ *
+ * Emitted by src-tauri's stdout reader when the safety backstop fires: an
+ * `Edit`/`Write` aimed outside the project (`kind: "path_escape"`, which
+ * should already have been *refused* by the PreToolUse guard hook, so
+ * seeing one means that boundary is not holding), or a session offered
+ * tools Bancada did not ask for (`kind: "unexpected_tools"`). The child is
+ * already dead by the time this arrives. */
+export interface AgentSecurityAlarmEvent {
+  type: "security_alarm";
+  kind: string;
+  detail: string;
+  pid?: number;
   [key: string]: unknown;
 }
 
 // Deliberately NO `AgentUnknownEvent` member in the union below: giving it a
-// non-literal `type: string` would defeat the other eight members' literal
+// non-literal `type: string` would defeat the other members' literal
 // discriminants for switch/if-narrowing (TS can only discriminate a union
 // when every member's tag is a literal). A payload whose `type` is e.g.
 // `"rate_limit_event"` is still handled safely — agentStore's `push` switches
@@ -166,7 +189,8 @@ export type AgentEvent =
   | AgentResultEvent
   | AgentStderrEvent
   | AgentVerifyStartedEvent
-  | AgentVerifyDoneEvent;
+  | AgentVerifyDoneEvent
+  | AgentSecurityAlarmEvent;
 
 /** Result of `agent_probe` — whether a usable `claude` CLI is on PATH. */
 export interface AgentProbe {

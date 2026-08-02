@@ -41,6 +41,12 @@ export interface AgentResult {
 
 export type AgentStatus = "idle" | "starting" | "running" | "ended";
 
+/** A refused/stopped session, surfaced prominently by the panel. */
+export interface AgentAlarm {
+  kind: string;
+  detail: string;
+}
+
 export class AgentStore {
   private msgs: AgentMessage[] = [];
   private ver = 0;
@@ -49,6 +55,22 @@ export class AgentStore {
   private sessionIdVal?: string;
   private verifyRunningFlag = false;
   private closedReasonVal?: string;
+  private alarmVal?: AgentAlarm;
+  /**
+   * The child pid of the session this store is showing, set by
+   * `sessionStarted` from `agent_start`'s return value.
+   *
+   * Every backend event that can outlive its session carries a `pid`
+   * (`agent://closed`, and the synthetic verify/alarm events). Without
+   * comparing it, a *stale* close could mark a **live newer** session
+   * "ended": `newAgentSession()` fires `agentStop()` without awaiting and
+   * clears the store, the user sends again and session B starts, and only
+   * then does session A's stdout EOF deliver `agent://closed{pid: A}` —
+   * which used to flip B to "ended", disabling Send while B's child was
+   * alive and still streaming. The backend already guarded its *kill* path
+   * with `should_stop_agent`; this is the same guard for the store.
+   */
+  private pidVal?: number;
 
   /**
    * Index into `msgs` of the assistant message currently accumulating text,
@@ -70,8 +92,31 @@ export class AgentStore {
     return this.ver;
   }
 
+  /**
+   * Is `pid` the session this store is showing?
+   *
+   * `undefined` on either side means "cannot tell, assume it is ours": a
+   * store that never learned its pid (an event arriving between
+   * `agent_start` being invoked and its promise resolving) must still show
+   * events, and an event without a pid predates the stamping.
+   */
+  private isOurs(pid: number | undefined): boolean {
+    return pid === undefined || this.pidVal === undefined || pid === this.pidVal;
+  }
+
   /** Ingest one `agent://event` payload. Unknown `type`s are ignored. */
   push(ev: AgentEvent): void {
+    // Synthetic host events carry the pid of the session that produced
+    // them; one from a session the user already stopped must not repaint
+    // the new session's panel (verify spinner, alarm banner).
+    if (
+      (ev.type === "verify_started" ||
+        ev.type === "verify_done" ||
+        ev.type === "security_alarm") &&
+      !this.isOurs(typeof ev.pid === "number" ? ev.pid : undefined)
+    ) {
+      return;
+    }
     switch (ev.type) {
       case "system":
         this.handleSystem(ev.subtype, ev.session_id);
@@ -99,6 +144,9 @@ export class AgentStore {
         this.verifyRunningFlag = false;
         this.ver++;
         break;
+      case "security_alarm":
+        this.handleAlarm(ev);
+        break;
       default:
         // Unrecognised type (or missing `type`) — ignore, bump nothing.
         return;
@@ -113,8 +161,20 @@ export class AgentStore {
     this.ver++;
   }
 
-  /** The child process exited (`agent://closed`). */
-  closed(reason: string): void {
+  /** Bind this store to the session `agent_start` just returned. */
+  sessionStarted(pid: number): void {
+    this.pidVal = pid;
+  }
+
+  /**
+   * The child process exited (`agent://closed`).
+   *
+   * `pid` is the exited child's. A close for a session this store is no
+   * longer showing is dropped — see `pidVal`'s doc for the sequence that
+   * otherwise marks a live session "ended".
+   */
+  closed(reason: string, pid?: number): void {
+    if (!this.isOurs(pid)) return;
     this.statusFlag = "ended";
     this.closedReasonVal = reason;
     this.ver++;
@@ -128,6 +188,8 @@ export class AgentStore {
     this.sessionIdVal = undefined;
     this.verifyRunningFlag = false;
     this.closedReasonVal = undefined;
+    this.alarmVal = undefined;
+    this.pidVal = undefined;
     this.currentAssistantIdx = undefined;
     this.toolIndexById.clear();
     this.ver++;
@@ -141,6 +203,8 @@ export class AgentStore {
     sessionId?: string;
     verifyRunning: boolean;
     closedReason?: string;
+    alarm?: AgentAlarm;
+    pid?: number;
   } {
     return {
       messages: this.msgs.slice(),
@@ -149,6 +213,8 @@ export class AgentStore {
       sessionId: this.sessionIdVal,
       verifyRunning: this.verifyRunningFlag,
       closedReason: this.closedReasonVal,
+      alarm: this.alarmVal,
+      pid: this.pidVal,
     };
   }
 
@@ -241,6 +307,27 @@ export class AgentStore {
     this.ver++;
   }
 
+  /**
+   * The host refused something and stopped the session (A1 backstop / A2).
+   *
+   * Kept as its own field rather than pushed as a message: it must render
+   * as a banner the user cannot scroll past, not as one more card in a
+   * transcript. The backend has already killed the child, so the session is
+   * over whether or not `agent://closed` has landed yet — say so now.
+   */
+  private handleAlarm(ev: { kind?: unknown; detail?: unknown }): void {
+    this.alarmVal = {
+      kind: typeof ev.kind === "string" ? ev.kind : "unknown",
+      detail:
+        typeof ev.detail === "string"
+          ? ev.detail
+          : "Bancada stopped this session for a safety reason it could not describe.",
+    };
+    this.statusFlag = "ended";
+    this.verifyRunningFlag = false;
+    this.ver++;
+  }
+
   private handleStderr(line: string): void {
     const last = this.msgs[this.msgs.length - 1];
     if (last && last.kind === "stderr") {
@@ -305,11 +392,40 @@ function isUserContentToolResult(b: unknown): b is UserContentToolResult {
   );
 }
 
-/** The tool_result `content` field is either a plain string or a content-block
- * array (Anthropic's format) — agentStore only ever displays it, never
- * inspects it further. */
+/**
+ * Flatten a tool_result `content` field to the text a card should show.
+ *
+ * Anthropic's format allows either a plain string or an array of content
+ * blocks, and **both shapes occur here**: the CLI's own file tools relay a
+ * string, while an MCP tool result arrives as the block array the server
+ * sent — and bancada's own `mcp::tool_result_json` sends exactly
+ * `[{"type":"text","text":"success: true\nexit_code: 0\n\n..."}]`.
+ *
+ * `JSON.stringify`ing the array case (what this used to do unconditionally)
+ * therefore handed `parseVerifyResult` a JSON blob whose first line is
+ * `[{"type":"text",...` — no `success:` line, so every Verify card in the
+ * panel degraded to a bare "Verify finished" with a garbled summary. That is
+ * the centrepiece of the whole feature, so the array case is unwrapped
+ * first; `JSON.stringify` remains only as the last-resort rendering for a
+ * shape that is neither.
+ */
 function toResultText(content: unknown): string {
   if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter(
+        (b): b is { type: string; text: string } =>
+          typeof b === "object" &&
+          b !== null &&
+          typeof (b as { text?: unknown }).text === "string",
+      )
+      .map((b) => b.text);
+    // Only when *every* block carried text: a mixed array (an image block
+    // among them, say) would otherwise silently drop content.
+    if (texts.length > 0 && texts.length === content.length) {
+      return texts.join("\n");
+    }
+  }
   try {
     return JSON.stringify(content);
   } catch {

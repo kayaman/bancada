@@ -15,6 +15,7 @@ import type { AgentProbe } from "../api";
 import type { AgentMessage, AgentStatus, AgentStore } from "../agent/agentStore";
 import { diffForToolInput, type DiffLine } from "../agent/diff";
 import { splitFences } from "../agent/fences";
+import { parseVerifyResult } from "../agent/verifyResult";
 import type { BottomTab } from "../bottomTabs";
 
 interface AgentPanelProps {
@@ -149,6 +150,22 @@ export default function AgentPanel({
         {snap.messages.map((m, i) => (
           <MessageView key={i} msg={m} openBottomTab={openBottomTab} />
         ))}
+        {/* Above the "session ended" line and styled to be impossible to
+            mistake for a normal card: this is the host having *refused*
+            something and killed the child, not the session merely finishing.
+            See AgentSecurityAlarmEvent in src/agent/types.ts. */}
+        {snap.alarm && (
+          <div className="agent-alarm" role="alert">
+            <div className="agent-alarm-head">
+              ⛔ Bancada stopped the assistant
+            </div>
+            <p className="agent-alarm-detail">{snap.alarm.detail}</p>
+            <p className="agent-alarm-hint">
+              Nothing outside this project was changed. Start a new session to
+              continue.
+            </p>
+          </div>
+        )}
         {snap.closedReason && (
           <div className="agent-closed">
             Session ended — {snap.closedReason}
@@ -385,32 +402,6 @@ function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
  *  name the MCP `tools/list` response itself advertises. */
 function isVerifyTool(name: string): boolean {
   return name === "verify" || name.endsWith("__verify");
-}
-
-/** `run_verify` (src-tauri/src/lib.rs) always builds its result text as
- *  `"success: <bool>\nexit_code: <n>\n\n<summary>"` on the tool's normal
- *  path (isError is reserved for the tool failing to run at all — see the
- *  "error" branch above). Tolerant of an unexpected shape: an unparsed
- *  `success` line just means `success` comes back `undefined`. */
-function parseVerifyResult(
-  result: string,
-): { success?: boolean; exitCode?: number; summary: string } {
-  const lines = result.split("\n");
-  const successMatch = /^success:\s*(true|false)\s*$/.exec(lines[0] ?? "");
-  if (!successMatch) return { summary: result };
-  let bodyStart = 1;
-  let exitCode: number | undefined;
-  const exitMatch = /^exit_code:\s*(-?\d+)\s*$/.exec(lines[1] ?? "");
-  if (exitMatch) {
-    exitCode = Number(exitMatch[1]);
-    bodyStart = 2;
-  }
-  while (bodyStart < lines.length && lines[bodyStart] === "") bodyStart++;
-  return {
-    success: successMatch[1] === "true",
-    exitCode,
-    summary: lines.slice(bodyStart).join("\n"),
-  };
 }
 
 function stringField(input: unknown, key: string): string | undefined {
