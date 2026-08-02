@@ -63,6 +63,38 @@ describe("sketch and file commands", () => {
     await api.loadSketchYaml("/s");
     expect(called()).toEqual(["load_sketch_yaml", { sketchDir: "/s" }]);
   });
+
+  it("createSketchFile passes sketchDir and relPath", async () => {
+    await api.createSketchFile("/s", "src/new.cpp");
+    expect(called()).toEqual([
+      "create_sketch_file",
+      { sketchDir: "/s", relPath: "src/new.cpp" },
+    ]);
+  });
+
+  it("createSketchDir passes sketchDir and relPath", async () => {
+    await api.createSketchDir("/s", "assets");
+    expect(called()).toEqual([
+      "create_sketch_dir",
+      { sketchDir: "/s", relPath: "assets" },
+    ]);
+  });
+
+  it("renameSketchEntry passes from and to", async () => {
+    await api.renameSketchEntry("/s", "src/a.cpp", "lib/a.cpp");
+    expect(called()).toEqual([
+      "rename_sketch_entry",
+      { sketchDir: "/s", from: "src/a.cpp", to: "lib/a.cpp" },
+    ]);
+  });
+
+  it("deleteSketchEntry passes sketchDir and relPath", async () => {
+    await api.deleteSketchEntry("/s", "src/a.cpp");
+    expect(called()).toEqual([
+      "delete_sketch_entry",
+      { sketchDir: "/s", relPath: "src/a.cpp" },
+    ]);
+  });
 });
 
 describe("library commands", () => {

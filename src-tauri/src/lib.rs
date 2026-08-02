@@ -289,6 +289,51 @@ fn write_sketch_file(sketch_dir: String, rel_path: String, content: String) -> R
     std::fs::write(full, content).map_err(err_str)
 }
 
+// Explorer mutations: mutate, then return the refreshed listing (the repo's
+// mutate-then-return pattern) so the tree never drifts from disk. All guards
+// live in bancada_core::files.
+
+#[tauri::command]
+fn create_sketch_file(
+    sketch_dir: String,
+    rel_path: String,
+) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.create_file(&rel_path).map_err(err_str)?;
+    proj.list_files().map_err(err_str)
+}
+
+#[tauri::command]
+fn create_sketch_dir(
+    sketch_dir: String,
+    rel_path: String,
+) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.create_dir(&rel_path).map_err(err_str)?;
+    proj.list_files().map_err(err_str)
+}
+
+#[tauri::command]
+fn rename_sketch_entry(
+    sketch_dir: String,
+    from: String,
+    to: String,
+) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.rename_entry(&from, &to).map_err(err_str)?;
+    proj.list_files().map_err(err_str)
+}
+
+#[tauri::command]
+fn delete_sketch_entry(
+    sketch_dir: String,
+    rel_path: String,
+) -> Result<Vec<bancada_core::sketch::SketchFile>, String> {
+    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+    proj.delete_entry(&rel_path).map_err(err_str)?;
+    proj.list_files().map_err(err_str)
+}
+
 /// Join and refuse path traversal outside the sketch dir.
 fn safe_join(base: &str, rel: &str) -> Result<std::path::PathBuf, String> {
     let rel_p = Path::new(rel);
@@ -2883,6 +2928,10 @@ pub fn run() {
             sketch_has_git,
             read_sketch_file,
             write_sketch_file,
+            create_sketch_file,
+            create_sketch_dir,
+            rename_sketch_entry,
+            delete_sketch_entry,
             load_sketch_yaml,
             init_profile,
             add_local_library,
