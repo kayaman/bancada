@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useExplorerStore } from "../explorerStore";
 import { buildTree, visibleNodes } from "../fileTreeModel";
 import { protectedPaths } from "../explorerOps";
@@ -11,6 +11,51 @@ interface Props {
   onOpen: (relPath: string) => void;
   /** Validated create; return true when handled (closes the input row). */
   onCreateEntry: (raw: string, parentDir: string, kind: "file" | "dir") => boolean;
+  /** Rename-as-move: `to` is the full new rel path. Resolves true on success. */
+  onRenameTo: (from: string, to: string) => Promise<boolean>;
+  onDelete: (relPath: string) => void;
+}
+
+/** Inline rename: the full rel path, with the basename pre-selected so a
+ *  plain rename is one keystroke away but path edits (moves) stay possible. */
+function RenameRow({
+  depth,
+  relPath,
+  onSubmit,
+  onCancel,
+}: {
+  depth: number;
+  relPath: string;
+  onSubmit: (to: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(relPath);
+  const ref = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    const input = ref.current;
+    if (!input) return;
+    const start = relPath.lastIndexOf("/") + 1;
+    const dot = relPath.lastIndexOf(".");
+    input.focus();
+    input.setSelectionRange(start, dot > start ? dot : relPath.length);
+    // run once for the row's lifetime
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <div className="tree-create" style={{ paddingLeft: 8 + depth * 14 }}>
+      <input
+        ref={ref}
+        className="input tree-create-input"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void onSubmit(value).then((ok) => ok && onCancel());
+          if (e.key === "Escape") onCancel();
+        }}
+        onBlur={onCancel}
+      />
+    </div>
+  );
 }
 
 /** The inline input row for a pending New File / New Folder. */
@@ -50,13 +95,24 @@ export default function FileTree({
   dirtyFiles,
   onOpen,
   onCreateEntry,
+  onRenameTo,
+  onDelete,
 }: Props) {
   const files = useExplorerStore((s) => s.files);
   const expanded = useExplorerStore((s) => s.expanded);
   const selected = useExplorerStore((s) => s.selected);
   const creating = useExplorerStore((s) => s.creating);
-  const { toggleExpanded, select, openContextMenu, startCreate, cancelCreate, expandTo } =
-    useExplorerStore.getState();
+  const renaming = useExplorerStore((s) => s.renaming);
+  const {
+    toggleExpanded,
+    select,
+    openContextMenu,
+    startCreate,
+    cancelCreate,
+    startRename,
+    cancelRename,
+    expandTo,
+  } = useExplorerStore.getState();
 
   const rows = useMemo(
     () => visibleNodes(buildTree(files), expanded),
@@ -101,6 +157,17 @@ export default function FileTree({
       {rows.map(({ node, depth }) => {
         const pad = 8 + depth * 14;
         const isProt = prot.has(node.relPath);
+        if (renaming === node.relPath) {
+          return (
+            <RenameRow
+              key={node.relPath}
+              depth={depth}
+              relPath={node.relPath}
+              onSubmit={(to) => onRenameTo(node.relPath, to)}
+              onCancel={cancelRename}
+            />
+          );
+        }
         const onCtx = (e: React.MouseEvent) => {
           e.preventDefault();
           e.stopPropagation();
@@ -162,6 +229,8 @@ export default function FileTree({
         isProtected={(p) => prot.has(p)}
         onNewFile={(parent) => beginCreate(parent, "file")}
         onNewFolder={(parent) => beginCreate(parent, "dir")}
+        onRename={startRename}
+        onDelete={onDelete}
       />
     </div>
   );

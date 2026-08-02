@@ -2,12 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { cpp } from "@codemirror/lang-cpp";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { nextSelectedPort } from "./ports";
 import { checkNewEntry, checkNewFile } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
+import {
+  affectedByDelete,
+  checkRename,
+  isNonEmptyDir,
+  pathAfterRename,
+} from "./explorerOps";
 import { arrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
 import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
@@ -519,6 +525,87 @@ export default function App() {
     }
     void doCreate(check.relPath, "file");
     return true;
+  };
+
+  /** Rename or move (drag-drop resolves here too). Remaps buffers, dirty
+   *  flags and the open file so unsaved edits survive under the new path. */
+  const handleRename = async (from: string, to: string): Promise<boolean> => {
+    if (!sketchDir) return false;
+    const check = checkRename(from, to, files, sketchDir);
+    if (!check.ok) {
+      notify(check.reason, true);
+      return false;
+    }
+    const wasDir = files.some((f) => f.rel_path === from && f.is_dir);
+    try {
+      const fs = await api.renameSketchEntry(sketchDir, from, to);
+      useExplorerStore.getState().setFilesAfterRename(fs, from, to);
+      const buffers = buffersRef.current;
+      for (const [p, text] of [...buffers]) {
+        const np = pathAfterRename(p, from, to, wasDir);
+        if (np !== null) {
+          buffers.delete(p);
+          buffers.set(np, text);
+        }
+      }
+      setDirtyFiles(
+        (prev) => new Set([...prev].map((p) => pathAfterRename(p, from, to, wasDir) ?? p)),
+      );
+      if (openFile) {
+        const np = pathAfterRename(openFile, from, to, wasDir);
+        if (np !== null) {
+          setOpenFile(np);
+          api
+            .saveSettings({ last_sketch_dir: sketchDir, last_open_file: np })
+            .catch(() => {});
+        }
+      }
+      notify(`Renamed ${from} → ${to}`);
+      return true;
+    } catch (e) {
+      notify(String(e), true);
+      return false;
+    }
+  };
+
+  /** Trash an entry; non-empty folders ask first. If the open file dies,
+   *  fall back to the main .ino. */
+  const handleDelete = async (relPath: string) => {
+    if (!sketchDir) return;
+    const wasDir = files.some((f) => f.rel_path === relPath && f.is_dir);
+    if (wasDir && isNonEmptyDir(files, relPath)) {
+      const yes = await ask(`Move "${relPath}" and its contents to the trash?`, {
+        title: "Delete folder",
+        kind: "warning",
+      });
+      if (!yes) return;
+    }
+    try {
+      const fs = await api.deleteSketchEntry(sketchDir, relPath);
+      setFiles(fs);
+      for (const p of [...buffersRef.current.keys()]) {
+        if (affectedByDelete(p, relPath, wasDir)) buffersRef.current.delete(p);
+      }
+      setDirtyFiles(
+        (prev) => new Set([...prev].filter((p) => !affectedByDelete(p, relPath, wasDir))),
+      );
+      if (openFile && affectedByDelete(openFile, relPath, wasDir)) {
+        const name = sketchDir.split("/").pop();
+        const main = fs.find((f) => f.rel_path === `${name}.ino`);
+        if (main) {
+          await openFileInEditor(sketchDir, main.rel_path);
+        } else {
+          setOpenFile(null);
+          setContent("");
+          api
+            .saveSettings({ last_sketch_dir: sketchDir, last_open_file: null })
+            .catch(() => {});
+        }
+      }
+      notify(`Moved ${relPath} to the trash`);
+    } catch (e) {
+      notify(String(e), true);
+    }
   };
 
   const saveCurrent = useCallback(async () => {
@@ -1094,6 +1181,8 @@ export default function App() {
               dirtyFiles={dirtyFiles}
               onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
               onCreateEntry={handleCreateEntry}
+              onRenameTo={handleRename}
+              onDelete={handleDelete}
             />
           )}
           {sideTab === "libraries" && (
