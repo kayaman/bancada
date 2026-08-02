@@ -65,7 +65,18 @@ new one.
   with a garbled summary) instead of the pass/fail card — every verify card
   was affected.
 
-### Known limitations
+## Searchable board picker
+
+`arduino-cli board listall` returns hundreds of boards, which made the plain
+dropdown in **New Project** and **Create profile** hard to use.
+
+- A filter input narrows the list as you type; the currently selected board
+  stays visible even when it no longer matches.
+- Boards are grouped by platform, so related targets sit together.
+- Both dialogs share one `BoardPicker` component instead of duplicating the
+  select markup.
+
+## AI Assistant — known limitations
 
 - No upload or serial tools yet — the agent is compile-only in this slice;
   hardware actions are planned for a later release.
