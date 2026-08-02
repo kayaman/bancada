@@ -511,6 +511,74 @@ fn normalize_lexically(p: &Path) -> PathBuf {
     out
 }
 
+// ---------- disableAllHooks pre-flight (A1) ----------
+
+/// Does this settings-file body switch hooks off?
+///
+/// `{"disableAllHooks": true}` in *any* settings source the CLI loads stops
+/// a `--settings`-supplied `PreToolUse` hook from firing at all — verified
+/// live against 2.1.220, twice: once by the red-team, once against Bancada's
+/// own production configuration, where the `permissions.deny` anchor still
+/// held (`.claude/`, `.git/` refused) but the out-of-project write went
+/// through because the containment hook never ran.
+///
+/// The agent cannot *create* such a file — the deny rules see to that — so
+/// the only way this arises is a project (or a user config) that already had
+/// it before Bancada opened it. That is exactly a case the host can check
+/// cheaply *before* spawning, which is why this is a pre-flight refusal
+/// rather than a documented residual: a session whose boundary is known in
+/// advance not to hold must not start.
+///
+/// Truthy is deliberately generous (`true`, `"true"`, `1`): this decides
+/// whether to *refuse*, so anything that might mean "on" counts. An
+/// unparseable settings file returns `false` — the CLI ignores invalid
+/// settings files in `-p` mode ("silently ignored", per `--help`), so one
+/// cannot disable hooks either.
+pub fn settings_disables_hooks(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    match value.get("disableAllHooks") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        Some(Value::Number(n)) => n.as_i64().is_some_and(|i| i != 0),
+        _ => false,
+    }
+}
+
+/// The settings files whose `disableAllHooks` would neutralise the
+/// confinement hook, in the order they should be reported.
+///
+/// Every `.claude/settings.json` and `.claude/settings.local.json` from the
+/// sketch dir up to the filesystem root, plus the user's own. Walking all
+/// the way up rather than checking only the sketch dir covers the
+/// repo-root case: since 2.1.211 `settings.local.json` is loaded from the
+/// *git repository root*, which for a sketch inside a larger checkout is
+/// above the project — and a settings file above the sketch dir is one the
+/// agent cannot write but can still be affected by.
+pub fn hook_disabling_settings_paths(sketch_dir: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let push_for = |dir: &Path, out: &mut Vec<PathBuf>| {
+        for name in ["settings.json", "settings.local.json"] {
+            let candidate = dir.join(".claude").join(name);
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    };
+
+    let root = resolve_as_far_as_possible(sketch_dir);
+    let mut current = Some(root.as_path());
+    while let Some(dir) = current {
+        push_for(dir, &mut paths);
+        current = dir.parent();
+    }
+    if let Some(home) = home {
+        push_for(home, &mut paths);
+    }
+    paths
+}
+
 // ---------- the PreToolUse guard (A1) ----------
 
 /// Tool names whose `file_path` the guard hook adjudicates. Kept beside
@@ -1681,6 +1749,66 @@ mod tests {
                 "the deny rules must refuse {name}/: {rules:?}"
             );
         }
+    }
+
+    // ---------- A1: the disableAllHooks pre-flight ----------
+
+    #[test]
+    fn settings_that_switch_hooks_off_are_recognised() {
+        assert!(settings_disables_hooks(r#"{"disableAllHooks": true}"#));
+        // Generous about truthiness: this decides whether to *refuse*, so
+        // anything that might mean "on" must count.
+        assert!(settings_disables_hooks(r#"{"disableAllHooks": "true"}"#));
+        assert!(settings_disables_hooks(r#"{"disableAllHooks": 1}"#));
+        assert!(settings_disables_hooks(
+            r#"{"permissions":{"deny":[]},"disableAllHooks":true}"#
+        ));
+    }
+
+    #[test]
+    fn ordinary_settings_do_not_trip_the_pre_flight() {
+        assert!(!settings_disables_hooks(r#"{"disableAllHooks": false}"#));
+        assert!(!settings_disables_hooks("{}"));
+        assert!(!settings_disables_hooks(r#"{"hooks":{"PreToolUse":[]}}"#));
+        // An invalid settings file is silently ignored by the CLI in -p
+        // mode, so it cannot disable hooks either — refusing to start over
+        // one would be a false positive.
+        assert!(!settings_disables_hooks("not json"));
+        assert!(!settings_disables_hooks(""));
+        // The *string* appearing somewhere harmless must not trip it.
+        assert!(!settings_disables_hooks(
+            r#"{"env":{"NOTE":"disableAllHooks is not set"}}"#
+        ));
+    }
+
+    #[test]
+    fn the_pre_flight_checks_the_project_its_ancestors_and_the_user_config() {
+        let repo = tempfile::tempdir().unwrap();
+        let project = repo.path().join("sketches/Blink");
+        std::fs::create_dir_all(&project).unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let paths = hook_disabling_settings_paths(&project, Some(&home));
+        let canonical = std::fs::canonicalize(&project).unwrap();
+        assert!(paths.contains(&canonical.join(".claude/settings.json")));
+        assert!(paths.contains(&canonical.join(".claude/settings.local.json")));
+        // The repo root: since 2.1.211 settings.local.json loads from the
+        // git root, which can sit above the sketch dir.
+        let repo_root = std::fs::canonicalize(repo.path()).unwrap();
+        assert!(paths.contains(&repo_root.join(".claude/settings.local.json")));
+        // The user's own config disables hooks globally, ours included.
+        assert!(paths.contains(&home.join(".claude/settings.json")));
+    }
+
+    #[test]
+    fn the_pre_flight_path_list_has_no_duplicates() {
+        let dir = sketch();
+        let paths = hook_disabling_settings_paths(dir.path(), Some(dir.path()));
+        let mut sorted = paths.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), paths.len(), "{paths:?}");
     }
 
     // ---------- A2: unexpected_tools ----------

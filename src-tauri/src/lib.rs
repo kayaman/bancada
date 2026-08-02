@@ -1958,6 +1958,38 @@ fn write_agent_settings_file(sketch_dir: &str) -> Result<PathBuf, String> {
     write_private_file(&path, &settings, "settings")
 }
 
+/// Refuse to start when a settings file already switches hooks off (A1).
+///
+/// `{"disableAllHooks": true}` in any settings source stops the confinement
+/// hook firing — verified live, twice, including against this exact
+/// production configuration: the `permissions.deny` anchor still held, but
+/// the *subtree containment* was gone and an out-of-project write landed.
+///
+/// The agent cannot create such a file (the deny rules cover `.claude/**`),
+/// so this only arises for a project — or a user config — that already had
+/// it before Bancada opened it. That is checkable before spawning, and a
+/// session whose boundary is known in advance not to hold must not start.
+/// Returns the offending path in the error so the user can act on it rather
+/// than face an unexplained refusal.
+fn check_hooks_are_enabled(sketch_dir: &str) -> Result<(), String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    for path in agent::hook_disabling_settings_paths(Path::new(sketch_dir), home.as_deref()) {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue; // absent or unreadable — cannot disable anything
+        };
+        if agent::settings_disables_hooks(&body) {
+            return Err(format!(
+                "The Assistant cannot start safely: {} sets \"disableAllHooks\", \
+                 which stops Bancada's file-confinement hook from running at all. \
+                 Remove that setting (or open a project that does not carry it) \
+                 and try again.",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// POSIX single-quoting: wrap in `'...'` and replace each embedded `'` with
 /// `'\''`. The result is one shell word whatever the input contains.
 fn shell_quote(s: &str) -> String {
@@ -2483,6 +2515,11 @@ fn agent_start(
             existing.sketch_dir
         ));
     }
+
+    // Before anything is bound or spawned: if the confinement hook is
+    // already switched off by a settings file we do not control, there is no
+    // safe session to start (A1 pre-flight).
+    check_hooks_are_enabled(&sketch_dir)?;
 
     let (server, port) = bind_mcp_server()?;
     let token = match random_token() {
@@ -3578,6 +3615,44 @@ mod tests {
             !deny.iter().any(|r| r.starts_with("Write(")),
             "Write(...) rules are silently never consulted: {deny:?}"
         );
+    }
+
+    /// The pre-flight is what turns the one live failure this design has —
+    /// a project that arrives with hooks already disabled — from a silent
+    /// bypass into a refusal the user can act on.
+    #[test]
+    fn a_project_that_disables_hooks_refuses_to_start() {
+        let sketch = tempfile::tempdir().unwrap();
+        assert!(
+            check_hooks_are_enabled(&sketch.path().to_string_lossy()).is_ok(),
+            "a clean project must start"
+        );
+
+        std::fs::create_dir_all(sketch.path().join(".claude")).unwrap();
+        std::fs::write(
+            sketch.path().join(".claude/settings.json"),
+            r#"{"disableAllHooks": true}"#,
+        )
+        .unwrap();
+        let err = check_hooks_are_enabled(&sketch.path().to_string_lossy())
+            .expect_err("must refuse: the confinement hook would never fire");
+        assert!(err.contains("disableAllHooks"), "{err}");
+        assert!(
+            err.contains(".claude/settings.json"),
+            "the error must name the offending file: {err}"
+        );
+    }
+
+    #[test]
+    fn a_settings_local_json_disabling_hooks_also_refuses() {
+        let sketch = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(sketch.path().join(".claude")).unwrap();
+        std::fs::write(
+            sketch.path().join(".claude/settings.local.json"),
+            r#"{"disableAllHooks": true}"#,
+        )
+        .unwrap();
+        assert!(check_hooks_are_enabled(&sketch.path().to_string_lossy()).is_err());
     }
 
     /// The policy file must not be reachable by the thing it constrains: if
