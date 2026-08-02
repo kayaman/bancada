@@ -29,6 +29,9 @@
 //! release adding fields, adding event types, or a session that emits
 //! nothing but errors must never crash or wedge an embedded agent turn.
 
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -270,25 +273,282 @@ pub struct AgentCfg {
     /// the session stops — core only embeds the path; it does no file I/O
     /// of its own.
     pub mcp_config_path: String,
+    /// Path to a JSON file holding the `--settings` payload: the `PreToolUse`
+    /// hook that refuses edits outside the sketch dir (A1). A *path*, like
+    /// `mcp_config_path` and for the same reason — and because the hook's
+    /// `command` string embeds an absolute path that has no business in argv
+    /// where a `--settings` JSON string would put it. Written and deleted by
+    /// the caller (src-tauri's `agent_start`/`stop_agent_session`).
+    pub settings_path: String,
     /// Project dir/profile context, composed by the caller and appended to
     /// the agent's system prompt via `--append-system-prompt`.
     pub system_prompt_extra: String,
 }
 
+/// The built-in tools the embedded session is given, as a `--tools` value.
+///
+/// `--tools` is a genuine allow-list over the CLI's built-in set, unlike
+/// `--disallowedTools` (see `agent_args`'s doc). Verified against `claude`
+/// 2.1.220 by reading the `system`/`init` line's `tools` array: without it a
+/// session lists 25 built-ins including `Skill`, `Task*`, `Monitor`,
+/// `Workflow`, `SendMessage`, `LSP`, `EnterWorktree` and `Cron*`; with it the
+/// array is exactly these five plus `mcp__bancada__verify`.
+pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep";
+
+/// The complete set of tools an embedded session is expected to report in its
+/// `system`/`init` line — [`BUILTIN_TOOLS`] plus the one MCP tool.
+pub const EXPECTED_TOOLS: &[&str] = &[
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "mcp__bancada__verify",
+];
+
+/// Tools present in a session's `system`/`init` `tools` array that Bancada did
+/// not ask for, sorted and de-duplicated (A2).
+///
+/// This is the *assertion* behind `--tools`: the flag is what should keep the
+/// set narrow, and this is what catches it having failed — a future CLI
+/// release changing `--tools` semantics, a policy-managed setting re-adding a
+/// tool, or a plugin-provided tool arriving through a channel this argv does
+/// not control. A non-empty result means the session has capabilities the
+/// safety model never reasoned about, so the host stops it rather than
+/// letting it run with them.
+///
+/// *Missing* expected tools are deliberately not reported: an `init` line
+/// emitted before an MCP server finishes connecting legitimately lacks
+/// `mcp__bancada__verify`, and a session with too few tools is a usability
+/// problem, not a safety one.
+pub fn unexpected_tools(tools: &[String]) -> Vec<String> {
+    let mut extra: Vec<String> = tools
+        .iter()
+        .filter(|t| !EXPECTED_TOOLS.contains(&t.as_str()))
+        .cloned()
+        .collect();
+    extra.sort();
+    extra.dedup();
+    extra
+}
+
+// ---------- path confinement (A1) ----------
+
+/// Is `candidate` a path the embedded agent is allowed to write?
+///
+/// Bancada's confinement rule, in one pure function so it is testable without
+/// a CLI: a write is allowed only if it lands **inside `sketch_dir`** and no
+/// path component *below* `sketch_dir` is `.claude`.
+///
+/// - Relative candidates are resolved against `sketch_dir` (the agent's cwd).
+/// - `..` traversal is normalised away lexically *before* the prefix test, so
+///   `<sketch>/../../etc/passwd` is rejected rather than passing a naive
+///   `starts_with`.
+/// - Symlinks are followed as far as the filesystem allows: the longest
+///   existing prefix of the candidate is `canonicalize`d and the not-yet-
+///   existing tail appended. A symlink *inside* the project pointing out of
+///   it therefore resolves to its target and is rejected, and a not-yet-
+///   created file still gets a meaningful answer (`canonicalize` alone cannot
+///   answer for a path that does not exist yet, which is the common case for
+///   `Write`).
+/// - `sketch_dir` itself is canonicalised the same way, so a project reached
+///   through a symlinked parent (`/tmp` → `/private/tmp` on macOS, a
+///   symlinked home) compares equal instead of spuriously failing.
+///
+/// The `.claude` rule is scoped to components *below* the root on purpose:
+/// Bancada projects can legitimately live under a `.claude/` path (git
+/// worktrees created by Claude Code itself do exactly that), so testing the
+/// whole absolute path would refuse every write in such a checkout. What the
+/// rule is actually for is the agent rewriting the *project's own*
+/// `.claude/settings.json` — hooks, permissions, this very confinement — from
+/// inside the session it constrains.
+///
+/// Fails closed: an empty candidate, or a `sketch_dir` that cannot be
+/// resolved to an absolute path, is not confined.
+pub fn path_is_confined(sketch_dir: &Path, candidate: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let root = resolve_as_far_as_possible(sketch_dir);
+    if !root.is_absolute() {
+        return false;
+    }
+
+    let cand = Path::new(candidate);
+    let joined = if cand.is_absolute() {
+        cand.to_path_buf()
+    } else {
+        root.join(cand)
+    };
+    let resolved = resolve_as_far_as_possible(&joined);
+
+    let Ok(below) = resolved.strip_prefix(&root) else {
+        return false;
+    };
+    !below.components().any(|c| c.as_os_str() == ".claude")
+}
+
+/// Normalise `p` lexically (drop `.`, fold `..`), then canonicalise the
+/// longest prefix that actually exists and re-append the rest.
+///
+/// `Path::canonicalize` fails outright on a path whose leaf does not exist —
+/// which is the normal case for a `Write` creating a new file — so it cannot
+/// be used directly. Folding `..` lexically *first* is what makes
+/// `<sketch>/../../etc/passwd` collapse to `/etc/passwd` before any prefix
+/// comparison happens.
+fn resolve_as_far_as_possible(p: &Path) -> PathBuf {
+    let lexical = normalize_lexically(p);
+    let mut prefix = lexical.clone();
+    let mut tail: Vec<OsString> = Vec::new();
+    loop {
+        if let Ok(real) = prefix.canonicalize() {
+            let mut out = real;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match prefix.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !prefix.pop() {
+                    return lexical;
+                }
+            }
+            // A root (or a relative path fully consumed) that still won't
+            // canonicalise — nothing left to strip.
+            None => return lexical,
+        }
+    }
+}
+
+/// `.` dropped, `..` folded against the preceding component, no filesystem
+/// access. A leading `..` on a relative path is kept (there is nothing to
+/// fold it into) — callers always join against an absolute root first.
+fn normalize_lexically(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+// ---------- the PreToolUse guard (A1) ----------
+
+/// Tool names whose `file_path` the guard hook adjudicates. Kept beside
+/// [`guard_hook_matcher`] so the regex the CLI matches on and the set this
+/// module knows how to read cannot drift apart.
+const GUARDED_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
+
+/// The `matcher` regex for the `PreToolUse` hook entry — the CLI-side half of
+/// [`GUARDED_TOOLS`].
+pub fn guard_hook_matcher() -> String {
+    GUARDED_TOOLS.join("|")
+}
+
+/// Decide one `PreToolUse` hook invocation.
+///
+/// `hook_stdin` is the JSON object the CLI writes to the hook's stdin
+/// (`{"tool_name": ..., "tool_input": {"file_path": ...}, ...}`). Returns
+/// `Some(json)` — the deny payload to print on stdout — when the edit must be
+/// refused, and `None` when the hook should stay silent and let the session's
+/// normal permission flow (`acceptEdits`) proceed.
+///
+/// **Fails closed.** Unparseable stdin, a guarded tool with no `file_path`,
+/// or a non-string `file_path` all deny: the hook is a boundary, and a
+/// boundary that opens when it is confused is not one. A tool name outside
+/// [`GUARDED_TOOLS`] passes through — the CLI's `matcher` should mean this
+/// never happens, but a widened matcher must not start denying `Read`.
+pub fn guard_decision(sketch_dir: &Path, hook_stdin: &str) -> Option<String> {
+    let deny = |reason: String| Some(deny_json(&reason));
+
+    let Ok(input) = serde_json::from_str::<Value>(hook_stdin) else {
+        return deny("Bancada could not read the tool input and refuses the edit.".to_string());
+    };
+
+    let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    if !tool.is_empty() && !GUARDED_TOOLS.contains(&tool) {
+        return None;
+    }
+
+    let file_path = input
+        .get("tool_input")
+        .and_then(|i| i.get("file_path"))
+        .and_then(Value::as_str);
+    let Some(file_path) = file_path else {
+        return deny(format!(
+            "Bancada refuses a {tool} with no file_path it can check against the project directory."
+        ));
+    };
+
+    if path_is_confined(sketch_dir, file_path) {
+        return None;
+    }
+    deny(format!(
+        "Bancada refuses this edit: {file_path} is outside the project directory {} \
+         (or is part of its .claude configuration). Only files inside the project may be edited.",
+        sketch_dir.display()
+    ))
+}
+
+/// The `PreToolUse` deny payload, in the CLI's hook-output shape.
+fn deny_json(reason: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
 /// Builds the `claude` argv (everything after the binary name) for an
 /// embedded headless agent session.
 ///
-/// The `mcp__bancada__verify` entry in `--allowedTools` is load-bearing: a
-/// headless (`-p`) session with an MCP tool absent from the allow-list
-/// stalls forever on a permission prompt it has no way to answer.
-/// `--strict-mcp-config` keeps the user's personal MCP servers out of the
-/// embedded session, leaving only the loopback `bancada` server from
-/// `--mcp-config`. `--mcp-config` takes `cfg.mcp_config_path` — a *file
-/// path*, not inline JSON — because inline JSON would put the loopback
-/// server's bearer token straight into argv, world-readable via
-/// `/proc/<pid>/cmdline` on Linux (fixed post-review; see `AgentCfg::mcp_config_path`).
+/// ## What is, and is not, a boundary
 ///
-/// ## Why `--bare` is *not* here (risk R3, resolved by the Task 5 prototype)
+/// This argv mixes flags with very different strengths, and the difference
+/// matters enough to spell out (it was mis-stated in earlier revisions of
+/// this doc and of the design spec):
+///
+/// - **`--tools BUILTIN_TOOLS` is a real restriction.** It selects from the
+///   CLI's built-in set, and a tool left out of it is not offered to the
+///   model at all. Probe-verified against 2.1.220 by reading the
+///   `system`/`init` `tools` array (see [`BUILTIN_TOOLS`]), *including* that
+///   it leaves `mcp__bancada__verify` intact — MCP tools are not built-ins,
+///   so `--tools` does not filter them.
+/// - **`--disallowedTools` is not a boundary.** With it set and `--tools`
+///   absent, the same probe still listed 25 built-in tools including `Skill`,
+///   `Task*`, `Monitor`, `Workflow`, `SendMessage` and `LSP`. It is a nudge
+///   at the permission layer, not a capability gate; it is kept because
+///   defence in depth is free, not because it confines anything.
+/// - **`--settings cfg.settings_path` is a real boundary** — it carries the
+///   `PreToolUse` hook that refuses out-of-project edits (A1). Probe-verified
+///   end to end: an out-of-project `Write` came back as a `tool_result` with
+///   `is_error: true`, appeared in the CLI's own `permission_denials`, and
+///   left nothing on disk, while an in-project `Write` in the same turn
+///   succeeded. A *permissive* hook running alongside it does not override
+///   the deny (also probe-verified), so the user's own hooks cannot open it.
+/// - **`--strict-mcp-config`** keeps the user's personal MCP servers out,
+///   leaving only the loopback `bancada` server from `--mcp-config`.
+/// - The `mcp__bancada__verify` entry in `--allowedTools` is load-bearing:
+///   a headless (`-p`) session with an MCP tool absent from the allow-list
+///   stalls forever on a permission prompt it has no way to answer.
+/// - `--mcp-config` and `--settings` both take *file paths*, never inline
+///   JSON: inline JSON would put the loopback server's bearer token (and the
+///   hook command line) straight into argv, world-readable via
+///   `/proc/<pid>/cmdline` on Linux (see [`AgentCfg::mcp_config_path`]).
+///
+/// ## Why `--bare` and `--safe-mode` are *not* here
 ///
 /// The design spec called for `--bare` as the isolation mechanism (it skips
 /// auto-discovery of the user's own hooks/skills/plugins). It cannot be
@@ -297,17 +557,21 @@ pub struct AgentCfg {
 /// (OAuth and keychain are never read)", and the Task 5 prototype confirmed
 /// it end to end — an otherwise identical argv with `--bare` produced
 /// `"error":"authentication_failed"` / `"Not logged in · Please run
-/// /login"` on the very first turn, while the same argv without it
-/// completed a full `mcp__bancada__verify` tool round-trip.
+/// /login"` on the very first turn.
 ///
-/// Bancada's whole runtime premise (spec decision #2) is that auth comes
-/// free from the user's existing Claude Code login, which is exactly the
-/// OAuth/keychain credential `--bare` refuses to read. So R3's isolation is
-/// deliberately traded for working auth: the remaining isolation mechanisms
-/// are `--strict-mcp-config` (no personal MCP servers) plus the explicit
-/// `--allowedTools`/`--disallowedTools` pair (no Bash/network/subagents).
-/// The residue is that the user's own hooks, skills and plugins do load
-/// into the embedded session.
+/// `--safe-mode` (2.1.220: "all customizations … disabled … Auth … work
+/// normally") looks like the missing flag, and the Task 8b probe confirmed it
+/// *does* stop the user's `SessionStart` hooks from firing. It was still
+/// rejected: the same probe showed it also drops `--mcp-config` servers —
+/// `mcp_servers` came back `[]` and `mcp__bancada__verify` was absent from
+/// the `tools` array — which removes the compile tool the whole panel exists
+/// for.
+///
+/// So the residue stands and is *not* mitigated by this argv: **the user's
+/// own hooks, skills and plugins do load into the embedded session, and
+/// hooks are shell commands.** What A1's `--settings` hook does is take away
+/// the other half of that pair — an unconfined `Write` — so a hostile or
+/// merely careless hook can no longer be *installed* by the agent itself.
 pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
     vec![
         "-p".to_string(),
@@ -319,6 +583,8 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "stream-json".to_string(),
         "--permission-mode".to_string(),
         "acceptEdits".to_string(),
+        "--tools".to_string(),
+        BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
         "Read,Edit,Write,Glob,Grep,mcp__bancada__verify".to_string(),
         "--disallowedTools".to_string(),
@@ -326,6 +592,8 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--mcp-config".to_string(),
         cfg.mcp_config_path.clone(),
         "--strict-mcp-config".to_string(),
+        "--settings".to_string(),
+        cfg.settings_path.clone(),
         "--append-system-prompt".to_string(),
         cfg.system_prompt_extra.clone(),
     ]
@@ -781,6 +1049,7 @@ mod tests {
         // prompt that can never be answered.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/bancada-agent-mcp-abc.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
         };
         let args = agent_args(&cfg);
@@ -796,6 +1065,7 @@ mod tests {
     fn agent_args_disallows_bash_and_friends() {
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -810,6 +1080,7 @@ mod tests {
     fn agent_args_isolates_the_session_with_strict_mcp_config() {
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -825,6 +1096,7 @@ mod tests {
         // doc comment for the full rationale.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -845,6 +1117,7 @@ mod tests {
         // the given path verbatim and does not turn it into JSON itself.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/bancada-agent-mcp-sekrit-nonce.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -857,9 +1130,56 @@ mod tests {
     }
 
     #[test]
+    fn agent_args_restricts_the_builtin_tool_set_with_the_tools_flag() {
+        // A1/A2: `--tools` is the only flag in this argv that actually
+        // removes a built-in tool from the session (probe-verified against
+        // 2.1.220 — see the `agent_args` doc). Losing it silently would put
+        // Skill/Task/Monitor/LSP back in the agent's hands.
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/s.json".to_string(),
+            system_prompt_extra: String::new(),
+        };
+        let args = agent_args(&cfg);
+        let idx = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("--tools must be present");
+        assert_eq!(args[idx + 1], "Read,Edit,Write,Glob,Grep");
+        assert!(
+            !args[idx + 1].contains("Bash"),
+            "Bash must never be in the built-in allow-list"
+        );
+    }
+
+    #[test]
+    fn agent_args_passes_the_settings_file_that_carries_the_confinement_hook() {
+        // A1: this is the path confinement boundary. Without --settings the
+        // session runs with no PreToolUse guard at all, and every out-of-
+        // project Write succeeds (Task 5 prototype finding (c)).
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-nonce.json".to_string(),
+            system_prompt_extra: String::new(),
+        };
+        let args = agent_args(&cfg);
+        let idx = args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings must be present");
+        assert_eq!(args[idx + 1], "/tmp/bancada-agent-settings-nonce.json");
+        assert!(
+            serde_json::from_str::<Value>(&args[idx + 1]).is_err(),
+            "the --settings argv value must be a bare path, not JSON: the hook \
+             command line has no business in /proc/<pid>/cmdline"
+        );
+    }
+
+    #[test]
     fn agent_args_carries_the_system_prompt_extra_verbatim() {
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /home/me/Blink, profile esp32s3".to_string(),
         };
         let args = agent_args(&cfg);
@@ -876,6 +1196,7 @@ mod tests {
         // argv entry — arduino-cli's spec has no such flag either.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -886,6 +1207,7 @@ mod tests {
     fn agent_args_starts_with_the_documented_flag_sequence() {
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
         };
         let args = agent_args(&cfg);
@@ -903,6 +1225,344 @@ mod tests {
                 "acceptEdits",
             ]
         );
+    }
+
+    // ---------- A1: path_is_confined ----------
+    //
+    // The confinement rule is the release-blocking security decision, so the
+    // traversal cases are pinned explicitly rather than left to the live
+    // probe: a live probe proves the *hook* is wired up, these prove the
+    // *policy* it enforces.
+
+    /// A real directory to anchor against — `path_is_confined` canonicalises,
+    /// so a purely imaginary root would compare against its lexical self and
+    /// quietly stop testing symlink behaviour.
+    fn sketch() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Blink.ino"), "void setup(){}\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn confined_accepts_a_plain_file_in_the_project() {
+        let dir = sketch();
+        let root = dir.path();
+        assert!(path_is_confined(root, "Blink.ino"));
+        assert!(path_is_confined(root, "./Blink.ino"));
+        assert!(path_is_confined(
+            root,
+            root.join("Blink.ino").to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn confined_accepts_a_file_that_does_not_exist_yet() {
+        // The common Write case: canonicalize() alone would fail outright on
+        // a leaf that isn't there, which must not read as "not confined".
+        let dir = sketch();
+        assert!(path_is_confined(dir.path(), "src/new/deeply/nested.h"));
+        assert!(path_is_confined(dir.path(), "brand-new.ino"));
+    }
+
+    #[test]
+    fn confined_accepts_a_subdirectory_and_the_root_itself() {
+        let dir = sketch();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        assert!(path_is_confined(dir.path(), "src"));
+        assert!(path_is_confined(dir.path(), dir.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn confined_rejects_an_absolute_path_outside_the_project() {
+        let dir = sketch();
+        assert!(!path_is_confined(dir.path(), "/etc/passwd"));
+        assert!(!path_is_confined(dir.path(), "/tmp/bancada-escape.txt"));
+    }
+
+    #[test]
+    fn confined_rejects_dot_dot_traversal_out_of_the_project() {
+        // The case a naive `starts_with` on the raw string would pass: the
+        // path *begins* with the sketch dir and still lands outside it.
+        let dir = sketch();
+        let root = dir.path();
+        assert!(!path_is_confined(root, "../escaped.txt"));
+        assert!(!path_is_confined(root, "../../../../etc/passwd"));
+        assert!(!path_is_confined(root, "src/../../escaped.txt"));
+        assert!(!path_is_confined(
+            root,
+            root.join("../escaped.txt").to_str().unwrap()
+        ));
+        assert!(!path_is_confined(
+            root,
+            &format!("{}/a/b/../../../out.txt", root.display())
+        ));
+    }
+
+    #[test]
+    fn confined_allows_dot_dot_that_stays_inside_the_project() {
+        let dir = sketch();
+        assert!(path_is_confined(dir.path(), "src/../Blink.ino"));
+        assert!(path_is_confined(dir.path(), "./a/b/../../Blink.ino"));
+    }
+
+    #[test]
+    fn confined_rejects_a_sibling_directory_sharing_the_name_prefix() {
+        // `/tmp/proj-evil` starts_with `/tmp/proj` as a *string* but is not
+        // inside it. `strip_prefix` is component-wise, which is why this
+        // passes — pinned so a future rewrite to string comparison fails.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let evil = parent.path().join("proj-evil");
+        std::fs::create_dir(&evil).unwrap();
+        assert!(!path_is_confined(
+            &root,
+            evil.join("x.txt").to_str().unwrap()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_rejects_a_symlink_inside_the_project_pointing_out_of_it() {
+        // The escape a lexical-only check cannot see.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "s").unwrap();
+        let dir = sketch();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+
+        assert!(!path_is_confined(dir.path(), "escape/secret.txt"));
+        assert!(!path_is_confined(dir.path(), "escape"));
+        // ... and a symlink at the leaf itself.
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("leaf-link"),
+        )
+        .unwrap();
+        assert!(!path_is_confined(dir.path(), "leaf-link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_accepts_a_project_reached_through_a_symlinked_parent() {
+        // The false-*negative* direction: canonicalising the candidate but
+        // not the root would reject every write in a project opened through
+        // a symlinked path (a symlinked home, /tmp on macOS).
+        let real = tempfile::tempdir().unwrap();
+        let root = real.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("proj-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+
+        assert!(path_is_confined(&link, "Blink.ino"));
+        assert!(path_is_confined(
+            &link,
+            root.join("Blink.ino").to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn confined_rejects_a_dot_claude_component_below_the_project() {
+        let dir = sketch();
+        assert!(!path_is_confined(dir.path(), ".claude/settings.json"));
+        assert!(!path_is_confined(dir.path(), ".claude"));
+        assert!(!path_is_confined(dir.path(), "src/.claude/hooks/pre.sh"));
+        assert!(!path_is_confined(
+            dir.path(),
+            dir.path()
+                .join(".claude/settings.local.json")
+                .to_str()
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn confined_allows_a_project_that_itself_lives_under_a_dot_claude_path() {
+        // Claude Code's own git worktrees live at
+        // `<repo>/.claude/worktrees/<name>` — testing `.claude` against the
+        // whole absolute path would refuse every write in such a checkout,
+        // which is why the rule is scoped to components *below* the root.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join(".claude/worktrees/some-name");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(path_is_confined(&root, "Blink.ino"));
+        assert!(path_is_confined(&root, "src/thing.h"));
+        // ... but its *own* .claude dir is still off limits.
+        assert!(!path_is_confined(&root, ".claude/settings.json"));
+    }
+
+    #[test]
+    fn confined_fails_closed_on_empty_or_unusable_input() {
+        let dir = sketch();
+        assert!(!path_is_confined(dir.path(), ""));
+        // A relative sketch_dir cannot anchor anything.
+        assert!(!path_is_confined(Path::new("relative/dir"), "Blink.ino"));
+    }
+
+    // ---------- A1: guard_decision ----------
+
+    fn hook_stdin(tool: &str, file_path: &str) -> String {
+        serde_json::json!({
+            "session_id": "abc",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": {"file_path": file_path, "content": "x"}
+        })
+        .to_string()
+    }
+
+    fn deny_reason(json: &str) -> String {
+        let v: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn guard_stays_silent_for_an_in_project_write() {
+        let dir = sketch();
+        assert_eq!(
+            guard_decision(dir.path(), &hook_stdin("Write", "Blink.ino")),
+            None,
+            "an in-project edit must fall through to the session's own \
+             acceptEdits flow, not be explicitly allowed"
+        );
+    }
+
+    #[test]
+    fn guard_denies_an_out_of_project_write_and_names_the_path() {
+        let dir = sketch();
+        let json =
+            guard_decision(dir.path(), &hook_stdin("Write", "/tmp/escape.txt")).expect("must deny");
+        let reason = deny_reason(&json);
+        assert!(reason.contains("/tmp/escape.txt"), "{reason}");
+        assert!(
+            reason.contains(&dir.path().display().to_string()),
+            "the reason must name the project dir so the model can correct itself: {reason}"
+        );
+    }
+
+    #[test]
+    fn guard_denies_every_guarded_tool() {
+        let dir = sketch();
+        for tool in GUARDED_TOOLS {
+            assert!(
+                guard_decision(dir.path(), &hook_stdin(tool, "/etc/passwd")).is_some(),
+                "{tool} must be guarded"
+            );
+        }
+    }
+
+    #[test]
+    fn guard_denies_a_dot_claude_edit() {
+        let dir = sketch();
+        assert!(guard_decision(dir.path(), &hook_stdin("Edit", ".claude/settings.json")).is_some());
+    }
+
+    #[test]
+    fn guard_fails_closed_on_unparseable_input() {
+        // A boundary that opens when it is confused is not a boundary.
+        let dir = sketch();
+        assert!(guard_decision(dir.path(), "not json at all").is_some());
+        assert!(guard_decision(dir.path(), "").is_some());
+    }
+
+    #[test]
+    fn guard_fails_closed_when_a_guarded_tool_has_no_file_path() {
+        let dir = sketch();
+        let stdin = r#"{"tool_name":"Write","tool_input":{"content":"x"}}"#;
+        assert!(guard_decision(dir.path(), stdin).is_some());
+        let non_string = r#"{"tool_name":"Write","tool_input":{"file_path":42}}"#;
+        assert!(guard_decision(dir.path(), non_string).is_some());
+    }
+
+    #[test]
+    fn guard_passes_through_a_tool_it_does_not_adjudicate() {
+        // The CLI's `matcher` should keep Read out of here entirely; if a
+        // future matcher widens, the guard must not start denying reads.
+        let dir = sketch();
+        let stdin = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/passwd"}}"#;
+        assert_eq!(guard_decision(dir.path(), stdin), None);
+    }
+
+    #[test]
+    fn guard_hook_matcher_covers_exactly_the_guarded_tools() {
+        // The regex the CLI matches on and the set `guard_decision` knows how
+        // to read must not drift apart: a tool in the matcher but not in
+        // GUARDED_TOOLS would be waved through by the pass-through branch.
+        let matcher = guard_hook_matcher();
+        for tool in GUARDED_TOOLS {
+            assert!(matcher.contains(tool), "{matcher} is missing {tool}");
+        }
+        assert_eq!(matcher.split('|').count(), GUARDED_TOOLS.len());
+    }
+
+    // ---------- A2: unexpected_tools ----------
+
+    #[test]
+    fn the_expected_tool_set_raises_nothing() {
+        let tools: Vec<String> = EXPECTED_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert!(unexpected_tools(&tools).is_empty());
+    }
+
+    #[test]
+    fn a_missing_tool_is_not_an_alarm() {
+        // An `init` line emitted before the MCP server finishes connecting
+        // legitimately lacks mcp__bancada__verify.
+        let tools: Vec<String> = ["Read", "Edit", "Write", "Glob", "Grep"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(unexpected_tools(&tools).is_empty());
+    }
+
+    #[test]
+    fn an_extra_tool_is_reported_sorted_and_deduped() {
+        let tools: Vec<String> = [
+            "Read", "Bash", "Edit", "Skill", "Write", "Glob", "Grep", "Bash",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Skill"]);
+    }
+
+    #[test]
+    fn a_foreign_mcp_tool_is_reported() {
+        // --strict-mcp-config should make this impossible; the assertion is
+        // what catches it having failed.
+        let tools = vec![
+            "Read".to_string(),
+            "mcp__bancada__verify".to_string(),
+            "mcp__someones_plugin__deploy".to_string(),
+        ];
+        assert_eq!(
+            unexpected_tools(&tools),
+            vec!["mcp__someones_plugin__deploy"]
+        );
+    }
+
+    #[test]
+    fn the_expected_set_matches_the_argv_the_session_is_started_with() {
+        // EXPECTED_TOOLS is the assertion; --tools/--allowedTools are what
+        // produce the reality it asserts on. Drift between them would either
+        // alarm on every session or stop asserting anything.
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/s.json".to_string(),
+            system_prompt_extra: String::new(),
+        };
+        let args = agent_args(&cfg);
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[tools_idx + 1], BUILTIN_TOOLS);
+        let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[allowed_idx + 1], EXPECTED_TOOLS.join(","));
+        for tool in BUILTIN_TOOLS.split(',') {
+            assert!(EXPECTED_TOOLS.contains(&tool), "{tool}");
+        }
     }
 
     // ---------- summarize_build_output ----------

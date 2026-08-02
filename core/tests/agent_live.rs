@@ -36,8 +36,19 @@ fn live_claude_replies_pong_and_parses_as_system_init_and_result() {
 
     let sketch_dir = tempfile::tempdir().unwrap();
 
+    // `--settings` is likewise not optional in the real argv. Its production
+    // payload is the A1 confinement hook, whose `command` is the *host*
+    // binary (`src-tauri`'s `--agent-guard` entry point) — core has no such
+    // binary, and this scenario never edits a file, so an empty settings
+    // object keeps the argv shape honest without pretending to test the
+    // hook. The hook's live coverage lives in
+    // `src-tauri`'s `live_the_confinement_hook_refuses_an_out_of_project_write`.
+    let settings_path = dir.path().join("settings.json");
+    std::fs::write(&settings_path, "{}").unwrap();
+
     let cfg = AgentCfg {
         mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
+        settings_path: settings_path.to_string_lossy().into_owned(),
         system_prompt_extra: "You are being exercised by an automated test. \
             Reply with exactly the text: pong"
             .to_string(),

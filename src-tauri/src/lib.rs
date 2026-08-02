@@ -10,8 +10,13 @@
 //!                       verbatim, plus these synthetic ones the host adds:
 //!                       { type: "stderr", line }        (child stderr)
 //!                       { type: "unparsed", line }      (non-JSON stdout)
-//!                       { type: "verify_started" }
-//!                       { type: "verify_done", success }
+//!                       { type: "verify_started", pid }
+//!                       { type: "verify_done", success, pid }
+//!                       { type: "security_alarm", kind, detail, pid }
+//!                       `pid` on all three is the session's child pid, so a
+//!                       synthetic event from a session the user has already
+//!                       stopped cannot be rendered into a *newer* session's
+//!                       panel (same guard as `agent://closed`).
 //!   "agent://closed"    { reason, pid }  (child stdout hit EOF; pid is the
 //!                       child's, so the frontend's `agent_stop(pid)` call
 //!                       is a no-op if a newer session has since superseded
@@ -34,12 +39,54 @@
 //! owned clones at spawn time and never locks `agent`; shutdown breaks its
 //! blocking `recv()` with `Server::unblock()`, which no atomic flag could
 //! do. The child never restarts on its own (same philosophy as the MQTT
-//! thread) — the panel shows "Session ended" and the frontend calls
-//! `agent_stop(pid)` on `agent://closed` so the child is reaped; `pid`
-//! guards a stale close from a superseded session against killing a newer
-//! one (`should_stop_agent`). The `--mcp-config` bearer token rides a 0600
-//! temp file, not argv (`write_mcp_config_file`) — argv is readable by any
-//! local process via `/proc/<pid>/cmdline` on Linux.
+//! thread) — the panel shows "Session ended"; the stdout reader tears its
+//! own session down at EOF, and the frontend's `agent_stop(pid)` on
+//! `agent://closed` is then a belt-and-braces no-op. `pid` guards a stale
+//! close from a superseded session against killing a newer one
+//! (`should_stop_agent`). The `--mcp-config` bearer token rides a 0600 temp
+//! file, not argv (`write_mcp_config_file`) — argv is readable by any local
+//! process via `/proc/<pid>/cmdline` on Linux.
+//!
+//! ## Agent safety model — what is actually enforced
+//!
+//! The embedded session runs with the **user's own Claude Code
+//! configuration loaded**: `--bare` and `--safe-mode`, the two flags that
+//! would suppress it, respectively break keychain auth and disable
+//! `--mcp-config` (so the `verify` tool disappears) — both probe-verified
+//! against CLI 2.1.220, see `core::agent::agent_args`. That means the user's
+//! hooks load, and **hooks are shell commands**. Composed with an
+//! unconfined `Write`, that was a path to arbitrary command execution as
+//! the user: the agent writes a `PreToolUse` hook into a settings file, the
+//! CLI runs it as a shell command. Closing it needs the *write* leg, since
+//! the *hooks* leg cannot be closed without losing auth or the compiler.
+//!
+//! Two enforcement layers, in order of strength:
+//!
+//! 1. **Refusal (the boundary).** `write_agent_settings_file` generates a
+//!    `--settings` file whose `PreToolUse` hook is *this very binary*
+//!    re-invoked as `bancada --agent-guard <sketch_dir>`
+//!    (`run_agent_guard`), adjudicating every `Write`/`Edit`/`MultiEdit`/
+//!    `NotebookEdit` with `core::agent::guard_decision`. An edit outside the
+//!    sketch dir, or touching a `.claude/` component below it, is *denied* —
+//!    the CLI reports it in `permission_denials` and nothing reaches disk.
+//!    Probe-verified end to end, including that a permissive hook running
+//!    alongside does not override the deny.
+//! 2. **Detect-and-stop (the backstop).** The stdout reader independently
+//!    re-checks every `Edit`/`Write` `tool_use` against the same
+//!    `path_is_confined`, and checks the `system`/`init` `tools` array
+//!    against `core::agent::EXPECTED_TOOLS`. Either check failing emits
+//!    `{type:"security_alarm"}` and stops the session. This exists because
+//!    layer 1 depends on the CLI honouring `--settings` hooks: if a future
+//!    release changed that, or the guard binary could not run, the boundary
+//!    would fail *open* with no other signal.
+//!
+//! What is **not** a boundary: `--disallowedTools` (a permission-layer
+//! nudge — a session with it set still lists 25 built-in tools). What is:
+//! `--tools`, which genuinely narrows the built-in set to
+//! `Read,Edit,Write,Glob,Grep` while leaving the MCP `verify` tool intact.
+//! Residual risk: a *pre-existing* hostile hook in the user's own config
+//! still runs — Bancada stops the agent from installing one, it cannot stop
+//! one that is already there.
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
 //! `verify` tool all drive the same arduino-cli build cache, so they share
@@ -47,7 +94,12 @@
 //! never blocking — a contended build fails fast with "build already in
 //! progress" instead of queueing behind a multi-minute platform build.
 //! Before the gate, the only mutual exclusion was the frontend's `busy`
-//! flag, which agent-initiated builds bypass entirely.
+//! flag, which agent-initiated builds bypass entirely. Note the gate covers
+//! exactly those three *compile/upload* entry points — `install_core`,
+//! `uninstall_core`, `install_library` and the other arduino-cli commands
+//! run outside it, so it is not "every arduino-cli invocation in the
+//! process". Those neither read nor write the sketch build cache the gate
+//! exists to protect.
 //!
 //! MQTT commands (Observability panel): `mqtt_connect` streams JSON envelopes
 //! over a `tauri::ipc::Channel` — `{"ev":"stage"|"msg"|"closed"}` per the
@@ -100,10 +152,19 @@ struct AppState {
     mqtt: Mutex<Option<MqttSession>>,
     /// Embedded `claude` session — another sibling slot, one at a time.
     agent: Mutex<Option<AgentSession>>,
-    /// Serialises every arduino-cli build in the process — user Verify,
-    /// user Upload, and the agent's MCP `verify` tool all share one build
-    /// cache, and nothing but the frontend's `busy` flag used to keep them
-    /// apart (which agent-initiated builds bypass entirely).
+    /// Serialises the three *sketch build* paths — user Verify
+    /// (`compile_sketch`), user Upload (`upload_sketch`) and the agent's MCP
+    /// `verify` tool — which share one arduino-cli build cache and were
+    /// previously kept apart only by the frontend's `busy` flag (which
+    /// agent-initiated builds bypass entirely).
+    ///
+    /// Deliberately *not* every arduino-cli invocation in the process:
+    /// `install_core`, `uninstall_core`, `update_core_index`,
+    /// `install_library` and friends run outside the gate. They touch the
+    /// platform/library trees rather than a sketch's build cache, and
+    /// serialising them behind a multi-minute compile would make the Boards
+    /// and Libraries panels fail with "build already in progress" for no
+    /// benefit.
     build_gate: Arc<Mutex<()>>,
 }
 
@@ -1286,10 +1347,9 @@ fn fleet_sync(app: AppHandle, ports: Vec<DetectedPort>) -> Result<FleetSnapshot,
     // the file for no new information and widen the window in which a concurrent
     // rename could be lost to this load-modify-save. So only write when a board
     // is genuinely new or its `last_seen` has gone stale.
-    let stale = f
-        .boards
-        .iter()
-        .any(|b| a.online.contains(&b.id) && now.saturating_sub(b.last_seen) > LAST_SEEN_RESOLUTION);
+    let stale = f.boards.iter().any(|b| {
+        a.online.contains(&b.id) && now.saturating_sub(b.last_seen) > LAST_SEEN_RESOLUTION
+    });
     let added = fleet::sight_all(&mut f, &ports, now);
     if added > 0 || stale {
         f.save(&path).map_err(err_str)?;
@@ -1391,7 +1451,7 @@ fn forget_board(app: AppHandle, id: String) -> Result<Vec<fleet::FleetEntry>, St
 
 use bancada_core::mqtt;
 use bancada_core::mqtt::rumqttc::{
-    Client as MqttClient, Connection as MqttConnection, ConnectReturnCode, Event as MqttNetEvent,
+    Client as MqttClient, ConnectReturnCode, Connection as MqttConnection, Event as MqttNetEvent,
     MqttOptions, Packet as MqttPacket, QoS, SubscribeReasonCode,
 };
 
@@ -1683,6 +1743,30 @@ struct AgentSession {
     /// The 0600 temp file backing `--mcp-config` (F5: keeps the bearer token
     /// off argv) — deleted when the session stops.
     mcp_config_path: PathBuf,
+    /// The 0600 temp file backing `--settings`: the A1 `PreToolUse`
+    /// confinement hook. Also deleted when the session stops.
+    settings_path: PathBuf,
+    /// Set by `stop_agent_session`. `Server::unblock()` only wakes a thread
+    /// parked in `incoming_requests()` — a listener that is *inside*
+    /// `run_verify` (a multi-minute build) does not see it, and used to run
+    /// on holding the build gate and emitting `verify_done` through the live
+    /// `AppHandle` into whatever session the panel was showing by then. This
+    /// flag is what `run_verify` checks before taking the gate and before
+    /// every emit (C1).
+    verify_cancel: Arc<AtomicBool>,
+}
+
+/// Lock the agent slot, recovering from a poisoned mutex.
+///
+/// Same policy as `try_build_gate`, and for the same reason: what the mutex
+/// guards is an `Option<AgentSession>` whose invariants do not survive a
+/// panic *anyway* (the panicking command has already returned), and
+/// `.unwrap()`ing here meant one panic under the lock bricked every agent
+/// command for the process lifetime — including the `RunEvent::Exit`
+/// teardown, which would then panic during shutdown and orphan the child
+/// plus its 0600 temp files (I4).
+fn lock_agent(state: &AppState) -> std::sync::MutexGuard<'_, Option<AgentSession>> {
+    state.agent.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A cold ESP32 platform build runs for minutes — far longer than the
@@ -1710,6 +1794,18 @@ struct McpVerifyCtx {
     profile: Option<String>,
     fqbn: Option<String>,
     build_gate: Arc<Mutex<()>>,
+    /// The session's child pid, stamped onto every synthetic event this
+    /// listener emits so the frontend can discard one that outlived its
+    /// session (C1) — the same identity guard `agent://closed` already had.
+    session_pid: u32,
+    /// Shared with `AgentSession::verify_cancel`; see its doc.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl McpVerifyCtx {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 /// Bind the MCP listener on a kernel-assigned loopback port and read the
@@ -1728,24 +1824,27 @@ fn bind_mcp_server() -> Result<(Arc<tiny_http::Server>, u16), String> {
 ///
 /// The workspace has no `rand` dependency (`mqtt::client_id` solves its own
 /// uniqueness problem the same way), so read 16 bytes from the OS entropy
-/// pool directly and fall back to a clock/ASLR mix where that file does not
-/// exist. The listener is bound to `127.0.0.1`, so this only has to keep
-/// *other local processes* from driving the user's compiler.
-fn random_token() -> String {
+/// pool directly. The listener is bound to `127.0.0.1`, so this only has to
+/// keep *other local processes* from driving the user's compiler.
+///
+/// **No fallback.** This used to degrade to a `nanos + heap address` mix when
+/// `/dev/urandom` could not be read. That is a uniqueness device, not an
+/// unguessability one: a local attacker knows roughly when the session
+/// started and ASLR gives few bits, so the "token" would be searchable —
+/// while the caller went on believing the listener was protected. A session
+/// that cannot be given a real secret must fail to start instead.
+fn random_token() -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    if std::fs::File::open("/dev/urandom")
+    std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_ok()
-    {
-        return bytes.iter().map(|b| format!("{b:02x}")).collect();
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let heap = Box::new(0u8);
-    let addr = &*heap as *const u8 as usize;
-    format!("{nanos:032x}{addr:016x}")
+        .map_err(|e| {
+            format!(
+                "could not read 16 bytes of entropy for the agent's MCP token \
+                 (/dev/urandom: {e}) — refusing to start a session whose \
+                 loopback listener would be guessable"
+            )
+        })?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Writes the child's `--mcp-config` JSON (the loopback server's URL plus
@@ -1780,7 +1879,61 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
         }
     })
     .to_string();
-    let path = std::env::temp_dir().join(format!("bancada-agent-mcp-{}.json", random_token()));
+    let path = std::env::temp_dir().join(format!("bancada-agent-mcp-{}.json", random_token()?));
+    write_private_file(&path, &mcp_config, "MCP config")
+}
+
+/// The `--settings` payload: Bancada's `PreToolUse` confinement hook (A1).
+///
+/// The hook's `command` is **this very binary**, re-invoked as
+/// `bancada --agent-guard <sketch_dir>` (see `run_agent_guard`). Using
+/// `current_exe()` rather than generating a shell script means the policy is
+/// the same tested Rust function (`core::agent::guard_decision`) the unit
+/// tests exercise, with no dependency on a `sh`/`python3` being present and
+/// no second copy of the rule to drift.
+///
+/// The command string is shell-parsed by the CLI, so both the executable
+/// path and the sketch dir are single-quoted with POSIX escaping
+/// (`shell_quote`) — a project directory containing a space or a quote must
+/// not turn into two arguments, and must certainly not turn into a second
+/// command.
+///
+/// Written with the same 0600 `create_new` discipline as the MCP config: the
+/// file names a hook the CLI will *execute*, so a world-writable temp file
+/// at a predictable path would be a way to make Bancada run someone else's
+/// command.
+fn write_agent_settings_file(sketch_dir: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not resolve Bancada's own executable path: {e}"))?;
+    let command = format!(
+        "{} --agent-guard {}",
+        shell_quote(&exe.to_string_lossy()),
+        shell_quote(sketch_dir)
+    );
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": agent::guard_hook_matcher(),
+                "hooks": [{ "type": "command", "command": command }]
+            }]
+        }
+    })
+    .to_string();
+    let path =
+        std::env::temp_dir().join(format!("bancada-agent-settings-{}.json", random_token()?));
+    write_private_file(&path, &settings, "settings")
+}
+
+/// POSIX single-quoting: wrap in `'...'` and replace each embedded `'` with
+/// `'\''`. The result is one shell word whatever the input contains.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Create `path` at 0600 and write `body`, never following or truncating an
+/// existing file. `what` names the file in error messages.
+fn write_private_file(path: &Path, body: &str, what: &str) -> Result<PathBuf, String> {
+    let path = path.to_path_buf();
 
     #[cfg(unix)]
     {
@@ -1791,11 +1944,11 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
             .create_new(true)
             .mode(0o600)
             .open(&path)
-            .map_err(|e| format!("could not create the agent's MCP config file: {e}"))?;
-        if let Err(e) = file.write_all(mcp_config.as_bytes()) {
+            .map_err(|e| format!("could not create the agent's {what} file: {e}"))?;
+        if let Err(e) = file.write_all(body.as_bytes()) {
             drop(file);
             let _ = std::fs::remove_file(&path);
-            return Err(format!("could not write the agent's MCP config file: {e}"));
+            return Err(format!("could not write the agent's {what} file: {e}"));
         }
     }
     #[cfg(not(unix))]
@@ -1803,11 +1956,57 @@ fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
         // No equivalent atomic-mode create outside unix (no Windows dev/CI
         // target exists in this workspace yet) — plain write, no ACL
         // narrowing. Revisit if/when one does.
-        std::fs::write(&path, &mcp_config)
-            .map_err(|e| format!("could not write the agent's MCP config file: {e}"))?;
+        std::fs::write(&path, body)
+            .map_err(|e| format!("could not write the agent's {what} file: {e}"))?;
     }
 
     Ok(path)
+}
+
+/// The `bancada --agent-guard <sketch_dir>` entry point: the `PreToolUse`
+/// hook the embedded session is started with (A1).
+///
+/// Reads the CLI's hook JSON from stdin, adjudicates it with
+/// `core::agent::guard_decision`, and prints a deny payload (or nothing) on
+/// stdout. **Always exits 0**: a non-zero exit is how a hook reports *its own*
+/// failure, and the CLI's handling of that is "log and continue" — i.e. fail
+/// open, which is exactly what this must never do. The refusal is carried by
+/// the printed JSON, not by the exit code.
+///
+/// Reading stdin cannot block the session for long: the CLI writes one small
+/// JSON object and closes the pipe.
+fn run_agent_guard(sketch_dir: &str) {
+    let mut stdin_body = String::new();
+    // A read error yields an empty body, which `guard_decision` denies —
+    // failing closed, same as unparseable input.
+    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin_body);
+    if let Some(deny) = agent::guard_decision(Path::new(sketch_dir), &stdin_body) {
+        println!("{deny}");
+    }
+}
+
+/// Intercept `--agent-guard <sketch_dir>` before Tauri ever starts.
+///
+/// Called first thing from `run()`. When Bancada is invoked as its own
+/// `PreToolUse` hook it must behave as a plain stdin/stdout filter — building
+/// a windowed app for every tool call would be absurd, and on a headless
+/// machine would fail outright.
+///
+/// Returns `true` when it handled the invocation and the caller must return.
+fn handle_agent_guard_argv() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(idx) = args.iter().position(|a| a == "--agent-guard") else {
+        return false;
+    };
+    match args.get(idx + 1) {
+        Some(sketch_dir) => run_agent_guard(sketch_dir),
+        // No dir to confine against — deny everything rather than start a GUI.
+        None => println!(
+            "{}",
+            agent::guard_decision(Path::new(""), "").unwrap_or_default()
+        ),
+    }
+    true
 }
 
 /// The MCP listener thread body: JSON-RPC over loopback HTTP, plus the one
@@ -1847,10 +2046,27 @@ fn mcp_listener_loop(
             continue;
         }
 
-        // Size cap *before* parsing: a request body is attacker-controlled
-        // in the sense that any local process can POST here, and
-        // `read_to_string` on an unbounded reader would otherwise let one
-        // of them push the whole app into swap.
+        // Size cap *before* any byte is read (I2). Checking the declared
+        // Content-Length first is what keeps teardown responsive: reading
+        // even a capped 1 MB from a client that dribbles one byte a minute
+        // parks this thread for as long as that client likes, and
+        // `unblock()` cannot interrupt a read — so the whole session's
+        // listener thread leaks, holding its `Arc<Server>`, `ArduinoCli` and
+        // `AppHandle` alive with it.
+        //
+        // Residual: a client that declares a small (or chunked, hence
+        // `None`) length and then dribbles those bytes still parks the
+        // thread. Bounding *that* needs a read timeout on the socket, which
+        // `tiny_http` does not expose on a `Request`. The realistic case
+        // this closes is a huge declared body; the residual case is
+        // loopback-only and needs a local process actively trying.
+        if request
+            .body_length()
+            .is_some_and(|declared| declared > MCP_MAX_BODY)
+        {
+            let _ = request.respond(tiny_http::Response::empty(413));
+            continue;
+        }
         let mut body = String::new();
         let read = request
             .as_reader()
@@ -1884,10 +2100,52 @@ fn mcp_listener_loop(
     }
 }
 
+/// What `verify` reports when its session was stopped before it could start.
+const VERIFY_CANCELLED: &str = "the agent session was stopped before this build could start";
+
 /// The `verify` tool: the same `cli.compile` path the toolbar's Verify
 /// button runs, with the same `build://line` stream, so agent builds show up
 /// in the Console for free.
+///
+/// ## Cancellation (C1)
+///
+/// `stop_agent_session` tears a session down with `Server::unblock()`, which
+/// only wakes a listener thread parked in `incoming_requests()`. A listener
+/// *inside* this function does not see it: before the fix it went on holding
+/// the `build_gate` (blocking every build in the app, user Verify included)
+/// and then emitted `verify_done` through the still-live `AppHandle`, into
+/// whatever session the panel was showing by then.
+///
+/// So: the cancel flag is checked **before taking the gate** and **before
+/// every emit**, and every synthetic event carries `session_pid` so the
+/// frontend can discard one that outlived its session even if it slips
+/// through the flag check by a hair.
+///
+/// Residual, and deliberately not fixed here: a compile that has *already
+/// started* runs to completion and keeps the gate until it does.
+/// `ArduinoCli::compile` is a blocking call with no abort handle, and giving
+/// it one means changing a signature `compile_sketch`/`upload_sketch` share.
+/// The window that used to be unbounded (a whole cold platform build, with
+/// leaking events at the end) is now "one in-flight build, silent".
 fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (String, bool) {
+    // Stamp every synthetic event with the session it belongs to, and drop
+    // it entirely once that session is gone.
+    let emit_agent = |mut payload: serde_json::Value| {
+        if ctx.is_cancelled() {
+            return;
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("pid".to_string(), serde_json::json!(ctx.session_pid));
+        }
+        emit("agent://event", payload);
+    };
+
+    // Before the gate, not after: a cancelled session must not take a lock
+    // that blocks every other build in the app for the length of a compile.
+    if ctx.is_cancelled() {
+        return (VERIFY_CANCELLED.to_string(), true);
+    }
+
     // Shared with compile_sketch/upload_sketch: an agent build must not race
     // a user build through the same arduino-cli build cache (risk R5).
     let _gate = match try_build_gate(&ctx.build_gate) {
@@ -1895,10 +2153,13 @@ fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (S
         Err(busy) => return (busy, true),
     };
 
-    emit(
-        "agent://event",
-        serde_json::json!({ "type": "verify_started" }),
-    );
+    // Re-checked after the gate: `try_build_gate` is non-blocking, but the
+    // stop could have landed between the two lines.
+    if ctx.is_cancelled() {
+        return (VERIFY_CANCELLED.to_string(), true);
+    }
+
+    emit_agent(serde_json::json!({ "type": "verify_started" }));
 
     let mut collected: Vec<OutputLine> = Vec::new();
     let run = ctx.cli.compile(
@@ -1907,8 +2168,14 @@ fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (S
         ctx.fqbn.as_deref(),
         &[],
         |line| {
-            if let Ok(value) = serde_json::to_value(&line) {
-                emit("build://line", value);
+            // Console lines are session-agnostic, so they get the same
+            // cancellation check rather than a pid stamp: a stopped
+            // session's build output has no business scrolling past in the
+            // Console under a new session's Verify.
+            if !ctx.is_cancelled() {
+                if let Ok(value) = serde_json::to_value(&line) {
+                    emit("build://line", value);
+                }
             }
             collected.push(line);
         },
@@ -1916,10 +2183,9 @@ fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (S
 
     match run {
         Ok(result) => {
-            emit(
-                "agent://event",
-                serde_json::json!({ "type": "verify_done", "success": result.success }),
-            );
+            emit_agent(serde_json::json!({
+                "type": "verify_done", "success": result.success
+            }));
             let summary =
                 agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
             let text = format!(
@@ -1934,10 +2200,7 @@ fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (S
             (text, false)
         }
         Err(e) => {
-            emit(
-                "agent://event",
-                serde_json::json!({ "type": "verify_done", "success": false }),
-            );
+            emit_agent(serde_json::json!({ "type": "verify_done", "success": false }));
             (format!("verify could not run: {e}"), true)
         }
     }
@@ -1970,23 +2233,135 @@ fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&st
     out
 }
 
-/// Tear a session down: close the writer channel, stop the listener, then
-/// kill and reap the child so no zombie is left behind.
+/// Tear a session down: cancel any in-flight verify, close the writer
+/// channel, stop the listener, then kill and reap the child so no zombie is
+/// left behind.
 fn stop_agent_session(session: AgentSession) {
     let AgentSession {
         child,
         stdin_tx,
         mcp_server,
         mcp_config_path,
+        settings_path,
+        verify_cancel,
         ..
     } = session;
+    // First, before anything else: `unblock()` below cannot reach a listener
+    // that is inside `run_verify`, and this flag can (C1).
+    verify_cancel.store(true, Ordering::SeqCst);
     drop(stdin_tx); // the writer thread's recv ends
     mcp_server.unblock(); // the listener's blocking incoming_requests() ends
     kill_child(child);
-    // Best-effort (F5 cleanup): a leftover temp file after a hard crash
-    // isn't worth failing shutdown over, but every normal stop/exit path
-    // reaches here and removes it.
+    // Best-effort (F5 cleanup): leftover temp files after a hard crash
+    // aren't worth failing shutdown over, but every normal stop/exit path
+    // reaches here and removes them.
     let _ = std::fs::remove_file(&mcp_config_path);
+    let _ = std::fs::remove_file(&settings_path);
+}
+
+/// Take and stop the live session **only if it is the one `pid` names**.
+///
+/// The teardown half of `should_stop_agent`, for callers that already know
+/// which session they are talking about: the stdout reader at EOF (D1) and
+/// the security backstop (A1/A2). Both run on a per-session thread that may
+/// well be outlived by a newer session, and neither must take that newer
+/// one down.
+fn stop_agent_session_by_pid(app: &AppHandle, pid: u32) {
+    let state = app.state::<AppState>();
+    let session = {
+        let mut guard = lock_agent(&state);
+        match guard.as_ref() {
+            Some(session) if session.child.id() == pid => guard.take(),
+            _ => None,
+        }
+    }; // guard dropped before the blocking kill/wait below
+    if let Some(session) = session {
+        stop_agent_session(session);
+    }
+}
+
+/// Emit a `security_alarm` for `pid`'s session and stop it (A1 backstop, A2).
+///
+/// `kind` is a stable machine-readable tag the panel switches on; `detail` is
+/// the human sentence naming the offending path or tool. The alarm is emitted
+/// *before* the teardown so it is on the wire before `agent://closed`.
+fn raise_agent_alarm(app: &AppHandle, pid: u32, kind: &str, detail: String) {
+    let _ = app.emit(
+        "agent://event",
+        serde_json::json!({
+            "type": "security_alarm",
+            "kind": kind,
+            "detail": detail,
+            "pid": pid,
+        }),
+    );
+    stop_agent_session_by_pid(app, pid);
+}
+
+/// The security backstop applied to one parsed stdout event (A1 layer 2, A2).
+///
+/// Returns `Some((kind, detail))` when the session must be stopped. Split out
+/// as a pure function so the policy is unit-testable without a Tauri app or a
+/// live CLI — the thread that calls it only knows how to emit and tear down.
+fn agent_event_alarm(
+    event: &agent::AgentEvent,
+    sketch_dir: &str,
+) -> Option<(&'static str, String)> {
+    match event {
+        // A2: the session must have exactly the tools this argv asked for.
+        agent::AgentEvent::System(system) if system.subtype == "init" => {
+            let extra = agent::unexpected_tools(&system.tools);
+            if extra.is_empty() {
+                return None;
+            }
+            Some((
+                "unexpected_tools",
+                format!(
+                    "This session was given tools Bancada did not ask for: {}. \
+                     Bancada's safety model only covers {}, so the session was stopped.",
+                    extra.join(", "),
+                    agent::EXPECTED_TOOLS.join(", ")
+                ),
+            ))
+        }
+        // A1 layer 2: an edit outside the project should already have been
+        // *refused* by the PreToolUse guard, so seeing one attempted here
+        // means either the guard did not run or the CLI stopped honouring
+        // it. Either way the boundary is not holding and the session ends.
+        agent::AgentEvent::Assistant(assistant) => {
+            for block in &assistant.message.content {
+                let agent::ContentBlock::ToolUse { name, input, .. } = block else {
+                    continue;
+                };
+                if !matches!(
+                    name.as_str(),
+                    "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+                ) {
+                    continue;
+                }
+                let file_path = input.get("file_path").and_then(|v| v.as_str());
+                let escapes = match file_path {
+                    Some(path) => !agent::path_is_confined(Path::new(sketch_dir), path),
+                    // A guarded tool with no readable file_path: the guard
+                    // hook denies it, and so does this.
+                    None => true,
+                };
+                if escapes {
+                    return Some((
+                        "path_escape",
+                        format!(
+                            "The assistant tried to {name} {} — outside the project \
+                             directory {sketch_dir}. The edit was refused and the \
+                             session was stopped.",
+                            file_path.unwrap_or("a file it did not name")
+                        ),
+                    ));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Mirrors `AgentProbe` in `src/agent/types.ts`, where `version` and `error`
@@ -2047,10 +2422,18 @@ fn claude_spawn_error(e: std::io::Error) -> String {
 
 /// Start an embedded agent session for `sketch_dir`.
 ///
-/// Spawns, in order: the loopback MCP listener (bound first, because its
-/// real port goes into the child's `--mcp-config`), the `claude` child with
-/// cwd = the sketch dir, and the three pipe threads. Nothing here blocks,
-/// so this stays a sync command like `start_monitor`.
+/// Order matters: bind the MCP listener first (its real port goes into the
+/// child's `--mcp-config`), write the two 0600 temp files, spawn the
+/// `claude` child, and only *then* start the four threads — the listener now
+/// needs the child's pid to stamp its synthetic events with (C1), which does
+/// not exist until the spawn returns. Binding before spawning is what makes
+/// that safe: the socket is already listening, so the child's first MCP
+/// connection queues in the kernel backlog until the listener thread accepts
+/// it a few microseconds later.
+///
+/// Returns the child pid so the frontend can tag the session it started and
+/// ignore events from a superseded one (FE-C1). Nothing here blocks, so this
+/// stays a sync command like `start_monitor`.
 #[tauri::command]
 fn agent_start(
     app: AppHandle,
@@ -2058,8 +2441,8 @@ fn agent_start(
     sketch_dir: String,
     profile: Option<String>,
     fqbn: Option<String>,
-) -> Result<(), String> {
-    let mut guard = state.agent.lock().unwrap();
+) -> Result<u32, String> {
+    let mut guard = lock_agent(&state);
     if let Some(existing) = guard.as_ref() {
         return Err(format!(
             "an agent session is already running for {}",
@@ -2068,24 +2451,13 @@ fn agent_start(
     }
 
     let (server, port) = bind_mcp_server()?;
-    let token = random_token();
-
-    // ---------- thread 1 of 4: MCP listener (owned clones, never locks agent)
-    let ctx = McpVerifyCtx {
-        token: token.clone(),
-        cli: state.cli.clone(),
-        sketch_dir: sketch_dir.clone(),
-        profile: profile.clone(),
-        fqbn: fqbn.clone(),
-        build_gate: state.build_gate.clone(),
+    let token = match random_token() {
+        Ok(token) => token,
+        Err(e) => {
+            server.unblock();
+            return Err(e);
+        }
     };
-    let listener_server = server.clone();
-    let listener_app = app.clone();
-    std::thread::spawn(move || {
-        mcp_listener_loop(listener_server, ctx, move |event, payload| {
-            let _ = listener_app.emit(event, payload);
-        });
-    });
 
     // F5: the bearer token goes into a 0600 temp file, not argv (see
     // write_mcp_config_file's doc comment) — write it before spawning so its
@@ -2097,10 +2469,27 @@ fn agent_start(
             return Err(e);
         }
     };
+    // A1: the PreToolUse confinement hook. A session that cannot be given
+    // its boundary must not start — this is the release-blocking guarantee,
+    // so failing to write the file is a hard error, not a downgrade.
+    let settings_path = match write_agent_settings_file(&sketch_dir) {
+        Ok(path) => path,
+        Err(e) => {
+            server.unblock();
+            let _ = std::fs::remove_file(&mcp_config_path);
+            return Err(e);
+        }
+    };
 
     let cfg = AgentCfg {
         mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
+        settings_path: settings_path.to_string_lossy().into_owned(),
         system_prompt_extra: system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref()),
+    };
+    let cleanup = |server: &Arc<tiny_http::Server>| {
+        server.unblock(); // never leave the listener thread parked
+        let _ = std::fs::remove_file(&mcp_config_path);
+        let _ = std::fs::remove_file(&settings_path);
     };
     let mut child = match std::process::Command::new("claude")
         .args(agent::agent_args(&cfg))
@@ -2114,14 +2503,13 @@ fn agent_start(
     {
         Ok(child) => child,
         Err(e) => {
-            server.unblock(); // never leave the listener thread parked
-            let _ = std::fs::remove_file(&mcp_config_path);
+            cleanup(&server);
             return Err(claude_spawn_error(e));
         }
     };
-    // Captured before stdin/stdout/stderr are taken so the stdout-reader
-    // thread (below) can stamp `agent://closed` with the pid it's about,
-    // for the frontend to relay to `agent_stop` (F4 guard above).
+    // Captured before stdin/stdout/stderr are taken: every thread below
+    // stamps its events with it, and the frontend uses it to tell this
+    // session's events from a superseded one's (F4, C1, FE-C1).
     let child_pid = child.id();
 
     // All three were just piped, so this cannot realistically fail — but if
@@ -2131,12 +2519,31 @@ fn agent_start(
         match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
             (Some(stdin), Some(stdout), Some(stderr)) => (stdin, stdout, stderr),
             _ => {
-                server.unblock();
+                cleanup(&server);
                 kill_child(child);
-                let _ = std::fs::remove_file(&mcp_config_path);
                 return Err("the agent's stdio pipes were unavailable".to_string());
             }
         };
+
+    // ---------- thread 1 of 4: MCP listener (owned clones, never locks agent)
+    let verify_cancel = Arc::new(AtomicBool::new(false));
+    let ctx = McpVerifyCtx {
+        token,
+        cli: state.cli.clone(),
+        sketch_dir: sketch_dir.clone(),
+        profile,
+        fqbn,
+        build_gate: state.build_gate.clone(),
+        session_pid: child_pid,
+        cancelled: verify_cancel.clone(),
+    };
+    let listener_server = server.clone();
+    let listener_app = app.clone();
+    std::thread::spawn(move || {
+        mcp_listener_loop(listener_server, ctx, move |event, payload| {
+            let _ = listener_app.emit(event, payload);
+        });
+    });
 
     // ---------- thread 2 of 4: stdin writer
     // The mutex is never held across a pipe write; commands hand lines here.
@@ -2151,6 +2558,7 @@ fn agent_start(
 
     // ---------- thread 3 of 4: stdout reader (stream-json)
     let app_out = app.clone();
+    let guard_dir = sketch_dir.clone();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
             // `parse_event` is the validity gate, but what reaches the
@@ -2158,9 +2566,16 @@ fn agent_start(
             // contract is the wire shape, not a re-modelled subset that
             // would silently drop fields core doesn't happen to name.
             match agent::parse_event(&line) {
-                Ok(_) => {
+                Ok(event) => {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                         let _ = app_out.emit("agent://event", value);
+                    }
+                    // Security backstop (A1 layer 2, A2), *after* the event
+                    // itself is emitted so the panel can show what triggered
+                    // the alarm right above it.
+                    if let Some((kind, detail)) = agent_event_alarm(&event, &guard_dir) {
+                        raise_agent_alarm(&app_out, child_pid, kind, detail);
+                        break; // the child is gone; stop reading its pipe
                     }
                 }
                 // The only `Err` case is a line that isn't JSON at all.
@@ -2176,6 +2591,14 @@ fn agent_start(
             "agent://closed",
             serde_json::json!({ "reason": "the agent process ended", "pid": child_pid }),
         );
+        // D1: reap our own session here rather than relying on the frontend
+        // round-tripping `agent_stop(pid)` back — that call was
+        // fire-and-forget (`.catch(() => {})`), so a closed window, a
+        // navigation, or a rejected invoke used to leave the listener
+        // thread, the MCP server and both 0600 temp files behind for the
+        // lifetime of the app. Pid-scoped, so a session that has already
+        // been superseded takes nothing with it.
+        stop_agent_session_by_pid(&app_out, child_pid);
     });
 
     // ---------- thread 4 of 4: stderr drain
@@ -2197,8 +2620,10 @@ fn agent_start(
         mcp_server: server,
         sketch_dir,
         mcp_config_path,
+        settings_path,
+        verify_cancel,
     });
-    Ok(())
+    Ok(child_pid)
 }
 
 /// Queue a user message for the child's stdin.
@@ -2207,7 +2632,7 @@ fn agent_send(state: State<'_, AppState>, text: String) -> Result<(), String> {
     // Clone the sender out and drop the guard *before* sending: no write to
     // the child ever happens while the agent mutex is held.
     let tx = {
-        let guard = state.agent.lock().unwrap();
+        let guard = lock_agent(&state);
         let Some(session) = guard.as_ref() else {
             return Err("the agent is not running".to_string());
         };
@@ -2229,7 +2654,7 @@ fn agent_send(state: State<'_, AppState>, text: String) -> Result<(), String> {
 #[tauri::command]
 fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let (tx, pid) = {
-        let guard = state.agent.lock().unwrap();
+        let guard = lock_agent(&state);
         let Some(session) = guard.as_ref() else {
             return Err("the agent is not running".to_string());
         };
@@ -2239,20 +2664,10 @@ fn agent_interrupt(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
 
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(2));
-        let state = app.state::<AppState>();
-        let session = {
-            let mut guard = state.agent.lock().unwrap();
-            // Only kill the session this interrupt was aimed at: two seconds
-            // is long enough for the user to have stopped it and started a
-            // new one, which must not be collateral damage.
-            match guard.as_ref() {
-                Some(session) if session.child.id() == pid => guard.take(),
-                _ => None,
-            }
-        }; // guard dropped before the blocking kill/wait below
-        if let Some(session) = session {
-            stop_agent_session(session);
-        }
+        // Only kill the session this interrupt was aimed at: two seconds is
+        // long enough for the user to have stopped it and started a new one,
+        // which must not be collateral damage.
+        stop_agent_session_by_pid(&app, pid);
     });
     Ok(())
 }
@@ -2284,7 +2699,7 @@ fn should_stop_agent(requested_pid: Option<u32>, live_pid: Option<u32>) -> bool 
 #[tauri::command]
 fn agent_stop(state: State<'_, AppState>, pid: Option<u32>) -> Result<(), String> {
     let session = {
-        let mut guard = state.agent.lock().unwrap();
+        let mut guard = lock_agent(&state);
         let live_pid = guard.as_ref().map(|s| s.child.id());
         if !should_stop_agent(pid, live_pid) {
             return Ok(());
@@ -2301,6 +2716,12 @@ fn agent_stop(state: State<'_, AppState>, pid: Option<u32>) -> Result<(), String
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything else: Bancada re-invokes *itself* as the embedded
+    // agent's `PreToolUse` confinement hook (A1). In that role it is a plain
+    // stdin/stdout filter, not a windowed app.
+    if handle_agent_guard_argv() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -2416,7 +2837,7 @@ pub fn run() {
                 }
                 // ---------- agent ---------- same teardown as `agent_stop`:
                 // kill and reap the child rather than orphan it.
-                let agent_session = state.agent.lock().unwrap().take();
+                let agent_session = lock_agent(&state).take();
                 if let Some(session) = agent_session {
                     stop_agent_session(session);
                 }
@@ -2486,9 +2907,22 @@ mod tests {
         }
     }
 
+    /// The pid every test listener stamps its synthetic events with, unless
+    /// the test cares about a specific one.
+    const TEST_PID: u32 = 4242;
+
     fn start_listener(cli: ArduinoCli, sketch_dir: &str, gate: Arc<Mutex<()>>) -> TestListener {
+        start_listener_cancellable(cli, sketch_dir, gate, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn start_listener_cancellable(
+        cli: ArduinoCli,
+        sketch_dir: &str,
+        gate: Arc<Mutex<()>>,
+        cancelled: Arc<AtomicBool>,
+    ) -> TestListener {
         let (server, port) = bind_mcp_server().expect("bind loopback");
-        let token = random_token();
+        let token = random_token().expect("entropy");
         let events: Events = Arc::new(Mutex::new(Vec::new()));
 
         let ctx = McpVerifyCtx {
@@ -2498,6 +2932,8 @@ mod tests {
             profile: None,
             fqbn: None,
             build_gate: gate,
+            session_pid: TEST_PID,
+            cancelled,
         };
         let thread_server = server.clone();
         let thread_events = events.clone();
@@ -2827,6 +3263,108 @@ mod tests {
         );
     }
 
+    // ---------- C1: a stopped session's verify ----------
+
+    /// The core of C1: `Server::unblock()` cannot reach a listener thread
+    /// that is *inside* `run_verify`, so a stopped session used to go on
+    /// holding the build gate for a whole compile and then emit `verify_done`
+    /// into the next session's UI. A cancelled context must not emit at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_context_never_emits_and_never_takes_the_build_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = gate();
+        let cancelled = Arc::new(AtomicBool::new(true)); // stopped before the call
+        let l = start_listener_cancellable(
+            stub_cli(&dir, "echo 'should never run'\nexit 0"),
+            "/nowhere",
+            gate.clone(),
+            cancelled,
+        );
+
+        let (status, _, body) = post(&l, CALL_VERIFY);
+        assert_eq!(status, 200);
+        assert!(tool_is_error(&body), "{body}");
+        assert!(tool_text(&body).contains(VERIFY_CANCELLED), "{body}");
+        assert!(
+            l.event_types().is_empty(),
+            "a cancelled session must emit nothing: {:?}",
+            l.event_types()
+        );
+        assert!(
+            l.build_lines().is_empty(),
+            "nor may its build output scroll past in the Console"
+        );
+        // The gate is the app-wide one: a cancelled verify holding it would
+        // block the user's own Verify button for the length of a compile.
+        assert!(
+            gate.try_lock().is_ok(),
+            "a cancelled verify must not be holding the build gate"
+        );
+    }
+
+    /// The other half of C1: an event that *does* get emitted carries the
+    /// session pid, so the frontend can discard one that outlived its
+    /// session even if it slips past the flag check.
+    #[cfg(unix)]
+    #[test]
+    fn verify_events_are_stamped_with_the_session_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+        let (_, _, _) = post(&l, CALL_VERIFY);
+
+        let events = l.events.lock().unwrap();
+        let synthetic: Vec<&serde_json::Value> = events
+            .iter()
+            .filter(|(name, _)| name == "agent://event")
+            .map(|(_, v)| v)
+            .collect();
+        assert!(!synthetic.is_empty());
+        for event in synthetic {
+            assert_eq!(
+                event["pid"], TEST_PID,
+                "every synthetic agent event must name its session: {event}"
+            );
+        }
+    }
+
+    /// Cancellation arriving mid-compile: the compile itself cannot be
+    /// aborted (documented residual in `run_verify`), but nothing from it
+    /// may reach the UI once the session is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_verify_cancelled_during_the_compile_emits_no_done_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        // The stub sleeps long enough for this test to cancel mid-build.
+        let l = start_listener_cancellable(
+            stub_cli(&dir, "sleep 1\necho done\nexit 0"),
+            "/nowhere",
+            gate(),
+            cancelled.clone(),
+        );
+
+        let port = l.port;
+        let auth = l.auth();
+        let caller = std::thread::spawn(move || http(port, "POST", Some(&auth), Some(CALL_VERIFY)));
+        // Let verify_started land, then stop the session mid-compile.
+        std::thread::sleep(Duration::from_millis(300));
+        cancelled.store(true, Ordering::SeqCst);
+        let (status, _, _) = caller.join().unwrap();
+        assert_eq!(status, 200);
+
+        let types = l.event_types();
+        assert!(
+            types.contains(&"verify_started".to_string()),
+            "the build had already started: {types:?}"
+        );
+        assert!(
+            !types.contains(&"verify_done".to_string()),
+            "a stopped session's verify_done must not reach the next session's \
+             panel: {types:?}"
+        );
+    }
+
     // ---------- build gate ----------
 
     #[test]
@@ -2891,8 +3429,8 @@ mod tests {
 
     #[test]
     fn tokens_are_hex_and_do_not_repeat() {
-        let a = random_token();
-        let b = random_token();
+        let a = random_token().expect("entropy");
+        let b = random_token().expect("entropy");
         assert_ne!(a, b);
         assert!(a.len() >= 32, "{a}");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
@@ -2939,7 +3477,7 @@ mod tests {
         use std::os::unix::fs::OpenOptionsExt;
         let path = std::env::temp_dir().join(format!(
             "bancada-agent-mcp-preexisting-{}.json",
-            random_token()
+            random_token().expect("entropy")
         ));
         std::fs::write(&path, "not agent config").unwrap();
 
@@ -2955,6 +3493,256 @@ mod tests {
             "a pre-existing file at the target path must be left untouched"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------- A1: the --settings confinement hook ----------
+
+    /// The hook file is the boundary. If it stops naming this binary, or
+    /// stops matching the write tools, the session silently loses its
+    /// confinement — with nothing else in the app to notice.
+    #[test]
+    fn the_settings_file_registers_this_binary_as_the_pretooluse_guard() {
+        let path = write_agent_settings_file("/home/me/Blink").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+        let entries = parsed["hooks"]["PreToolUse"].as_array().expect("an array");
+        assert_eq!(entries.len(), 1);
+        let matcher = entries[0]["matcher"].as_str().unwrap();
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert!(matcher.contains(tool), "{matcher} must match {tool}");
+        }
+        let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(entries[0]["hooks"][0]["type"], "command");
+        assert!(
+            command.contains("--agent-guard"),
+            "the hook must re-invoke Bancada's own guard: {command}"
+        );
+        assert!(
+            command.contains("/home/me/Blink"),
+            "the guard must be told which directory to confine to: {command}"
+        );
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            command.contains(exe.to_str().unwrap()),
+            "the hook command must be this very binary, not a generated \
+             script: {command}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_settings_file_is_0600() {
+        // It names a command the CLI will *execute*: a world-writable file at
+        // a predictable path would be a way to make Bancada run someone
+        // else's command.
+        use std::os::unix::fs::PermissionsExt;
+        let path = write_agent_settings_file("/nowhere").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The `command` string is shell-parsed by the CLI. A project called
+    /// `My Sketch` must not become two arguments, and one called
+    /// `'; rm -rf ~; '` must not become a second command. `sh` itself is the
+    /// ground truth here rather than a hand-written expectation.
+    #[cfg(unix)]
+    #[test]
+    fn a_sketch_dir_with_shell_metacharacters_stays_one_argument() {
+        let nasty = "/tmp/My Sketch's; touch /tmp/bancada-quoting-pwned; dir";
+        let round_trip = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {}", shell_quote(nasty)))
+            .output()
+            .expect("run sh");
+        assert_eq!(
+            String::from_utf8_lossy(&round_trip.stdout),
+            nasty,
+            "shell_quote must round-trip a path containing quotes and \
+             semicolons as exactly one word"
+        );
+        assert!(
+            !Path::new("/tmp/bancada-quoting-pwned").exists(),
+            "the embedded `touch` must never have run"
+        );
+        // ... and the real settings file must use that quoting.
+        let path = write_agent_settings_file(nasty).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let command = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(command.contains(r"'\''"), "unquoted sketch dir: {command}");
+    }
+
+    #[test]
+    fn shell_quote_neutralises_quotes_and_separators() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("with space"), "'with space'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(
+            shell_quote("a'; touch pwned; '"),
+            r"'a'\''; touch pwned; '\'''"
+        );
+    }
+
+    /// The `bancada` binary as built by this workspace, which is what the
+    /// hook command actually names — *not* `current_exe()`, which under
+    /// `cargo test` is the libtest harness and would never reach `run()`.
+    /// `cargo test` builds the package's bin target, so this normally
+    /// exists; the test skips rather than fails if a future layout moves it.
+    fn bancada_binary() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // target/debug/deps/bancada-<hash> -> target/debug/bancada
+        let path = exe.parent()?.parent()?.join("bancada");
+        path.exists().then_some(path)
+    }
+
+    /// The guard entry point, exercised the way the CLI drives it: JSON on
+    /// stdin, a decision on stdout, always exit 0. Run as a real subprocess
+    /// so this covers `handle_agent_guard_argv` and the process contract —
+    /// including that the binary does *not* try to open a window — and not
+    /// just `guard_decision`, which core already unit-tests.
+    #[cfg(unix)]
+    #[test]
+    fn the_guard_subprocess_denies_an_out_of_project_write_and_exits_zero() {
+        let Some(exe) = bancada_binary() else {
+            eprintln!("skipped: no built `bancada` binary next to the test harness");
+            return;
+        };
+        let sketch = tempfile::tempdir().unwrap();
+
+        let deny = run_guard_subprocess(
+            &exe,
+            &sketch.path().to_string_lossy(),
+            r#"{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd"}}"#,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(deny.trim()).expect("a JSON decision on stdout");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{deny}"
+        );
+
+        let allow = run_guard_subprocess(
+            &exe,
+            &sketch.path().to_string_lossy(),
+            r#"{"tool_name":"Write","tool_input":{"file_path":"Blink.ino"}}"#,
+        );
+        assert!(
+            allow.trim().is_empty(),
+            "an in-project edit must fall through silently, got {allow:?}"
+        );
+    }
+
+    /// A hook that fails is "log and continue" to the CLI — i.e. fail *open*.
+    /// So the guard must never exit non-zero, even on garbage input.
+    #[cfg(unix)]
+    #[test]
+    fn the_guard_subprocess_denies_garbage_rather_than_failing() {
+        let Some(exe) = bancada_binary() else {
+            eprintln!("skipped: no built `bancada` binary next to the test harness");
+            return;
+        };
+        let sketch = tempfile::tempdir().unwrap();
+        let out = run_guard_subprocess(&exe, &sketch.path().to_string_lossy(), "not json");
+        assert!(out.contains("\"deny\""), "{out}");
+    }
+
+    /// Run `<exe> --agent-guard <dir>`, feeding `stdin`, and return its
+    /// stdout. Asserts the exit status is 0.
+    #[cfg(unix)]
+    fn run_guard_subprocess(exe: &Path, sketch_dir: &str, stdin_body: &str) -> String {
+        let mut child = std::process::Command::new(exe)
+            .arg("--agent-guard")
+            .arg(sketch_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the guard");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin_body.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("wait on the guard");
+        assert!(
+            out.status.success(),
+            "the guard must always exit 0 — a failing hook is 'log and \
+             continue' to the CLI, i.e. fail open. status: {:?}",
+            out.status
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // ---------- A1 layer 2 / A2: the stdout backstop ----------
+
+    fn event(line: &str) -> agent::AgentEvent {
+        agent::parse_event(line).unwrap()
+    }
+
+    #[test]
+    fn the_backstop_stops_a_session_offered_tools_bancada_did_not_ask_for() {
+        let line = r#"{"type":"system","subtype":"init","tools":["Read","Write","Bash","Skill"]}"#;
+        let (kind, detail) = agent_event_alarm(&event(line), "/s").expect("an alarm");
+        assert_eq!(kind, "unexpected_tools");
+        assert!(detail.contains("Bash"), "{detail}");
+        assert!(detail.contains("Skill"), "{detail}");
+    }
+
+    #[test]
+    fn the_backstop_is_quiet_for_the_expected_tool_set() {
+        let line = r#"{"type":"system","subtype":"init","tools":["Read","Edit","Write","Glob","Grep","mcp__bancada__verify"]}"#;
+        assert!(agent_event_alarm(&event(line), "/s").is_none());
+        // A non-init system line carries no tools and must not alarm.
+        let status = r#"{"type":"system","subtype":"status"}"#;
+        assert!(agent_event_alarm(&event(status), "/s").is_none());
+    }
+
+    #[test]
+    fn the_backstop_stops_a_session_attempting_an_out_of_project_write() {
+        let sketch = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"/etc/passwd","content":"x"}}]}}"#;
+        let (kind, detail) =
+            agent_event_alarm(&event(line), &sketch.path().to_string_lossy()).expect("an alarm");
+        assert_eq!(kind, "path_escape");
+        assert!(detail.contains("/etc/passwd"), "{detail}");
+    }
+
+    #[test]
+    fn the_backstop_lets_an_in_project_edit_through() {
+        let sketch = tempfile::tempdir().unwrap();
+        let dir = sketch.path().to_string_lossy().into_owned();
+        for path in ["Blink.ino", "src/new.h"] {
+            let line = format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Edit","input":{{"file_path":"{path}"}}}}]}}}}"#
+            );
+            assert!(
+                agent_event_alarm(&event(&line), &dir).is_none(),
+                "{path} is inside the project"
+            );
+        }
+        // A Read anywhere is not this check's business — the agent is allowed
+        // to read outside the project (that is what `--allowedTools Read` is),
+        // and alarming on it would stop sessions for looking at a library.
+        let read = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/usr/include/stdio.h"}}]}}"#;
+        assert!(agent_event_alarm(&event(read), &dir).is_none());
+    }
+
+    #[test]
+    fn the_backstop_fails_closed_on_a_write_with_no_file_path() {
+        let sketch = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"content":"x"}}]}}"#;
+        assert!(
+            agent_event_alarm(&event(line), &sketch.path().to_string_lossy()).is_some(),
+            "a guarded tool whose path cannot be read must alarm, not pass"
+        );
     }
 
     #[test]
@@ -3003,27 +3791,39 @@ mod tests {
 
     /// F5 end-to-end: `stop_agent_session` — the real cleanup path, not just
     /// `write_mcp_config_file` in isolation — must remove the temp file, or
-    /// every session leaks one.
+    /// every session leaks one. The `--settings` file (A1) rides the same
+    /// path and would leak the same way.
     #[cfg(unix)]
     #[test]
-    fn stop_agent_session_removes_the_mcp_config_file() {
+    fn stop_agent_session_removes_both_temp_files_and_cancels_verify() {
         let (server, port) = bind_mcp_server().unwrap();
         let mcp_config_path = write_mcp_config_file(port, "t").unwrap();
+        let settings_path = write_agent_settings_file("/nowhere").unwrap();
         assert!(mcp_config_path.exists());
+        assert!(settings_path.exists());
         let child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn sleep");
         let (stdin_tx, _stdin_rx) = std::sync::mpsc::channel::<String>();
+        let verify_cancel = Arc::new(AtomicBool::new(false));
         let session = AgentSession {
             child,
             stdin_tx,
             mcp_server: server,
             sketch_dir: "/nowhere".to_string(),
             mcp_config_path: mcp_config_path.clone(),
+            settings_path: settings_path.clone(),
+            verify_cancel: verify_cancel.clone(),
         };
         stop_agent_session(session);
         assert!(!mcp_config_path.exists());
+        assert!(!settings_path.exists());
+        assert!(
+            verify_cancel.load(Ordering::SeqCst),
+            "teardown must cancel an in-flight verify: unblock() cannot reach \
+             a listener thread that is inside run_verify (C1)"
+        );
     }
 
     // ---------- live round trip (opt-in) ----------
@@ -3059,8 +3859,10 @@ mod tests {
         let l = start_listener(cli, &sketch.path().to_string_lossy(), gate());
 
         let mcp_config_path = write_mcp_config_file(l.port, &l.token).unwrap();
+        let settings_path = write_agent_settings_file(&sketch.path().to_string_lossy()).unwrap();
         let cfg = AgentCfg {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
+            settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(
                 &sketch.path().to_string_lossy(),
                 Some("test"),
@@ -3100,6 +3902,7 @@ mod tests {
         }
         let _ = child.wait();
         let _ = std::fs::remove_file(&mcp_config_path);
+        let _ = std::fs::remove_file(&settings_path);
 
         assert!(
             saw_sentinel,
@@ -3172,7 +3975,7 @@ mod tests {
         let sketch_dir = dir.to_string_lossy().into_owned();
 
         let (server, port) = bind_mcp_server().expect("bind loopback");
-        let token = random_token();
+        let token = random_token().expect("entropy");
         let events: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let ctx = McpVerifyCtx {
             token: token.clone(),
@@ -3181,6 +3984,8 @@ mod tests {
             profile: Some(profile.clone()),
             fqbn: None,
             build_gate: gate(),
+            session_pid: TEST_PID,
+            cancelled: Arc::new(AtomicBool::new(false)),
         };
         let thread_server = server.clone();
         let thread_events = events.clone();
@@ -3194,8 +3999,10 @@ mod tests {
         });
 
         let mcp_config_path = write_mcp_config_file(port, &token).unwrap();
+        let settings_path = write_agent_settings_file(&sketch_dir).unwrap();
         let cfg = AgentCfg {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
+            settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(&sketch_dir, Some(&profile), None),
         };
         let mut child = std::process::Command::new("claude")
@@ -3249,6 +4056,7 @@ mod tests {
         }
         let _ = child.wait();
         let _ = std::fs::remove_file(&mcp_config_path);
+        let _ = std::fs::remove_file(&settings_path);
         server.unblock();
         let _ = join.join();
 
