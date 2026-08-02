@@ -44,6 +44,10 @@ pip install --user esptool
 # git (>= 2.25 for sparse checkout) — used to fetch pinned libraries from a repo
 sudo zypper install git
 
+# claude CLI (for the AI Assistant panel) — resolved from PATH like the two
+# above; install it, then run `claude` once and follow the login prompt
+npm install -g @anthropic-ai/claude-code
+
 # Serial port access
 sudo usermod -aG dialout $USER   # check group with: ls -l /dev/ttyACM0
 ```
@@ -148,6 +152,82 @@ scaffolded library, a fetched library and a newly created project actually
   FQBNs it has been built for, and when it was first and last seen
 - Sidebar split into **Software** (files, libraries) and **Hardware** (boards,
   fleet) groups, drag-resizable and collapsible to a rail
+- **AI Assistant** panel — a bottom-panel **Assistant** tab where a `claude`
+  CLI session (spawned per project, scoped to the open sketch) reads/edits
+  your sketch's files, runs Verify, reads the compiler errors, and iterates
+  until the build passes. Edits show up as diff cards and **auto-apply
+  immediately** — no per-edit approval step. Writes are confined to the
+  sketch directory as in-process CLI policy (not an OS sandbox); reads are
+  not confined. See [AI Assistant panel](#ai-assistant-panel) below
+
+## AI Assistant panel
+
+A bottom-panel **Assistant** tab where you chat with a **Claude** agent that
+can read and edit the open sketch's files, run **Verify** through a
+bancada-provided tool, read the compiler errors, and iterate until the build
+passes. First slice of an AI-assisted-IDE direction — no upload/serial tools
+yet (roadmap).
+
+Bancada drives this the same way it drives its other engines: it spawns the
+**`claude` CLI** as a supervised child process (`--input-format stream-json
+--output-format stream-json`) and talks to it over stdio. No bundled SDK, no
+sidecar.
+
+**Prerequisites** — the **`claude` CLI** on PATH, signed in (`claude` once,
+same login as Claude Code). Resolved from PATH exactly like arduino-cli and
+esptool — no bundled copy, no separate API key to configure. If it isn't
+found, the panel shows install/login guidance instead of a raw error.
+
+**Using it** — open a sketch, switch to the **Assistant** tab, and send a
+message ("make this build", "add a debounce to the button read", …). The
+agent replies with streamed text plus cards for what it does: **Edit/Write**
+cards show a unified diff of the change **after it has already been
+applied** (no approval step in between), and **Verify** cards mirror
+`arduino-cli compile` (pass/fail, exit code), with the same output also
+streaming to the existing **Build** console. The agent keeps editing and
+re-verifying on its own until the build passes or it gives up. **Stop**
+interrupts the current turn; **New session** ends the child process and
+clears the transcript.
+
+**What it can and can't do** — the embedded session's built-in tools are
+narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep` (via `--tools`, which
+genuinely removes tools from the CLI, unlike `--disallowedTools` alone),
+plus one MCP tool, `verify`, that runs the same compile path as the
+**Verify** button and never runs `-u` (upload) — it only compiles. It
+cannot run shell commands, fetch URLs, search the web, or touch
+upload/serial.
+
+**Cost** — each completed turn's cost and cumulative turn count appear in
+the panel footer (`$0.0123 · 4 turns`), pulled straight from what the
+`claude` CLI reports.
+
+**Safety** — edits **auto-apply**, with no per-edit approval prompt. If the
+open project has no `.git`, the panel shows a persistent warning (`⚠ not
+under git`), because there is no undo path for an agent's edit without
+version control; commit or initialize git before trusting it with anything
+you can't easily retype.
+
+Writes are refused outside the sketch directory, and for the project's
+`.claude/`, `.git/`, `.mcp.json` (plus your own `~/.claude/`, shell rc
+files, `/etc/`, and similar), by `permissions.deny` rules in a `--settings`
+policy file Bancada writes **outside the project tree** — a policy the
+agent cannot edit — anchoring a `PreToolUse` guard hook that adds the
+subtree-containment check a denylist alone can't express. If a project's
+own settings already disable hooks (`disableAllHooks`), Bancada refuses to
+*start* the session rather than run one whose guard hook is known in
+advance not to fire. A second, independent check re-inspects every edit the
+agent reports and the session's tool list, and stops the session outright
+if either drifted from what Bancada expects.
+
+This is **in-process policy enforced by the `claude` CLI's own permission
+engine — not an OS-level sandbox or container**. **Reads are not confined
+at all**: the agent can read anything your account can, including SSH keys
+and credential files; only writes are policed. The embedded session also
+still loads your own Claude Code configuration (hooks, plugins, skills) —
+the flags that would suppress that also break login or disable the
+`verify` tool — so a hostile hook already present in your personal
+configuration before the session starts is out of scope for this to catch.
+Bancada can only stop the agent from *installing* a new one.
 
 ## Roadmap ideas
 
