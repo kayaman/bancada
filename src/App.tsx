@@ -133,11 +133,9 @@ export default function App() {
   monitorOnRef.current = monitorOn;
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
   // tab, cleared when that tab is opened; a group button carries the dot for
-  // its hidden tabs. After flashing, the first serial line inside the
-  // auto-open window pulls the Serial Monitor tab forward.
+  // its hidden tabs.
   const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
   const bottomTabRef = useRef<BottomTab>("build");
-  const autoOpenSerialUntilRef = useRef(0);
 
   // ui — sidebar hierarchy: a Software/Hardware group switcher over per-group
   // sub-tabs; each group remembers its last-used tab.
@@ -307,13 +305,8 @@ export default function App() {
       }),
       api.onSerialLine((l) => {
         setSerialLines((prev) => appendCapped(prev, l));
-        if (Date.now() < autoOpenSerialUntilRef.current) {
-          // fresh output from a just-flashed sketch — bring the monitor forward
-          autoOpenSerialUntilRef.current = 0;
-          openBottomTab("serial");
-        } else if (bottomTabRef.current !== "serial") {
+        if (bottomTabRef.current !== "serial")
           setUnseen((u) => ({ ...u, serial: true }));
-        }
       }),
       api.onSerialClosed(() => setMonitorOn(false)),
       api.onPortsChanged(() => {
@@ -684,11 +677,13 @@ export default function App() {
           : "Build or upload failed — see the Build console",
         !r.success,
       );
-      // Resume capturing (native-USB boards re-enumerate after flashing,
-      // so give the port a moment to come back). If the fresh sketch prints
-      // anything within the window, the Serial Monitor tab opens itself.
+      // Straight to debugging: the monitor tab opens now, and capture
+      // resumes after the settle below (native-USB boards re-enumerate
+      // after flashing, so give the port a moment to come back). A silent
+      // sketch used to leave the user on the Build console with the
+      // monitor secretly running.
       if (r.success) {
-        autoOpenSerialUntilRef.current = Date.now() + 15000;
+        openBottomTab("serial");
         // The FQBN this board was actually built for, for its fleet record.
         const usedFqbn =
           target.fqbn ??
