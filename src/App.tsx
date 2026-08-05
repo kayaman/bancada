@@ -1184,7 +1184,7 @@ export default function App() {
             }}
           />
         )}
-        <div className="panel-tabs">
+        <div className="bottom-groups">
           {(Object.keys(GROUP_TABS) as BottomGroup[]).map((g) => (
             <button
               key={g}
@@ -1211,21 +1211,26 @@ export default function App() {
               )}
             </button>
           ))}
-          {GROUP_TABS[bottomGroup].length > 1 && (
-            <>
-              <div className="tab-sep" />
-              {GROUP_TABS[bottomGroup].map((t) => (
-                <button
-                  key={t}
-                  className={bottomTab === t ? "tab active" : "tab"}
-                  onClick={() => openBottomTab(t)}
-                >
-                  {TAB_LABEL[t]}
-                  {unseen[t] && <span className="tab-dot">●</span>}
-                </button>
-              ))}
-            </>
-          )}
+          <div className="spacer" />
+          <button
+            className="btn small icon"
+            onClick={() => setBottomMax((m) => !m)}
+            title={bottomMax ? "Restore panel" : "Maximize panel"}
+          >
+            {bottomMax ? "❐" : "⛶"}
+          </button>
+        </div>
+        <div className="panel-tabs">
+          {GROUP_TABS[bottomGroup].map((t) => (
+            <button
+              key={t}
+              className={bottomTab === t ? "tab active" : "tab"}
+              onClick={() => openBottomTab(t)}
+            >
+              {TAB_LABEL[t]}
+              {unseen[t] && <span className="tab-dot">●</span>}
+            </button>
+          ))}
           <div className="spacer" />
           {bottomTab === "serial" && (
             <>
@@ -1246,13 +1251,6 @@ export default function App() {
               </button>
             </>
           )}
-          <button
-            className="btn small icon"
-            onClick={() => setBottomMax((m) => !m)}
-            title={bottomMax ? "Restore panel" : "Maximize panel"}
-          >
-            {bottomMax ? "❐" : "⛶"}
-          </button>
         </div>
         {bottomTab === "build" && (
           <Console lines={buildLines} onClear={() => setBuildLines([])} />

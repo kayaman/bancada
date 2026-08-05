@@ -464,8 +464,23 @@ body {
   vertical-align: 1px;
 }
 
-/* bottom-panel group buttons: same state language as .side-group-btn but
-   sized for a single shared row (group buttons | sub-tabs | controls) */
+/* bottom-panel group row: panel-level tier (groups + maximize) over the
+   per-group sub-tab row — the sidebar's .side-groups/.panel-tabs pattern */
+.bottom-groups {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 2px;
+  background: var(--bg-panel);
+}
+
+/* Emoji tab labels and the serial baud <select> nudge the sub-tab row's
+   natural height between 30 and 34px; pin it so switching groups never
+   moves the content edge. */
+.bottom .panel-tabs {
+  min-height: 34px;
+}
+
 .bottom-group-btn {
   flex: none;
   background: none;
@@ -496,13 +511,6 @@ body {
 .bottom-group-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-}
-
-.tab-sep {
-  width: 1px;
-  align-self: stretch;
-  margin: 2px 4px;
-  background: var(--border);
 }
 
 /* ---------- file tree ---------- */
