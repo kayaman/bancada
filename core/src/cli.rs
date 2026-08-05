@@ -836,6 +836,56 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn lib_list_unwraps_each_entry_to_its_library() {
+        with_stub(
+            r#"echo '{"installed_libraries":[{"library":{"name":"PubSubClient","version":"2.8.0"}}]}'"#,
+            |s| {
+                let libs = s.cli.lib_list().unwrap();
+                assert_eq!(libs.len(), 1);
+                assert_eq!(libs[0].name, "PubSubClient");
+                assert_eq!(libs[0].version, "2.8.0");
+                assert!(s.argv().contains("lib list --json"), "{}", s.argv());
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lib_search_passes_the_query_and_returns_the_libraries() {
+        with_stub(
+            r#"echo '{"libraries":[{"name":"ArduinoJson","latest":{"version":"7.4.3"}}]}'"#,
+            |s| {
+                let libs = s.cli.lib_search("json").unwrap();
+                assert_eq!(libs.len(), 1);
+                assert_eq!(libs[0].name, "ArduinoJson");
+                assert!(s.argv().contains("lib search json --json"), "{}", s.argv());
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_listall_flattens_installed_boards_with_fqbns() {
+        // One valid board, one without an fqbn, one on an uninstalled
+        // platform — only the first survives.
+        with_stub(
+            r#"echo '{"boards":[
+              {"name":"ESP32S3 Dev Module","fqbn":"esp32:esp32:esp32s3","platform":{"metadata":{"id":"esp32:esp32"},"release":{"name":"esp32","installed":true}}},
+              {"name":"No FQBN","fqbn":"","platform":{"metadata":{"id":"x:y"},"release":{"name":"x","installed":true}}},
+              {"name":"Not Installed","fqbn":"a:b:c","platform":{"metadata":{"id":"a:b"},"release":{"name":"a","installed":false}}}
+            ]}'"#,
+            |s| {
+                let boards = s.cli.board_listall().unwrap();
+                assert_eq!(boards.len(), 1);
+                assert_eq!(boards[0].fqbn, "esp32:esp32:esp32s3");
+                assert_eq!(boards[0].platform_id, "esp32:esp32");
+                assert!(s.argv().contains("board listall --json"), "{}", s.argv());
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn board_listall_drops_uninstalled_and_fqbn_less_entries() {
         // The flattening is where a picker could silently offer a board that
         // `profile create` then refuses, so the filter is worth pinning.

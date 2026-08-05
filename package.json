@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "coverage": "cargo llvm-cov -p bancada-core --summary-only",
     "coverage:html": "cargo llvm-cov -p bancada-core --html --open",
     "coverage:full": "cargo llvm-cov -p bancada-core --summary-only -- --include-ignored"
@@ -30,6 +31,7 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.5.3",
     "vite": "^5.4.0",
     "vitest": "^2.1.9"

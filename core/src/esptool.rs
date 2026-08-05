@@ -21,7 +21,14 @@ pub struct ChipInfo {
 /// Locate a working esptool entry point. Modern installs ship `esptool`,
 /// older pip installs ship `esptool.py`.
 fn find_esptool() -> Result<String> {
-    for candidate in ["esptool", "esptool.py"] {
+    find_esptool_among(&["esptool", "esptool.py"])
+}
+
+/// Probe `candidates` in order; the first that answers `version` wins.
+/// Split from `find_esptool` so tests can probe absolute paths instead of
+/// mutating PATH.
+fn find_esptool_among(candidates: &[&str]) -> Result<String> {
+    for candidate in candidates {
         let ok = Command::new(candidate)
             .arg("version")
             .stdout(Stdio::null())
@@ -43,8 +50,12 @@ fn find_esptool() -> Result<String> {
 /// Note: esptool talks to the ROM bootloader, so the running sketch is
 /// interrupted; the chip resets back into the app afterwards.
 pub fn read_mac(port: &str) -> Result<ChipInfo> {
-    let bin = find_esptool()?;
-    let out = Command::new(&bin)
+    read_mac_with(&find_esptool()?, port)
+}
+
+/// The testable body of `read_mac`: `bin` is the esptool entry point.
+fn read_mac_with(bin: &str, port: &str) -> Result<ChipInfo> {
+    let out = Command::new(bin)
         .args(["--port", port, "read_mac"])
         .output()?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -206,5 +217,100 @@ EXT_MAC:            ff:fe
     #[test]
     fn chip_type_missing_is_none_not_a_panic() {
         assert_eq!(parse_chip_type("MAC: aa:bb:cc:dd:ee:ff"), None);
+    }
+
+    // ---------- subprocess paths, via a fake esptool script ----------
+
+    /// A fake esptool at an absolute path; `body` is its shell body.
+    fn with_fake_esptool<T>(body: &str, f: impl FnOnce(&str) -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-esptool");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        f(script.to_str().unwrap())
+    }
+
+    /// Exec-ing a just-written script can hit ETXTBSY when a parallel test
+    /// forks while the write fd is momentarily open; retry until the fd is
+    /// gone. Test-only — real esptool binaries are not being written to.
+    fn retry_busy<T>(mut op: impl FnMut() -> crate::Result<T>) -> crate::Result<T> {
+        for _ in 0..50 {
+            match op() {
+                Err(Error::Io(e)) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                r => return r,
+            }
+        }
+        op()
+    }
+
+    #[test]
+    fn find_esptool_among_picks_the_first_answering_candidate() {
+        with_fake_esptool("exit 0", |script| {
+            // The probe treats a failed spawn as "not this one", so an
+            // ETXTBSY race reads as ToolMissing — retry like retry_busy does.
+            let found = (0..50)
+                .find_map(|_| {
+                    find_esptool_among(&["/nonexistent/esptool", script])
+                        .ok()
+                        .or_else(|| {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            None
+                        })
+                })
+                .expect("fake esptool never became executable");
+            assert_eq!(found, script);
+        });
+    }
+
+    #[test]
+    fn find_esptool_among_skips_a_candidate_whose_version_probe_fails() {
+        with_fake_esptool("exit 1", |script| {
+            assert!(find_esptool_among(&[script]).is_err());
+        });
+    }
+
+    #[test]
+    fn find_esptool_among_reports_tool_missing_with_the_install_hint() {
+        let err = find_esptool_among(&["/nonexistent/esptool"]).unwrap_err();
+        match err {
+            Error::ToolMissing(msg) => assert!(msg.contains("pip install esptool"), "{msg}"),
+            other => panic!("expected ToolMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_mac_with_parses_a_successful_run() {
+        let body = "cat <<'EOF'\nChip is ESP32-S3 (QFN56)\nMAC: 68:b6:b3:2d:f0:1c\nEOF";
+        with_fake_esptool(body, |script| {
+            let info = retry_busy(|| read_mac_with(script, "/dev/ttyACM0")).unwrap();
+            assert_eq!(info.mac, "68:b6:b3:2d:f0:1c");
+            assert_eq!(info.chip_type.as_deref(), Some("ESP32-S3 (QFN56)"));
+            assert!(info.raw_output.contains("MAC: 68:b6:b3:2d:f0:1c"));
+        });
+    }
+
+    #[test]
+    fn read_mac_with_failing_exit_reports_tool_failed_with_stderr() {
+        with_fake_esptool("echo 'serial port busy' >&2; exit 2", |script| {
+            match retry_busy(|| read_mac_with(script, "/dev/ttyACM0")).unwrap_err() {
+                Error::ToolFailed { status, stderr, .. } => {
+                    assert_eq!(status, 2);
+                    assert!(stderr.contains("serial port busy"), "{stderr}");
+                }
+                other => panic!("expected ToolFailed, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn read_mac_with_no_mac_in_output_is_an_error_carrying_the_output() {
+        with_fake_esptool("echo 'Connecting...'", |script| {
+            let err = retry_busy(|| read_mac_with(script, "/dev/ttyACM0")).unwrap_err();
+            assert!(err.to_string().contains("no MAC address"), "{err}");
+            assert!(err.to_string().contains("Connecting..."), "{err}");
+        });
     }
 }
