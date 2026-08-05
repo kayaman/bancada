@@ -287,6 +287,17 @@ export const writeSketchFile = (
   content: string,
 ) => invoke<void>("write_sketch_file", { sketchDir, relPath, content });
 
+// Explorer mutations. Each returns the refreshed file list so the tree is
+// always disk-coherent in one round trip.
+export const createSketchFile = (sketchDir: string, relPath: string) =>
+  invoke<SketchFile[]>("create_sketch_file", { sketchDir, relPath });
+export const createSketchDir = (sketchDir: string, relPath: string) =>
+  invoke<SketchFile[]>("create_sketch_dir", { sketchDir, relPath });
+export const renameSketchEntry = (sketchDir: string, from: string, to: string) =>
+  invoke<SketchFile[]>("rename_sketch_entry", { sketchDir, from, to });
+export const deleteSketchEntry = (sketchDir: string, relPath: string) =>
+  invoke<SketchFile[]>("delete_sketch_entry", { sketchDir, relPath });
+
 export const loadSketchYaml = (sketchDir: string) =>
   invoke<SketchYaml>("load_sketch_yaml", { sketchDir });
 /** Create sketch.yaml (when absent) with a first profile for `fqbn`. */

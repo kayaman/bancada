@@ -21,6 +21,8 @@ thiserror = "1"
 rumqttc = { version = "0.24", default-features = false }
 # Non-UTF-8 MQTT payloads cross the JSON channel base64-encoded (b64:true).
 base64 = "0.22"
+# Explorer deletes go to the OS trash, never straight to fs::remove.
+trash = "5"
 
 [dev-dependencies]
 tempfile = "3"

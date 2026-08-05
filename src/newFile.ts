@@ -1,8 +1,7 @@
-// Validation for creating a file inside the open sketch.
+// Validation for creating entries inside the open sketch.
 //
-// The backend (`write_sketch_file`) already refuses traversal, but it
-// silently overwrites an existing file — the frontend must catch that, and
-// give friendlier messages for the rest.
+// The backend commands guard traversal and collisions too — this exists
+// for friendlier messages without a round trip.
 
 import type { SketchFile } from "./api";
 
@@ -10,13 +9,19 @@ export type NewFileCheck =
   | { ok: true; relPath: string }
   | { ok: false; reason: string };
 
-export function checkNewFile(raw: string, existing: SketchFile[]): NewFileCheck {
-  const relPath = raw.trim();
-  if (!relPath) return { ok: false, reason: "name the file to create" };
-  if (relPath.startsWith("/"))
+/** Validate a new file/folder name typed relative to `parentDir` ("" for
+ *  the sketch root). A trailing slash is tolerated — folders are
+ *  first-class explorer entries now. */
+export function checkNewEntry(
+  raw: string,
+  parentDir: string,
+  existing: SketchFile[],
+): NewFileCheck {
+  const name = raw.trim().replace(/\/+$/, "");
+  if (!name) return { ok: false, reason: "name the entry to create" };
+  if (name.startsWith("/"))
     return { ok: false, reason: "use a path inside the sketch, not an absolute one" };
-  if (relPath.endsWith("/"))
-    return { ok: false, reason: "that names a folder — folders appear when a file needs them" };
+  const relPath = parentDir ? `${parentDir}/${name}` : name;
   const segments = relPath.split("/");
   if (segments.some((s) => s === ".."))
     return { ok: false, reason: "the path cannot leave the sketch (..)" };
@@ -25,4 +30,11 @@ export function checkNewFile(raw: string, existing: SketchFile[]): NewFileCheck 
   if (existing.some((f) => f.rel_path === relPath))
     return { ok: false, reason: `${relPath} already exists` };
   return { ok: true, relPath };
+}
+
+/** File-only variant used by the editor tab strip's ＋ input. */
+export function checkNewFile(raw: string, existing: SketchFile[]): NewFileCheck {
+  if (raw.trim().endsWith("/"))
+    return { ok: false, reason: "that names a folder — use New Folder in the explorer" };
+  return checkNewEntry(raw, "", existing);
 }

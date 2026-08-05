@@ -544,11 +544,104 @@ body {
 
 .tree-item.dir {
   color: var(--text-dim);
+}
+
+.tree-item:hover {
+  background: var(--bg-raised);
+}
+
+.tree-item.selected {
+  background: var(--bg-raised);
+}
+
+.tree-item.protected {
+  opacity: 0.75;
+}
+
+.chevron {
+  display: inline-block;
+  width: 13px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.chevron.spacer::before {
+  content: "";
+}
+
+.file-tree-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.tree-header {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-header-kind {
+  margin-left: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tree-create {
+  padding: 2px 8px;
+}
+
+.tree-create-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  padding: 4px 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ctx-item:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.ctx-item:disabled {
+  color: var(--text-dim);
   cursor: default;
 }
 
-.tree-item.file:hover {
-  background: var(--bg-raised);
+.tree-item.drop-target,
+.file-tree.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
 }
 
 .tree-item.file.active {

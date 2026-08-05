@@ -14,6 +14,7 @@ pub mod boards;
 pub mod chatlog;
 pub mod cli;
 pub mod esptool;
+pub mod files;
 pub mod fleet;
 pub mod ghlib;
 pub mod library;
