@@ -643,3 +643,116 @@ describe("AgentStore: real mcp__bancada__verify round trip", () => {
     expect(block.content[0].type).toBe("text");
   });
 });
+
+// ---------- turn_end / session usage / streaming (assistant UX spec) ----------
+
+/** A realistic full result event, as the CLI emits it (usage included). */
+function usageResult(over: Record<string, unknown> = {}): AgentEvent {
+  return {
+    type: "result",
+    is_error: false,
+    num_turns: 3,
+    total_cost_usd: 0.02,
+    duration_ms: 1000,
+    result: "All done.",
+    usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 5 },
+    ...over,
+  } as AgentEvent;
+}
+
+describe("AgentStore: turn_end messages", () => {
+  it("a result pushes a turn_end with usage, summary, and the turn's tools", () => {
+    const s = new AgentStore();
+    s.userSent("fix it");
+    s.push(toolUse("t1", "Edit", { file_path: "/x/soil.ino" }));
+    s.push(toolResult("t1", "ok", false));
+    s.push(usageResult());
+    const last = s.snapshot().messages.at(-1);
+    expect(last).toEqual({
+      kind: "turn_end",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheReadTokens: 5,
+        costUsd: 0.02,
+        numTurns: 3,
+        durationMs: 1000,
+      },
+      summary: "All done.",
+      tools: [{ name: "Edit", status: "ok" }],
+    });
+  });
+
+  it("a usage-less result still marks the turn boundary", () => {
+    const s = new AgentStore();
+    s.userSent("go");
+    s.push(usageResult({ usage: undefined }));
+    expect(s.snapshot().messages.at(-1)).toMatchObject({
+      kind: "turn_end",
+      usage: undefined,
+    });
+  });
+
+  it("tools from an earlier turn are not re-attributed", () => {
+    const s = new AgentStore();
+    s.userSent("one");
+    s.push(toolUse("t1", "Edit", {}));
+    s.push(usageResult());
+    s.userSent("two");
+    s.push(toolUse("t2", "Grep", {}));
+    s.push(usageResult());
+    const ends = s.snapshot().messages.filter((m) => m.kind === "turn_end");
+    expect(ends).toHaveLength(2);
+    expect(ends[1]).toMatchObject({ tools: [{ name: "Grep", status: "running" }] });
+  });
+});
+
+describe("AgentStore: session usage totals", () => {
+  it("accumulates across results", () => {
+    const s = new AgentStore();
+    s.push(usageResult());
+    s.push(usageResult());
+    expect(s.snapshot().sessionUsage).toEqual({
+      costUsd: 0.04,
+      inputTokens: 200,
+      outputTokens: 20,
+    });
+  });
+
+  it("is reset by clear()", () => {
+    const s = new AgentStore();
+    s.push(usageResult());
+    s.clear();
+    expect(s.snapshot().sessionUsage).toEqual({
+      costUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+  });
+});
+
+describe("AgentStore: streaming flag", () => {
+  it("flips on with a text delta and off with the result", () => {
+    const s = new AgentStore();
+    expect(s.snapshot().streaming).toBe(false);
+    s.push(streamDelta("Hel"));
+    expect(s.snapshot().streaming).toBe(true);
+    s.push(usageResult());
+    expect(s.snapshot().streaming).toBe(false);
+  });
+
+  it("clears when a tool call starts, on a new user message, and on close", () => {
+    const s = new AgentStore();
+    s.push(streamDelta("Let me look…"));
+    s.push(toolUse("t1", "Read", {}));
+    expect(s.snapshot().streaming).toBe(false);
+
+    s.push(streamDelta("more"));
+    s.userSent("stop that");
+    expect(s.snapshot().streaming).toBe(false);
+
+    s.push(streamDelta("again"));
+    s.closed("bye");
+    expect(s.snapshot().streaming).toBe(false);
+  });
+});

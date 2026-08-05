@@ -18,6 +18,13 @@ import type {
   ContentBlockToolUse,
   UserContentToolResult,
 } from "./types";
+import {
+  addUsage,
+  emptySessionUsage,
+  parseTurnUsage,
+  type SessionUsage,
+  type TurnUsage,
+} from "./usage";
 
 export type AgentMessage =
   | { kind: "user"; text: string }
@@ -30,7 +37,15 @@ export type AgentMessage =
       status: "running" | "ok" | "error";
       result?: string;
     }
-  | { kind: "stderr"; line: string };
+  | { kind: "stderr"; line: string }
+  /** Pushed on every `result` event: the turn's ledger line. `usage` is
+   *  absent when the event carried none we could trust. */
+  | {
+      kind: "turn_end";
+      usage?: TurnUsage;
+      summary?: string;
+      tools: { name: string; status: "running" | "ok" | "error" }[];
+    };
 
 export interface AgentResult {
   isError: boolean;
@@ -56,6 +71,9 @@ export class AgentStore {
   private verifyRunningFlag = false;
   private closedReasonVal?: string;
   private alarmVal?: AgentAlarm;
+  /** Text deltas are streaming and no tool has started since — "✍ writing". */
+  private streamingFlag = false;
+  private sessionUsageVal: SessionUsage = emptySessionUsage();
   /**
    * The child pid of the session this store is showing, set by
    * `sessionStarted` from `agent_start`'s return value.
@@ -158,6 +176,7 @@ export class AgentStore {
     if (this.statusFlag === "idle") this.statusFlag = "starting";
     this.msgs.push({ kind: "user", text });
     this.currentAssistantIdx = undefined; // turn boundary
+    this.streamingFlag = false;
     this.ver++;
   }
 
@@ -177,6 +196,7 @@ export class AgentStore {
     if (!this.isOurs(pid)) return;
     this.statusFlag = "ended";
     this.closedReasonVal = reason;
+    this.streamingFlag = false;
     this.ver++;
   }
 
@@ -192,6 +212,8 @@ export class AgentStore {
     this.pidVal = undefined;
     this.currentAssistantIdx = undefined;
     this.toolIndexById.clear();
+    this.streamingFlag = false;
+    this.sessionUsageVal = emptySessionUsage();
     this.ver++;
   }
 
@@ -205,6 +227,8 @@ export class AgentStore {
     closedReason?: string;
     alarm?: AgentAlarm;
     pid?: number;
+    streaming: boolean;
+    sessionUsage: SessionUsage;
   } {
     return {
       messages: this.msgs.slice(),
@@ -215,6 +239,8 @@ export class AgentStore {
       closedReason: this.closedReasonVal,
       alarm: this.alarmVal,
       pid: this.pidVal,
+      streaming: this.streamingFlag,
+      sessionUsage: this.sessionUsageVal,
     };
   }
 
@@ -258,6 +284,7 @@ export class AgentStore {
         // follow) the pre-call bubble in place — see the task-6 fix report
         // for the exact repro this pins.
         this.currentAssistantIdx = undefined;
+        this.streamingFlag = false; // now running a tool, not writing
       }
     }
 
@@ -303,7 +330,26 @@ export class AgentStore {
       text: ev.result,
     };
     if (ev.session_id) this.sessionIdVal = ev.session_id;
+    // The turn's ledger line: usage when the event carried a sane one
+    // (parseTurnUsage never throws), plus the tools this turn ran — the
+    // tool cards between the previous user message and here, with their
+    // statuses as they stand now.
+    const usage = parseTurnUsage(ev) ?? undefined;
+    if (usage) this.sessionUsageVal = addUsage(this.sessionUsageVal, usage);
+    const tools: { name: string; status: "running" | "ok" | "error" }[] = [];
+    for (let i = this.msgs.length - 1; i >= 0; i--) {
+      const m = this.msgs[i];
+      if (m.kind === "user") break;
+      if (m.kind === "tool") tools.unshift({ name: m.name, status: m.status });
+    }
+    this.msgs.push({
+      kind: "turn_end",
+      usage,
+      summary: typeof ev.result === "string" ? ev.result : undefined,
+      tools,
+    });
     this.currentAssistantIdx = undefined; // turn boundary
+    this.streamingFlag = false;
     this.ver++;
   }
 
@@ -351,6 +397,7 @@ export class AgentStore {
   }
 
   private appendAssistantDelta(delta: string): void {
+    this.streamingFlag = true;
     if (this.currentAssistantIdx === undefined) {
       this.currentAssistantIdx = this.msgs.length;
       this.msgs.push({ kind: "assistant", text: delta });

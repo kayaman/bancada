@@ -18,11 +18,25 @@ import type {
   AgentStatus,
   AgentStore,
 } from "../agent/agentStore";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { diffForToolInput, type DiffLine } from "../agent/diff";
-import { splitFences } from "../agent/fences";
 import { alarmConsequence } from "../agent/alarmCopy";
 import { parseVerifyResult } from "../agent/verifyResult";
+import { activityLabel } from "../agent/activity";
+import { formatTokens } from "../agent/usage";
 import type { BottomTab } from "../bottomTabs";
+
+type TurnEnd = Extract<AgentMessage, { kind: "turn_end" }>;
+
+/** Markdown as the assistant wrote it — GFM, raw HTML stays escaped. */
+function Md({ text }: { text: string }) {
+  return (
+    <div className="agent-markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  );
+}
 
 interface AgentPanelProps {
   active: boolean;
@@ -79,6 +93,10 @@ export default function AgentPanel({
   // ---------- input ----------
 
   const [draft, setDraft] = useState("");
+
+  // ---------- turn summary view (a turn_end divider was clicked) ----------
+
+  const [viewTurn, setViewTurn] = useState<TurnEnd | null>(null);
 
   // ---------- autoscroll (Console.tsx pattern: stick to bottom unless the
   // user has scrolled up to read something earlier) ----------
@@ -148,13 +166,22 @@ export default function AgentPanel({
       style={active ? undefined : { display: "none" }}
     >
       <div className="agent-scroll" ref={scrollRef} onScroll={onScroll}>
+        {viewTurn ? (
+          <TurnSummaryView turn={viewTurn} onBack={() => setViewTurn(null)} />
+        ) : (
+          <>
         {snap.messages.length === 0 && (
           <div className="agent-empty">
             Ask the assistant to make a change, then Verify.
           </div>
         )}
         {snap.messages.map((m, i) => (
-          <MessageView key={i} msg={m} openBottomTab={openBottomTab} />
+          <MessageView
+            key={i}
+            msg={m}
+            openBottomTab={openBottomTab}
+            onOpenTurn={setViewTurn}
+          />
         ))}
         {/* Above the "session ended" line and styled to be impossible to
             mistake for a normal card: this is the host having *refused*
@@ -166,20 +193,27 @@ export default function AgentPanel({
             Session ended — {snap.closedReason}
           </div>
         )}
+          </>
+        )}
       </div>
 
       <div className="agent-footer">
         <span className="agent-status">
-          {statusLabel(snap.status, snap.verifyRunning)}
+          {activityLabel(snap) ?? statusLabel(snap.status, snap.verifyRunning)}
         </span>
-        {snap.lastResult &&
-          snap.lastResult.costUsd !== undefined &&
-          snap.lastResult.numTurns !== undefined && (
-            <span className="agent-cost">
-              ${snap.lastResult.costUsd.toFixed(4)} · {snap.lastResult.numTurns}{" "}
-              turns
-            </span>
-          )}
+        {(snap.sessionUsage.costUsd > 0 ||
+          snap.sessionUsage.inputTokens > 0) && (
+          <span
+            className="agent-cost"
+            title="Session total: cost · input+output tokens"
+          >
+            Σ ${snap.sessionUsage.costUsd.toFixed(4)} ·{" "}
+            {formatTokens(
+              snap.sessionUsage.inputTokens + snap.sessionUsage.outputTokens,
+            )}{" "}
+            tokens
+          </span>
+        )}
         {gitWarning && (
           <span
             className="agent-git-warning"
@@ -194,7 +228,13 @@ export default function AgentPanel({
             Stop
           </button>
         )}
-        <button className="btn small" onClick={onNewSession}>
+        <button
+          className="btn small"
+          onClick={() => {
+            setViewTurn(null); // a summary from the old session must not linger
+            onNewSession();
+          }}
+        >
           New session
         </button>
       </div>
@@ -248,9 +288,11 @@ function AlarmView({ alarm }: { alarm: AgentAlarm }) {
 function MessageView({
   msg,
   openBottomTab,
+  onOpenTurn,
 }: {
   msg: AgentMessage;
   openBottomTab: (tab: BottomTab) => void;
+  onOpenTurn: (turn: TurnEnd) => void;
 }) {
   switch (msg.kind) {
     case "user":
@@ -258,17 +300,19 @@ function MessageView({
     case "assistant":
       return (
         <div className="agent-msg agent-msg-assistant">
-          {splitFences(msg.text).map((seg, i) =>
-            seg.kind === "code" ? (
-              <pre key={i} className="agent-code">
-                {seg.content}
-              </pre>
-            ) : (
-              <p key={i} className="agent-text">
-                {seg.content}
-              </p>
-            ),
-          )}
+          <Md text={msg.text} />
+        </div>
+      );
+    case "turn_end":
+      return (
+        <div className="agent-turn-end">
+          <span className="agent-turn-end-label">{turnEndLabel(msg)}</span>
+          <button
+            className="agent-turn-end-details"
+            onClick={() => onOpenTurn(msg)}
+          >
+            details ▸
+          </button>
         </div>
       );
     case "stderr":
@@ -388,6 +432,93 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+// ---------- turn summary view ----------
+
+function turnEndLabel(msg: TurnEnd): string {
+  const u = msg.usage;
+  if (!u) return "turn finished";
+  const parts = [
+    u.numTurns !== undefined ? `${u.numTurns} turns` : null,
+    `${formatTokens(u.inputTokens)} in / ${formatTokens(u.outputTokens)} out`,
+    u.costUsd !== undefined ? `$${u.costUsd.toFixed(4)}` : null,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** The "info at the end" view: the turn's wrap-up, rendered richly. */
+function TurnSummaryView({
+  turn,
+  onBack,
+}: {
+  turn: TurnEnd;
+  onBack: () => void;
+}) {
+  const u = turn.usage;
+  return (
+    <div className="agent-turn-view">
+      <div className="agent-turn-view-bar">
+        <button className="btn small" onClick={onBack}>
+          ← Back to chat
+        </button>
+        <span className="agent-turn-view-title">Turn summary</span>
+      </div>
+      {turn.summary ? (
+        <Md text={turn.summary} />
+      ) : (
+        <p className="agent-empty">This turn produced no summary text.</p>
+      )}
+      {u && (
+        <dl className="agent-usage-grid">
+          <dt>input</dt>
+          <dd>
+            {formatTokens(u.inputTokens)}
+            {u.cacheReadTokens > 0 &&
+              ` (${formatTokens(u.cacheReadTokens)} cached)`}
+          </dd>
+          <dt>output</dt>
+          <dd>{formatTokens(u.outputTokens)}</dd>
+          {u.costUsd !== undefined && (
+            <>
+              <dt>cost</dt>
+              <dd>${u.costUsd.toFixed(4)}</dd>
+            </>
+          )}
+          {u.numTurns !== undefined && (
+            <>
+              <dt>turns</dt>
+              <dd>{u.numTurns}</dd>
+            </>
+          )}
+          {u.durationMs !== undefined && (
+            <>
+              <dt>duration</dt>
+              <dd>{(u.durationMs / 1000).toFixed(1)}s</dd>
+            </>
+          )}
+        </dl>
+      )}
+      {turn.tools.length > 0 && (
+        <ul className="agent-turn-tools">
+          {turn.tools.map((t, i) => (
+            <li key={i}>
+              <span
+                className={
+                  t.status === "error"
+                    ? "agent-tool-icon fail"
+                    : "agent-tool-icon"
+                }
+              >
+                {t.status === "ok" ? "✓" : t.status === "error" ? "✗" : "…"}
+              </span>{" "}
+              {t.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
