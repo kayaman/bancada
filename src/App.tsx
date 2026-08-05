@@ -5,9 +5,9 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
-import { nextSelectedPort } from "./ports";
+import { nextSelectedPort, visibleBoard } from "./ports";
 import { checkNewFile } from "./newFile";
-import { arrivals } from "./portWatch";
+import { arrivals, bridgeArrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
 import type {
   AgentEvent,
@@ -208,6 +208,9 @@ export default function App() {
   const pendingScanRef = useRef(false);
   const scanTimerRef = useRef<number | undefined>(undefined);
   const prevOnlineRef = useRef<string[] | null>(null);
+  /** Bridge-port addresses at the last sync — null until the first, so
+   *  bridges present at launch are not announced (same rule as online). */
+  const prevUnidentifiedRef = useRef<string[] | null>(null);
 
   const notify = useCallback((msg: string, isError = false) => {
     setStatus(msg);
@@ -217,7 +220,9 @@ export default function App() {
   useEffect(() => {
     busyRef.current = busy;
     if (!busy && pendingScanRef.current) {
-      pendingScanRef.current = false;
+      // The flag is cleared by refreshPorts on *success*, not here: a scan
+      // consumed before it ran was lost for good when arduino-cli failed,
+      // and the backend never re-emits for a set it already recorded.
       // `busy` clears before a just-flashed native-USB board finishes
       // re-enumerating; scanning immediately would read the port's brief
       // absence as a detach and drop the selection. Wait out the settle
@@ -373,10 +378,17 @@ export default function App() {
 
   // ---------- project ----------
 
-  const refreshPorts = () =>
+  const refreshPorts = () => {
+    if (busyRef.current) {
+      // A timer armed before `busy` flipped true can still fire mid-flash;
+      // re-defer rather than let arduino-cli probe ports under esptool.
+      pendingScanRef.current = true;
+      return;
+    }
     api
       .listBoards()
       .then((ps) => {
+        pendingScanRef.current = false;
         setPorts(ps);
         // Keep a still-attached choice, but drop one whose port has gone: a
         // rescan that leaves a vanished port selected looks like it did nothing
@@ -388,8 +400,17 @@ export default function App() {
         api
           .fleetSync(ps)
           .then((snap) => {
-            const fresh = arrivals(prevOnlineRef.current, snap);
+            // Identified boards and bridge ports announce alike — a CH343
+            // board can never reach snap.online, and its plug-in used to
+            // produce no feedback at all.
+            const fresh = [
+              ...arrivals(prevOnlineRef.current, snap),
+              ...bridgeArrivals(prevUnidentifiedRef.current, snap),
+            ];
             prevOnlineRef.current = snap.online;
+            prevUnidentifiedRef.current = snap.unidentified.map(
+              (p) => p.port.address,
+            );
             if (fresh.length > 0)
               notify(
                 `⚡ ${fresh
@@ -400,6 +421,7 @@ export default function App() {
           .catch(() => {});
       })
       .catch((e) => notify(String(e), true));
+  };
 
   /** Switch profile; if it pins a port in sketch.yaml, select that port too. */
   const selectProfile = (p: string) => {
@@ -592,10 +614,12 @@ export default function App() {
 
   // ---------- build & flash ----------
 
-  /** FQBN of the board detected on the selected port, if any. */
-  const detectedFqbn = () =>
-    ports.find((p) => p.port.address === selectedPort)?.matching_boards[0]
-      ?.fqbn;
+  /** FQBN of the board detected on the selected port, if any. Skips hidden
+   *  umbrella entries (`esp32_family`) — compiling against those fails. */
+  const detectedFqbn = () => {
+    const p = ports.find((p) => p.port.address === selectedPort);
+    return p ? visibleBoard(p)?.fqbn : undefined;
+  };
 
   /** Build target: sketch.yaml profile first, detected board FQBN as fallback. */
   const resolveTarget = (): { profile?: string; fqbn?: string } | null => {
@@ -603,7 +627,7 @@ export default function App() {
     const fqbn = detectedFqbn();
     if (fqbn) return { fqbn };
     notify(
-      "No sketch.yaml profile and no board detected — select a port with a recognized board.",
+      "No sketch.yaml profile, and this port reports no board identity (USB bridge) — create a profile to set the board.",
       true,
     );
     return null;

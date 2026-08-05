@@ -1,5 +1,27 @@
 import type { FleetSnapshot } from "./api";
 
+/**
+ * Unidentified (bridge) ports newly attached since the previous sync.
+ *
+ * A CH343/CP210x board carries no board identity, so it can never appear in
+ * `snap.online` — without this, plugging one in produced no feedback at all.
+ * Same first-sync rule as `arrivals`: `null` means launch, announce nothing.
+ */
+export function bridgeArrivals(
+  prevAddrs: string[] | null,
+  snap: FleetSnapshot,
+): Arrival[] {
+  if (prevAddrs === null) return [];
+  const seen = new Set(prevAddrs);
+  return snap.unidentified
+    .filter((p) => !seen.has(p.port.address))
+    .map((p) => ({
+      id: p.port.address,
+      name: p.port.protocol_label || "Serial port",
+      port: p.port.address,
+    }));
+}
+
 /** A board that came online since the previous fleet sync. */
 export interface Arrival {
   id: string;

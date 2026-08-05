@@ -1,4 +1,5 @@
 import type { DetectedPort, SketchYaml } from "../api";
+import { portOptions } from "../ports";
 
 interface Props {
   sketchDir: string | null;
@@ -70,10 +71,9 @@ export default function Toolbar(props: Props) {
         title="Serial port"
       >
         <option value="">select port…</option>
-        {props.ports.map((dp) => (
-          <option key={dp.port.address} value={dp.port.address}>
-            {dp.port.address}
-            {dp.matching_boards[0] ? ` (${dp.matching_boards[0].name})` : ""}
+        {portOptions(props.ports, props.selectedPort).map((o) => (
+          <option key={o.address} value={o.address} disabled={o.missing}>
+            {o.label}
           </option>
         ))}
       </select>

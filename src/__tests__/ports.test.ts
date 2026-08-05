@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { nextSelectedPort } from "../ports";
-import type { DetectedPort } from "../api";
+import { nextSelectedPort, portOptions, visibleBoard } from "../ports";
+import type { DetectedPort, MatchingBoard } from "../api";
 
 const port = (address: string, protocol = "serial"): DetectedPort => ({
   port: {
@@ -56,5 +56,72 @@ describe("nextSelectedPort", () => {
     expect(nextSelectedPort([port("2804:7f0::1", "network")], null)).toBe(
       "2804:7f0::1",
     );
+  });
+});
+
+const board = (fqbn: string, is_hidden = false): MatchingBoard => ({
+  name: fqbn.split(":").pop() ?? fqbn,
+  fqbn,
+  is_hidden,
+});
+
+const withBoards = (address: string, boards: MatchingBoard[]): DetectedPort => ({
+  ...port(address),
+  matching_boards: boards,
+});
+
+describe("visibleBoard", () => {
+  // arduino-cli lists the hidden esp32_family umbrella FIRST for native-USB
+  // Espressif ports; [0] would compile against the umbrella FQBN.
+  it("skips hidden umbrella entries", () => {
+    const p = withBoards("/dev/ttyACM0", [
+      board("esp32:esp32:esp32_family", true),
+      board("esp32:esp32:esp32c6"),
+    ]);
+    expect(visibleBoard(p)?.fqbn).toBe("esp32:esp32:esp32c6");
+  });
+
+  it("returns null for a bridge port with no matching boards", () => {
+    expect(visibleBoard(withBoards("/dev/ttyACM0", []))).toBeNull();
+  });
+
+  it("returns null when every match is hidden", () => {
+    const p = withBoards("/dev/ttyACM0", [
+      board("esp32:esp32:esp32_family", true),
+    ]);
+    expect(visibleBoard(p)).toBeNull();
+  });
+});
+
+describe("portOptions", () => {
+  it("labels a port with its visible board name", () => {
+    const opts = portOptions(
+      [withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")])],
+      null,
+    );
+    expect(opts).toEqual([
+      { address: "/dev/ttyACM0", label: "/dev/ttyACM0 (esp32c6)", missing: false },
+    ]);
+  });
+
+  it("labels a bridge port with its bare address", () => {
+    const opts = portOptions([withBoards("/dev/ttyACM0", [])], null);
+    expect(opts[0].label).toBe("/dev/ttyACM0");
+  });
+
+  it("appends a flagged entry for a selected port that is not attached", () => {
+    // A sketch.yaml-pinned port that is absent used to leave the <select>
+    // matching no <option>, rendering the control blank.
+    const opts = portOptions([withBoards("/dev/ttyACM0", [])], "/dev/ttyUSB7");
+    expect(opts).toContainEqual({
+      address: "/dev/ttyUSB7",
+      label: "/dev/ttyUSB7 (not attached)",
+      missing: true,
+    });
+  });
+
+  it("adds nothing extra when the selection is attached", () => {
+    const opts = portOptions([withBoards("/dev/ttyACM0", [])], "/dev/ttyACM0");
+    expect(opts).toHaveLength(1);
   });
 });

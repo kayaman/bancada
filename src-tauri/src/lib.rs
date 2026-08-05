@@ -2866,12 +2866,16 @@ pub fn run() {
                     let Ok(ports) = serialport::available_ports() else {
                         continue;
                     };
-                    let names: std::collections::BTreeSet<String> =
-                        ports.into_iter().map(|p| p.port_name).collect();
-                    if prev.as_ref().is_some_and(|p| *p != names) {
+                    // Keyed by identity (name + vid:pid:serial), not name
+                    // alone: swapping the C6 DevKit's USB-C connectors
+                    // replaces the device but reuses /dev/ttyACM0, which a
+                    // name-only set can never see (core::ports).
+                    let keys: std::collections::BTreeSet<String> =
+                        ports.iter().map(bancada_core::ports::port_key).collect();
+                    if bancada_core::ports::ports_changed(prev.as_ref(), &keys) {
                         let _ = watcher.emit("ports://changed", ());
                     }
-                    prev = Some(names);
+                    prev = Some(keys);
                 }
             });
             Ok(())

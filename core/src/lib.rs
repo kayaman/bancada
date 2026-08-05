@@ -18,6 +18,7 @@ pub mod ghlib;
 pub mod library;
 pub mod mcp;
 pub mod mqtt;
+pub mod ports;
 pub mod project;
 pub mod scope;
 pub mod settings;

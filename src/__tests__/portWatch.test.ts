@@ -65,3 +65,52 @@ describe("arrivals", () => {
     expect(arrivals(["aa:bb"], s)).toEqual([]);
   });
 });
+
+import { bridgeArrivals } from "../portWatch";
+import type { DetectedPort } from "../api";
+
+const bridge = (address: string, protocol_label = "Serial Port (USB)"): DetectedPort => ({
+  port: {
+    address,
+    label: address,
+    protocol: "serial",
+    protocol_label,
+    properties: {},
+    hardware_id: "",
+  },
+  matching_boards: [],
+});
+
+const snapWith = (unidentified: DetectedPort[]): FleetSnapshot => ({
+  boards: [],
+  online: [],
+  unidentified,
+});
+
+describe("bridgeArrivals", () => {
+  // A CH343/CP210x bridge has no board identity, so it can never appear in
+  // snap.online — before this, plugging one in produced no feedback at all.
+  it("announces a newly attached unidentified port", () => {
+    const s = snapWith([bridge("/dev/ttyACM0")]);
+    expect(bridgeArrivals([], s)).toEqual([
+      {
+        id: "/dev/ttyACM0",
+        name: "Serial Port (USB)",
+        port: "/dev/ttyACM0",
+      },
+    ]);
+  });
+
+  it("announces nothing on the first sync after launch", () => {
+    expect(bridgeArrivals(null, snapWith([bridge("/dev/ttyACM0")]))).toEqual([]);
+  });
+
+  it("ignores ports that were already attached", () => {
+    const s = snapWith([bridge("/dev/ttyACM0")]);
+    expect(bridgeArrivals(["/dev/ttyACM0"], s)).toEqual([]);
+  });
+
+  it("does not treat departures as arrivals", () => {
+    expect(bridgeArrivals(["/dev/ttyACM0"], snapWith([]))).toEqual([]);
+  });
+});
