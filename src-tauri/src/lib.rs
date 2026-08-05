@@ -1292,6 +1292,68 @@ fn save_settings(
     bancada_core::settings::save(&settings_path(&app)?, &settings).map_err(err_str)
 }
 
+// ---------- assistant chat history ----------
+
+fn chats_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("chats"))
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn chat_append(
+    app: AppHandle,
+    sketch_dir: String,
+    file: String,
+    line: String,
+) -> Result<(), String> {
+    let root = chats_root(&app)?;
+    let key = bancada_core::chatlog::sketch_key(&sketch_dir);
+    let created =
+        bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
+    // A new chat is the moment to bound the directory. Prune is silent and
+    // best-effort, so a failed cleanup can never cost the append.
+    if created {
+        bancada_core::chatlog::prune(&root, &key, 50);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn chat_list(
+    app: AppHandle,
+    sketch_dir: String,
+) -> Result<Vec<bancada_core::chatlog::ChatEntry>, String> {
+    let root = chats_root(&app)?;
+    Ok(bancada_core::chatlog::list_chats(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+    ))
+}
+
+#[tauri::command]
+fn chat_load(app: AppHandle, sketch_dir: String, file: String) -> Result<Vec<String>, String> {
+    let root = chats_root(&app)?;
+    bancada_core::chatlog::load_chat(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+        &file,
+    )
+    .map_err(err_str)
+}
+
+#[tauri::command]
+fn chat_delete(app: AppHandle, sketch_dir: String, file: String) -> Result<(), String> {
+    let root = chats_root(&app)?;
+    bancada_core::chatlog::delete_chat(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+        &file,
+    )
+    .map_err(err_str)
+}
+
 // ---------- board utilities ----------
 
 /// Read a board's MAC with esptool.
@@ -2883,6 +2945,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cli_version,
             list_boards,
+            chat_append,
+            chat_list,
+            chat_load,
+            chat_delete,
             list_sketch_files,
             sketch_has_git,
             read_sketch_file,

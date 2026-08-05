@@ -509,6 +509,23 @@ export const loadSettings = () => invoke<AppSettings>("load_settings");
 export const saveSettings = (settings: AppSettings) =>
   invoke<void>("save_settings", { settings });
 
+// ---------- assistant chat history ----------
+
+export interface ChatEntry {
+  file: string;
+  /** First user message of the chat, truncated — else the file stem. */
+  title: string;
+}
+
+export const chatAppend = (sketchDir: string, file: string, line: string) =>
+  invoke<void>("chat_append", { sketchDir, file, line });
+export const chatList = (sketchDir: string) =>
+  invoke<ChatEntry[]>("chat_list", { sketchDir });
+export const chatLoad = (sketchDir: string, file: string) =>
+  invoke<string[]>("chat_load", { sketchDir, file });
+export const chatDelete = (sketchDir: string, file: string) =>
+  invoke<void>("chat_delete", { sketchDir, file });
+
 // ---------- scope ----------
 
 export const scopeProbe = (port: string) =>

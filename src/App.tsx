@@ -17,6 +17,7 @@ import type {
   SketchYaml,
 } from "./api";
 import { AgentStore } from "./agent/agentStore";
+import { ChatRecorder, chatFileName } from "./agent/chatLog";
 import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
@@ -74,6 +75,10 @@ const appendCapped = (prev: OutputLine[], l: OutputLine): OutputLine[] =>
 // been mounted, so the bottom-tab unseen dot keeps working regardless of
 // which tab is open. See src/agent/agentStore.ts.
 const agentStore = new AgentStore();
+// Its shadow: every store mutation is also recorded to the chat log, so a
+// saved chat replays into an identical transcript. Recording is
+// fire-and-forget (a failed append never breaks a live chat).
+const chatRecorder = new ChatRecorder();
 
 /** `file_path` from an Edit/Write tool input is cwd-absolute (cwd = sketch
  *  dir); reduce it to the same rel_path shape the file tree/editor use. */
@@ -324,6 +329,7 @@ export default function App() {
       // panel has ever been mounted (spec: agentStore is not panel-owned).
       api.onAgentEvent((ev) => {
         agentStore.push(ev);
+        chatRecorder.record({ op: "push", ev });
         if (bottomTabRef.current !== "agent")
           setUnseen((u) => ({ ...u, agent: true }));
         handleAgentSideEffects(ev);
@@ -336,6 +342,8 @@ export default function App() {
         // — Send disabled, panel saying "Session ended", child alive and
         // still streaming.
         agentStore.closed(p.reason, p.pid);
+        chatRecorder.record({ op: "closed", reason: p.reason, pid: p.pid });
+        chatRecorder.stop();
         // Belt and braces: the backend's own stdout reader already reaps its
         // session at EOF (so a closed window no longer leaks a listener), but
         // this stays as the second path. Pid-scoped for the same reason —
@@ -913,6 +921,17 @@ export default function App() {
     // saveAll refuses to flush a conflicted buffer, so re-check: a conflict
     // raised between the guard above and here still blocks the send.
     if (agentConflictsRef.current.size > 0) return; // saveAll already notified
+    // Arm the recorder before the session can produce its first op. Writes
+    // nothing until the first record, so a send that fails below leaves no
+    // empty chat file behind.
+    if (!chatRecorder.active) {
+      const now = new Date();
+      chatRecorder.start(
+        chatFileName(now),
+        { sketchDir, startedAt: now.toISOString() },
+        (f, l) => api.chatAppend(sketchDir, f, l),
+      );
+    }
     if (agentStore.snapshot().status === "idle") {
       const target = resolveTarget();
       if (!target) return; // resolveTarget already notified
@@ -921,12 +940,14 @@ export default function App() {
         // outlive it (FE-C1) — record it before any of them can arrive.
         const pid = await api.agentStart(sketchDir, target.profile, target.fqbn);
         agentStore.sessionStarted(pid);
+        chatRecorder.record({ op: "sessionStarted", pid });
       } catch (e) {
         notify(String(e), true);
         return;
       }
     }
     agentStore.userSent(text);
+    chatRecorder.record({ op: "userSent", text });
     try {
       await api.agentSend(text);
     } catch (e) {
@@ -941,6 +962,7 @@ export default function App() {
   /** Stop the session and drop the transcript back to a clean slate. */
   const newAgentSession = () => {
     api.agentStop().catch(() => {});
+    chatRecorder.stop();
     agentStore.clear();
     agentConflictsRef.current.clear();
     setConflicts([]);

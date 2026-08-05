@@ -2125,3 +2125,69 @@ body {
 .agent-markdown a {
   color: var(--accent);
 }
+
+/* ---------- assistant: chat history ---------- */
+
+.agent-hist-list {
+  padding: 6px 10px;
+}
+
+.agent-hist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+}
+
+.agent-hist-open {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background var(--transition),
+    border-color var(--transition);
+}
+
+.agent-hist-open:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.agent-hist-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.agent-hist-date {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.agent-back-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.agent-back-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+}

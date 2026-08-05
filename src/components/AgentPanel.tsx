@@ -11,7 +11,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
-import type { AgentProbe } from "../api";
+import type { AgentProbe, ChatEntry } from "../api";
+import { replayChat } from "../agent/chatLog";
 import type {
   AgentAlarm,
   AgentMessage,
@@ -98,6 +99,43 @@ export default function AgentPanel({
 
   const [viewTurn, setViewTurn] = useState<TurnEnd | null>(null);
 
+  // ---------- chat history (list of saved chats, and one replayed) ----------
+
+  const [histList, setHistList] = useState<ChatEntry[] | null>(null);
+  const [histStore, setHistStore] = useState<AgentStore | null>(null);
+
+  const openHistory = () => {
+    if (!sketchDir) return;
+    setViewTurn(null);
+    setHistStore(null);
+    api
+      .chatList(sketchDir)
+      .then(setHistList)
+      .catch(() => setHistList([]));
+  };
+
+  const openChat = (file: string) => {
+    if (!sketchDir) return;
+    api
+      .chatLoad(sketchDir, file)
+      .then((lines) => setHistStore(replayChat(lines)))
+      .catch(() => {});
+  };
+
+  const deleteChat = (file: string) => {
+    if (!sketchDir) return;
+    api
+      .chatDelete(sketchDir, file)
+      .then(() => api.chatList(sketchDir).then(setHistList))
+      .catch(() => {});
+  };
+
+  const closeHistory = () => {
+    setViewTurn(null);
+    if (histStore) setHistStore(null); // replay → back to the list
+    else setHistList(null); // list → back to the live chat
+  };
+
   // ---------- autoscroll (Console.tsx pattern: stick to bottom unless the
   // user has scrolled up to read something earlier) ----------
 
@@ -168,6 +206,24 @@ export default function AgentPanel({
       <div className="agent-scroll" ref={scrollRef} onScroll={onScroll}>
         {viewTurn ? (
           <TurnSummaryView turn={viewTurn} onBack={() => setViewTurn(null)} />
+        ) : histStore ? (
+          // A saved chat, replayed through the same components as a live one.
+          histStore
+            .snapshot()
+            .messages.map((m, i) => (
+              <MessageView
+                key={i}
+                msg={m}
+                openBottomTab={openBottomTab}
+                onOpenTurn={setViewTurn}
+              />
+            ))
+        ) : histList ? (
+          <HistListView
+            entries={histList}
+            onOpen={openChat}
+            onDelete={deleteChat}
+          />
         ) : (
           <>
         {snap.messages.length === 0 && (
@@ -228,10 +284,16 @@ export default function AgentPanel({
             Stop
           </button>
         )}
+        <button className="btn small" onClick={openHistory} title="Saved chats for this sketch">
+          🕘 History
+        </button>
         <button
           className="btn small"
           onClick={() => {
-            setViewTurn(null); // a summary from the old session must not linger
+            // Views from the old session must not linger into the new one.
+            setViewTurn(null);
+            setHistList(null);
+            setHistStore(null);
             onNewSession();
           }}
         >
@@ -239,28 +301,41 @@ export default function AgentPanel({
         </button>
       </div>
 
-      <div className="agent-input-row">
-        <textarea
-          className="input mono agent-input"
-          placeholder="Message the assistant… (Enter to send, Shift+Enter for newline)"
-          value={draft}
-          disabled={disabled}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        <button
-          className="btn small primary"
-          disabled={disabled || !draft.trim()}
-          onClick={send}
-        >
-          Send
-        </button>
-      </div>
+      {histList || histStore ? (
+        <div className="agent-back-bar">
+          <button className="btn small" onClick={closeHistory}>
+            ← {histStore ? "Back to history" : "Back to current chat"}
+          </button>
+          <span className="agent-back-hint">
+            {histStore
+              ? "Read-only replay of a saved chat."
+              : "Saved chats for this sketch — click one to read it."}
+          </span>
+        </div>
+      ) : (
+        <div className="agent-input-row">
+          <textarea
+            className="input mono agent-input"
+            placeholder="Message the assistant… (Enter to send, Shift+Enter for newline)"
+            value={draft}
+            disabled={disabled}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+          />
+          <button
+            className="btn small primary"
+            disabled={disabled || !draft.trim()}
+            onClick={send}
+          >
+            Send
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -432,6 +507,45 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+// ---------- chat history list ----------
+
+function HistListView({
+  entries,
+  onOpen,
+  onDelete,
+}: {
+  entries: ChatEntry[];
+  onOpen: (file: string) => void;
+  onDelete: (file: string) => void;
+}) {
+  if (entries.length === 0) {
+    return (
+      <div className="agent-empty">No saved chats for this sketch yet.</div>
+    );
+  }
+  return (
+    <div className="agent-hist-list">
+      {entries.map((e) => (
+        <div key={e.file} className="agent-hist-row">
+          <button className="agent-hist-open" onClick={() => onOpen(e.file)}>
+            <span className="agent-hist-title">{e.title}</span>
+            <span className="agent-hist-date">
+              {e.file.replace(/\.ndjson$/, "").replace("T", " ")}
+            </span>
+          </button>
+          <button
+            className="btn small danger icon"
+            onClick={() => onDelete(e.file)}
+            title="Delete this saved chat"
+          >
+            🗑
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
