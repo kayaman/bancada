@@ -1344,6 +1344,18 @@ fn chat_load(app: AppHandle, sketch_dir: String, file: String) -> Result<Vec<Str
 }
 
 #[tauri::command]
+fn chat_totals(
+    app: AppHandle,
+    sketch_dir: String,
+) -> Result<bancada_core::chatlog::ProjectTotals, String> {
+    let root = chats_root(&app)?;
+    Ok(bancada_core::chatlog::project_totals(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+    ))
+}
+
+#[tauri::command]
 fn chat_delete(app: AppHandle, sketch_dir: String, file: String) -> Result<(), String> {
     let root = chats_root(&app)?;
     bancada_core::chatlog::delete_chat(
@@ -2949,6 +2961,7 @@ pub fn run() {
             chat_list,
             chat_load,
             chat_delete,
+            chat_totals,
             list_sketch_files,
             sketch_has_git,
             read_sketch_file,

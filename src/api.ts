@@ -526,6 +526,19 @@ export const chatLoad = (sketchDir: string, file: string) =>
 export const chatDelete = (sketchDir: string, file: string) =>
   invoke<void>("chat_delete", { sketchDir, file });
 
+/** Everything the Assistant has cost one sketch, summed from its chats. */
+export interface ProjectTotals {
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  chats: number;
+  turns: number;
+  last_chat: string | null;
+}
+
+export const chatTotals = (sketchDir: string) =>
+  invoke<ProjectTotals>("chat_totals", { sketchDir });
+
 // ---------- scope ----------
 
 export const scopeProbe = (port: string) =>

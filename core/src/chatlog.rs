@@ -134,6 +134,70 @@ fn title_from_head(reader: impl std::io::BufRead) -> Option<String> {
         .map(|t| t.chars().take(80).collect())
 }
 
+/// Everything the Assistant has cost one sketch, summed from its chats.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ProjectTotals {
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub chats: usize,
+    pub turns: u64,
+    /// Newest chat's file stem, e.g. `2026-08-05T09-00-00`.
+    pub last_chat: Option<String>,
+}
+
+/// Sum every recorded `result` event across a sketch's chat files.
+///
+/// Per-call semantics, verified against the Agent SDK docs: each result's
+/// `total_cost_usd`/`usage`/`num_turns` cover only its own query call, so
+/// plain summation is the correct aggregation. Whole files are read, but
+/// only when the History view opens — never on a poll. Never errors:
+/// unreadable files and malformed lines are skipped, same as `list_chats`.
+pub fn project_totals(chats_root: &Path, key: &str) -> ProjectTotals {
+    let mut files = chat_file_names(chats_root, key);
+    files.sort_unstable();
+    let mut t = ProjectTotals {
+        cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        chats: files.len(),
+        turns: 0,
+        last_chat: files
+            .last()
+            .map(|f| f.trim_end_matches(".ndjson").to_string()),
+    };
+    for file in &files {
+        let Ok(f) = std::fs::File::open(chats_root.join(key).join(file)) else {
+            continue;
+        };
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(f).lines().map_while(|l| l.ok()) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if v.get("op").and_then(|o| o.as_str()) != Some("push") {
+                continue;
+            }
+            let Some(ev) = v.get("ev") else { continue };
+            if ev.get("type").and_then(|t| t.as_str()) != Some("result") {
+                continue;
+            }
+            t.cost_usd += ev
+                .get("total_cost_usd")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(0.0);
+            t.turns += ev.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0);
+            if let Some(u) = ev.get("usage") {
+                t.input_tokens +=
+                    u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                t.output_tokens +=
+                    u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            }
+        }
+    }
+    t
+}
+
 /// The `*.ndjson` basenames under one sketch's chat directory, unsorted.
 /// A missing directory is simply an empty history, never an error.
 fn chat_file_names(chats_root: &Path, key: &str) -> Vec<String> {
@@ -183,6 +247,68 @@ mod tests {
         let mut text = lines.join("\n");
         text.push('\n');
         std::fs::write(dir.join(file), text).unwrap();
+    }
+
+    /// A recorded `result` push op, per-call semantics (verified: each
+    /// result's cost/usage/turns cover only its own query call).
+    fn result_line(cost: f64, input: u64, output: u64, turns: u64) -> String {
+        format!(
+            r#"{{"op":"push","ev":{{"type":"result","total_cost_usd":{cost},"num_turns":{turns},"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn project_totals_sums_every_result_across_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = result_line(0.01, 100, 10, 2);
+        let r2 = result_line(0.02, 200, 20, 3);
+        let r3 = result_line(0.04, 400, 40, 1);
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-04T10-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/s","startedAt":"t"}"#,
+                r#"{"op":"userSent","text":"one"}"#,
+                &r1,
+                &r2,
+            ],
+        );
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-05T09-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/s","startedAt":"t"}"#,
+                "{not json",
+                r#"{"op":"push","ev":{"type":"assistant"}}"#,
+                &r3,
+            ],
+        );
+        let t = project_totals(tmp.path(), "k");
+        assert_eq!(t.chats, 2);
+        assert!((t.cost_usd - 0.07).abs() < 1e-9);
+        assert_eq!(t.input_tokens, 700);
+        assert_eq!(t.output_tokens, 70);
+        assert_eq!(t.turns, 6);
+        assert_eq!(t.last_chat.as_deref(), Some("2026-08-05T09-00-00"));
+    }
+
+    #[test]
+    fn project_totals_of_nothing_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = project_totals(tmp.path(), "missing");
+        assert_eq!(
+            t,
+            ProjectTotals {
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                chats: 0,
+                turns: 0,
+                last_chat: None,
+            }
+        );
     }
 
     #[test]

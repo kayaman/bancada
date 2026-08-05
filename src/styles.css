@@ -2191,3 +2191,31 @@ body {
   color: var(--text-dim);
   font-size: 11px;
 }
+
+/* ---------- assistant: project totals card ---------- */
+
+.agent-proj-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin: 8px 10px 2px;
+  padding: 8px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.agent-proj-name {
+  color: var(--text);
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.agent-proj-last {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}

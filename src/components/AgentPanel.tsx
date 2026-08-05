@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
-import type { AgentProbe, ChatEntry } from "../api";
+import type { AgentProbe, ChatEntry, ProjectTotals } from "../api";
 import { replayChat } from "../agent/chatLog";
 import type {
   AgentAlarm,
@@ -103,6 +103,7 @@ export default function AgentPanel({
 
   const [histList, setHistList] = useState<ChatEntry[] | null>(null);
   const [histStore, setHistStore] = useState<AgentStore | null>(null);
+  const [histTotals, setHistTotals] = useState<ProjectTotals | null>(null);
 
   const openHistory = () => {
     if (!sketchDir) return;
@@ -112,6 +113,12 @@ export default function AgentPanel({
       .chatList(sketchDir)
       .then(setHistList)
       .catch(() => setHistList([]));
+    // Fetched alongside the list, and refreshed with it on delete, so the
+    // card can never disagree with the rows under it.
+    api
+      .chatTotals(sketchDir)
+      .then(setHistTotals)
+      .catch(() => setHistTotals(null));
   };
 
   const openChat = (file: string) => {
@@ -126,7 +133,10 @@ export default function AgentPanel({
     if (!sketchDir) return;
     api
       .chatDelete(sketchDir, file)
-      .then(() => api.chatList(sketchDir).then(setHistList))
+      .then(() => {
+        api.chatList(sketchDir).then(setHistList).catch(() => {});
+        api.chatTotals(sketchDir).then(setHistTotals).catch(() => {});
+      })
       .catch(() => {});
   };
 
@@ -218,11 +228,19 @@ export default function AgentPanel({
             onOpenTurn={setViewTurn}
           />
         ) : histList ? (
-          <HistListView
-            entries={histList}
-            onOpen={openChat}
-            onDelete={deleteChat}
-          />
+          <>
+            {histTotals && (
+              <ProjectCard
+                totals={histTotals}
+                sketchName={sketchDir.split("/").pop() ?? sketchDir}
+              />
+            )}
+            <HistListView
+              entries={histList}
+              onOpen={openChat}
+              onDelete={deleteChat}
+            />
+          </>
         ) : (
           <>
         {snap.messages.length === 0 && (
@@ -293,6 +311,7 @@ export default function AgentPanel({
             setViewTurn(null);
             setHistList(null);
             setHistStore(null);
+            setHistTotals(null);
             onNewSession();
           }}
         >
@@ -506,6 +525,37 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+// ---------- project totals card ----------
+
+/** What the Assistant has cost this sketch, over all saved chats. */
+function ProjectCard({
+  totals,
+  sketchName,
+}: {
+  totals: ProjectTotals;
+  sketchName: string;
+}) {
+  return (
+    <div className="agent-proj-card">
+      <span className="agent-proj-name">{sketchName}</span>
+      <span>
+        {totals.chats} chat{totals.chats === 1 ? "" : "s"}
+      </span>
+      <span>Σ ${totals.cost_usd.toFixed(4)}</span>
+      <span>
+        {formatTokens(totals.input_tokens)} in /{" "}
+        {formatTokens(totals.output_tokens)} out
+      </span>
+      <span>{totals.turns} turns</span>
+      {totals.last_chat && (
+        <span className="agent-proj-last">
+          last {totals.last_chat.replace("T", " ")}
+        </span>
+      )}
+    </div>
   );
 }
 
