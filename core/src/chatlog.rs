@@ -107,19 +107,31 @@ pub fn list_chats(chats_root: &Path, key: &str) -> Vec<ChatEntry> {
     files
         .into_iter()
         .filter_map(|file| {
-            // Unreadable file → skipped; readable but unparsable → stem title.
-            let text = std::fs::read_to_string(chats_root.join(key).join(&file)).ok()?;
-            let title = text
-                .lines()
-                .next()
-                .and_then(|first| serde_json::from_str::<serde_json::Value>(first).ok())
-                .filter(|v| v.get("op").and_then(|o| o.as_str()) == Some("userSent"))
-                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
-                .map(|t| t.chars().take(80).collect())
+            // Unreadable file → skipped; no userSent in the head → stem title.
+            let f = std::fs::File::open(chats_root.join(key).join(&file)).ok()?;
+            let title = title_from_head(std::io::BufReader::new(f))
                 .unwrap_or_else(|| file.trim_end_matches(".ndjson").to_string());
             Some(ChatEntry { file, title })
         })
         .collect()
+}
+
+/// How deep into a chat file the title scan looks. The recorder writes
+/// meta → sessionStarted → userSent, so the first user text sits on line 2
+/// or 3 of every real file; the cap only exists so that listing 50 chats
+/// whose events run to megabytes never reads past the head of any of them.
+const TITLE_SCAN_LINES: usize = 10;
+
+/// The first `userSent` op's text within the head of a chat, 80 chars max.
+fn title_from_head(reader: impl std::io::BufRead) -> Option<String> {
+    reader
+        .lines()
+        .take(TITLE_SCAN_LINES)
+        .map_while(|l| l.ok())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        .find(|v| v.get("op").and_then(|o| o.as_str()) == Some("userSent"))
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        .map(|t| t.chars().take(80).collect())
 }
 
 /// The `*.ndjson` basenames under one sketch's chat directory, unsorted.
@@ -247,10 +259,39 @@ mod tests {
         let list = list_chats(tmp.path(), "k");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].file, "2026-08-05T09-30-00.ndjson");
-        // First line is meta, not userSent, so the title falls back to the stem.
-        assert_eq!(list[0].title, "2026-08-05T09-30-00");
+        // Every real file starts with the recorder's meta line — the title
+        // must come from the first userSent op, wherever it sits in the head.
+        assert_eq!(list[0].title, "fix the wifi loop");
         assert_eq!(list[1].file, "2026-08-04T10-00-00.ndjson");
         assert_eq!(list[1].title, "x".repeat(80), "title truncated to 80 chars");
+    }
+
+    #[test]
+    fn title_scan_is_bounded_and_reads_only_the_head() {
+        // The realistic head: meta, then sessionStarted, then the user.
+        let tmp = tempfile::tempdir().unwrap();
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-05T10-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/s","startedAt":"t"}"#,
+                r#"{"op":"sessionStarted","pid":42}"#,
+                r#"{"op":"userSent","text":"scan me"}"#,
+            ],
+        );
+        // A file whose first userSent sits beyond the scan cap keeps the stem
+        // title — the cap is what keeps listing 50 multi-MB chats cheap.
+        let mut filler: Vec<String> = (0..TITLE_SCAN_LINES)
+            .map(|i| format!(r#"{{"op":"push","ev":{{"n":{i}}}}}"#))
+            .collect();
+        filler.push(r#"{"op":"userSent","text":"too deep"}"#.to_string());
+        let filler_refs: Vec<&str> = filler.iter().map(String::as_str).collect();
+        write_chat(tmp.path(), "k", "2026-08-05T11-00-00.ndjson", &filler_refs);
+
+        let list = list_chats(tmp.path(), "k");
+        assert_eq!(list[1].title, "scan me");
+        assert_eq!(list[0].title, "2026-08-05T11-00-00");
     }
 
     #[test]

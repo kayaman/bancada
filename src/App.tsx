@@ -329,7 +329,12 @@ export default function App() {
       // panel has ever been mounted (spec: agentStore is not panel-owned).
       api.onAgentEvent((ev) => {
         agentStore.push(ev);
-        chatRecorder.record({ op: "push", ev });
+        // Deltas are transient duplicates of the authoritative assistant
+        // event that follows them — recording them would write the same
+        // text twice and fire one IPC append per streamed fragment. Replay
+        // of completed turns is unchanged without them; only an
+        // interrupted turn's partial text is lost from history.
+        if (ev.type !== "stream_event") chatRecorder.record({ op: "push", ev });
         if (bottomTabRef.current !== "agent")
           setUnseen((u) => ({ ...u, agent: true }));
         handleAgentSideEffects(ev);
@@ -342,8 +347,14 @@ export default function App() {
         // — Send disabled, panel saying "Session ended", child alive and
         // still streaming.
         agentStore.closed(p.reason, p.pid);
-        chatRecorder.record({ op: "closed", reason: p.reason, pid: p.pid });
-        chatRecorder.stop();
+        // Follow the store's pid-guard verdict (FE-C1): a stale close from
+        // a superseded session must not write a foreign `closed` op into
+        // the NEW session's file and stop its recording for good. If the
+        // store still says "running", the close wasn't ours.
+        if (agentStore.snapshot().status === "ended") {
+          chatRecorder.record({ op: "closed", reason: p.reason, pid: p.pid });
+          chatRecorder.stop();
+        }
         // Belt and braces: the backend's own stdout reader already reaps its
         // session at EOF (so a closed window no longer leaks a listener), but
         // this stays as the second path. Pid-scoped for the same reason —

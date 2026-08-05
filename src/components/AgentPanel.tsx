@@ -143,9 +143,14 @@ export default function AgentPanel({
   const stickToBottom = useRef(true);
 
   useEffect(() => {
+    // A live stream must not yank the scroll while the user is reading a
+    // replay, the history list, or a turn summary — those views share this
+    // scroll container but follow the *live* store's tick.
+    if (viewTurn || histList || histStore) return;
     const el = scrollRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
     // `tick` (not `snap`) so this only runs when the store actually changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick]);
 
   const onScroll = () => {
@@ -207,17 +212,11 @@ export default function AgentPanel({
         {viewTurn ? (
           <TurnSummaryView turn={viewTurn} onBack={() => setViewTurn(null)} />
         ) : histStore ? (
-          // A saved chat, replayed through the same components as a live one.
-          histStore
-            .snapshot()
-            .messages.map((m, i) => (
-              <MessageView
-                key={i}
-                msg={m}
-                openBottomTab={openBottomTab}
-                onOpenTurn={setViewTurn}
-              />
-            ))
+          <ReplayView
+            store={histStore}
+            openBottomTab={openBottomTab}
+            onOpenTurn={setViewTurn}
+          />
         ) : histList ? (
           <HistListView
             entries={histList}
@@ -507,6 +506,38 @@ function DiffView({ lines }: { lines: DiffLine[] }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+// ---------- chat history replay ----------
+
+/** A saved chat through the same components as a live one — including the
+ *  session-end line and any alarm, or the replay wouldn't be faithful. */
+function ReplayView({
+  store,
+  openBottomTab,
+  onOpenTurn,
+}: {
+  store: AgentStore;
+  openBottomTab: (tab: BottomTab) => void;
+  onOpenTurn: (turn: TurnEnd) => void;
+}) {
+  const snap = store.snapshot();
+  return (
+    <>
+      {snap.messages.map((m, i) => (
+        <MessageView
+          key={i}
+          msg={m}
+          openBottomTab={openBottomTab}
+          onOpenTurn={onOpenTurn}
+        />
+      ))}
+      {snap.alarm && <AlarmView alarm={snap.alarm} />}
+      {snap.closedReason && (
+        <div className="agent-closed">Session ended — {snap.closedReason}</div>
+      )}
+    </>
   );
 }
 

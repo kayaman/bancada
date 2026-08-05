@@ -26,6 +26,12 @@ live rendering — no second message schema to version. Raw events alone
 would not be enough: user bubbles enter via `userSent`, a local call,
 never as an `agent://event`.
 
+`stream_event` deltas are **not** recorded: they are transient
+duplicates of the authoritative assistant event that follows them, and
+recording them would write the same text twice and fire one IPC append
+per streamed fragment. Replay of completed turns is unchanged; only an
+interrupted turn's partial text is absent from history.
+
 ### Storage
 
 `<app_config_dir>/chats/<sketch-key>/<timestamp>.ndjson`, where
@@ -46,8 +52,11 @@ filenames come from the caller; unit-tested like `settings.rs`):
   creates parents, appends `line` + newline. Rejects a `file` that is
   not a plain `*.ndjson` basename (no separators, no `..`).
 - `list_chats(chats_root, sketch_key) -> Vec<ChatEntry>` — newest
-  first; `ChatEntry { file, title }` where title is the first
-  `userSent` line's text (truncated to 80 chars), else the filename.
+  first; `ChatEntry { file, title }` where title is the text of the
+  first `userSent` op **within the file's head** (a bounded
+  `BufReader` scan — every real file starts with the meta line, so the
+  user text sits on line 2–3; the cap keeps listing 50 large chats
+  cheap), truncated to 80 chars, else the file stem.
   Unreadable/corrupt files are skipped, never fatal.
 - `load_chat(chats_root, sketch_key, file) -> Vec<String>`
 - `delete_chat(chats_root, sketch_key, file) -> Result<()>`
@@ -79,6 +88,17 @@ into a separate read-only `AgentStore`, and renders with the existing
 `MessageView` components; the input row is replaced by a
 `← Back to current chat` bar. The live store, session, and unseen-dot
 plumbing are untouched while browsing. No search, no resume, no export.
+
+## Retention and sensitivity
+
+Chat files persist tool results verbatim: an agent `Read` of a
+credentials file lands in plaintext under `<app_config_dir>/chats/`
+and stays until 50 newer chats push it out or the user deletes it from
+the History list. This is a deliberate trade — replay fidelity over
+redaction — made for a single-user desktop app whose config dir is
+already the trust boundary (it holds the fleet and settings too).
+Revisit with the `src/obs/redact` machinery if chats ever leave the
+machine (sync, export, vault publishing).
 
 ## Testing
 
