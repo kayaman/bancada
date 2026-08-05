@@ -735,6 +735,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPort]);
 
+  // Capture by default, part 2: the Serial Monitor tab being visible is a
+  // standing request for capture. The port-selection auto-start above is a
+  // one-shot whose failure is deliberately silent, so a lost attempt (port
+  // briefly held by a dying previous monitor child, say) left the monitor
+  // dead until a manual Start. Edge-triggered on tab/port — monitor state
+  // is read via refs inside startMonitorQuiet, deliberately NOT a dep, so
+  // Stop while staying on the tab stays stopped; leaving and returning
+  // re-requests capture. busyRef guards flash-time port contention.
+  useEffect(() => {
+    if (bottomTab !== "serial" || busyRef.current) return;
+    startMonitorQuiet();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bottomTab, selectedPort, startMonitorQuiet]);
+
   const toggleMonitor = async () => {
     try {
       if (monitorOn) {
