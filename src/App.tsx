@@ -1287,16 +1287,20 @@ export default function App() {
           </button>
         </div>
         <div className="panel-tabs">
-          {GROUP_TABS[bottomGroup].map((t) => (
-            <button
-              key={t}
-              className={bottomTab === t ? "tab active" : "tab"}
-              onClick={() => openBottomTab(t)}
-            >
-              {TAB_LABEL[t]}
-              {unseen[t] && <span className="tab-dot">●</span>}
-            </button>
-          ))}
+          {/* Single-tab groups render an empty row: their one tab would
+              duplicate the group button directly above it. The row's
+              min-height keeps the header from jumping between groups. */}
+          {GROUP_TABS[bottomGroup].length > 1 &&
+            GROUP_TABS[bottomGroup].map((t) => (
+              <button
+                key={t}
+                className={bottomTab === t ? "tab active" : "tab"}
+                onClick={() => openBottomTab(t)}
+              >
+                {TAB_LABEL[t]}
+                {unseen[t] && <span className="tab-dot">●</span>}
+              </button>
+            ))}
           <div className="spacer" />
           {bottomTab === "serial" && (
             <>

@@ -35,10 +35,13 @@ The bottom panel header becomes two rows.
 
 ### Row 2 — sub-tabs (`.panel-tabs`)
 
-- Always rendered, showing `GROUP_TABS[bottomGroup]` — including for
-  single-tab groups (Console, Assistant), whose one tab simply renders
-  active. A constant two-row header means the panel height never jumps
-  when switching groups.
+- Always rendered. Multi-tab groups (Debugging, Observability) show
+  their sub-tabs; single-tab groups (Console, Assistant) render an
+  **empty** row — showing their one tab duplicated the group button
+  directly above it ("Console" under "⚙ Console"), which read as a
+  rendering bug (user feedback, 2026-08-05). The row's height is pinned
+  in CSS (`min-height`), so the header still never jumps when switching
+  groups.
 - Tabs keep the existing `.tab` styling, per-tab unseen dots, and the
   `openBottomTab` click handler. Serial Monitor and Oscilloscope remain
   under Debugging; MQTT and WebSocket under Observability.
