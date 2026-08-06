@@ -91,6 +91,20 @@ export class AgentStore {
   private pidVal?: number;
 
   /**
+   * Pids of sessions this store has already been cleared away from. After
+   * `clear()` and before the next `sessionStarted`, `pidVal` is `undefined`
+   * — and "undefined means assume ours" would let the cleared child's late
+   * EOF flip the *fresh* store to "ended". The set (one entry per session
+   * per app run; a rapid double-switch can have two EOFs in flight) survives
+   * `clear()` so those events die here regardless of timing. Ordinary
+   * events (`assistant`, `stderr`, …) carry no pid on the wire, so a
+   * handful already queued at teardown can still paint into the fresh
+   * store; fixing that needs backend pid-stamping on every event, and the
+   * window is milliseconds.
+   */
+  private supersededPids = new Set<number>();
+
+  /**
    * Index into `msgs` of the assistant message currently accumulating text,
    * or `undefined` if the next delta/assistant text should start a fresh
    * one. Reset on any boundary between model inferences: a `result` event,
@@ -119,6 +133,7 @@ export class AgentStore {
    * events, and an event without a pid predates the stamping.
    */
   private isOurs(pid: number | undefined): boolean {
+    if (pid !== undefined && this.supersededPids.has(pid)) return false;
     return pid === undefined || this.pidVal === undefined || pid === this.pidVal;
   }
 
@@ -200,8 +215,11 @@ export class AgentStore {
     this.ver++;
   }
 
-  /** Drop all messages and session state back to a fresh store. */
+  /** Drop all messages and session state back to a fresh store. The cleared
+   *  session's pid joins `supersededPids` so its in-flight events cannot
+   *  touch what comes after. */
   clear(): void {
+    if (this.pidVal !== undefined) this.supersededPids.add(this.pidVal);
     this.msgs = [];
     this.statusFlag = "idle";
     this.lastResultVal = undefined;

@@ -459,6 +459,11 @@ export default function App() {
         api.listSketchFiles(dir),
         api.loadSketchYaml(dir),
       ]);
+      // A sketchDir change is a hard agent boundary: the Σ chip, transcript
+      // and chat recording are per-project. Placed after the awaits so a
+      // failed open leaves the current project's session intact; skipped on
+      // a same-dir reopen, which changes nothing about the project scope.
+      if (sketchDirRef.current !== dir) teardownAgentSession("project switched");
       setSketchDir(dir);
       setFiles(fs);
       setSketchYaml(yaml);
@@ -1097,8 +1102,19 @@ export default function App() {
     api.agentInterrupt().catch((e) => notify(String(e), true));
   };
 
-  /** Stop the session and drop the transcript back to a clean slate. */
-  const newAgentSession = () => {
+  /** Hard session boundary: stop the child, close the recording, drop the
+   *  transcript/usage and agent-related UI flags. Idempotent — safe when no
+   *  session exists (startup restore, double-switch). */
+  const teardownAgentSession = (reason: string) => {
+    // Replays stay honest: a torn-down chat ends with a closed line, not a
+    // silent truncation. Status guard: an armed-but-never-started recorder
+    // (agentStart threw before userSent → still "idle") must not flush a
+    // meta+closed-only file, and after a natural end ("ended") the
+    // onAgentClosed listener already wrote the real closed op.
+    const status = agentStore.snapshot().status;
+    if (chatRecorder.active && status !== "idle" && status !== "ended") {
+      chatRecorder.record({ op: "closed", reason });
+    }
     api.agentStop().catch(() => {});
     chatRecorder.stop();
     agentStore.clear();
@@ -1109,6 +1125,9 @@ export default function App() {
     // leaving the toolbar disabled forever.
     setAgentBuilding(false);
   };
+
+  /** Stop the session and drop the transcript back to a clean slate. */
+  const newAgentSession = () => teardownAgentSession("new session");
 
   // ---------- render ----------
 
@@ -1466,6 +1485,11 @@ export default function App() {
         )}
         {agentMounted && (
           <AgentPanel
+            // Remount per project: panel-local state (History list/replay,
+            // totals, turn view, draft) belongs to one sketch's chats, and a
+            // sketchDir change is a hard boundary — resetting by key can't
+            // miss a state added later the way a reset effect could.
+            key={sketchDir ?? ""}
             active={bottomTab === "agent"}
             sketchDir={sketchDir}
             store={agentStore}

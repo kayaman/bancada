@@ -200,6 +200,20 @@ describe("replayChat", () => {
     ]);
   });
 
+  it("a project-switch teardown replays as an honest session end", () => {
+    // The exact op teardownAgentSession writes when the user switches
+    // projects mid-session: no pid (the recorder is closing, not reacting
+    // to a child EOF), free-form reason.
+    const lines = [
+      '{"op":"userSent","text":"hi"}',
+      '{"op":"sessionStarted","pid":7}',
+      '{"op":"closed","reason":"project switched"}',
+    ];
+    const snap = replayChat(lines).snapshot();
+    expect(snap.status).toBe("ended");
+    expect(snap.closedReason).toBe("project switched");
+  });
+
   it("ignores the meta line and empty lines: alone they yield a fresh store", () => {
     const lines = [
       '{"op":"meta","sketchDir":"/s","startedAt":"t"}',

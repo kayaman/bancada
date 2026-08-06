@@ -445,6 +445,70 @@ describe("AgentStore: a stale close must not end a live newer session", () => {
   });
 });
 
+describe("AgentStore: a superseded session's events die at clear(), not at the next start", () => {
+  // Project switching makes this routine: teardown fires agentStop() without
+  // awaiting and clear()s. Until the user sends in the new project, pidVal is
+  // undefined — and "undefined means assume ours" would let the old child's
+  // late EOF flip the fresh store to "ended" (Send disabled in a project
+  // that never ran an agent). The cleared pid is remembered as superseded.
+  it("ignores the cleared session's late close while no new session exists", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.userSent("hi");
+    s.clear(); // project switched
+    const v = s.version;
+
+    s.closed("the agent process ended", 41); // old child's EOF
+
+    const snap = s.snapshot();
+    expect(snap.status).toBe("idle");
+    expect(snap.closedReason).toBeUndefined();
+    expect(s.version).toBe(v); // dropped events bump nothing
+  });
+
+  it("still ends the store for a genuinely unknown session's close", () => {
+    // The documented contract survives: undefined-on-our-side means "assume
+    // ours" for sessions this store never learned about.
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.clear();
+    s.closed("ended", 99);
+    expect(s.snapshot().status).toBe("ended");
+  });
+
+  it("remembers every superseded pid across multiple clears", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41); // project A
+    s.clear();
+    s.sessionStarted(42); // project B
+    s.clear();
+    s.sessionStarted(43); // project C, live
+
+    s.closed("eof", 41);
+    s.closed("eof", 42);
+    expect(s.snapshot().status).toBe("idle");
+
+    s.closed("eof", 43); // the live session's own close still lands
+    expect(s.snapshot().status).toBe("ended");
+  });
+
+  it("drops a superseded session's security_alarm and verify events", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.clear();
+    const v = s.version;
+
+    s.push({ type: "security_alarm", kind: "path_escape", detail: "x", pid: 41 });
+    s.push({ type: "verify_started", pid: 41 });
+
+    const snap = s.snapshot();
+    expect(snap.alarm).toBeUndefined();
+    expect(snap.status).toBe("idle");
+    expect(snap.verifyRunning).toBe(false);
+    expect(s.version).toBe(v);
+  });
+});
+
 // ---------- FE-I1: MCP tool results arrive as content blocks ----------
 
 describe("AgentStore: tool_result content shapes", () => {
