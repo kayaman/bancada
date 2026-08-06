@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Bancada mark: bench + etched signal pulse + lamp dot. Master, full detail. -->
+  <rect x="0" y="0" width="512" height="512" rx="115" fill="#1a1f2e"/>
+
+  <!-- lamp glow ring -->
+  <circle cx="256" cy="132" r="64" fill="none" stroke="#fbbf24" stroke-width="10" opacity="0.25"/>
+  <!-- lamp -->
+  <circle cx="256" cy="132" r="44" fill="#fbbf24"/>
+
+  <!-- benchtop slab -->
+  <rect x="64" y="224" width="384" height="80" fill="#2dd4bf"/>
+  <!-- machined top bevel -->
+  <rect x="64" y="224" width="384" height="16" fill="#5eead4"/>
+
+  <!-- signal pulse etched into the benchtop face -->
+  <path d="M 88 278 H 200 V 252 H 280 V 278 H 424"
+        fill="none" stroke="#1a1f2e" stroke-width="12"
+        stroke-linecap="butt" stroke-linejoin="miter"/>
+
+  <!-- legs, slight inward taper -->
+  <polygon points="112,304 164,304 158,448 118,448" fill="#2dd4bf"/>
+  <polygon points="348,304 400,304 394,448 354,448" fill="#2dd4bf"/>
+</svg>
