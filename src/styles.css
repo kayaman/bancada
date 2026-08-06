@@ -62,6 +62,49 @@ body {
   flex: 1;
 }
 
+/* Brand lockup at the toolbar's leading edge: mark, wordmark, dim version. */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 2px;
+  user-select: none;
+}
+
+.brand-name {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+
+.brand-version {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Control grouping: thin rules between clusters, tighter gap inside a
+   group, and a 2px "pair" gap for controls that act as one unit (port
+   picker + rescan). */
+.toolbar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+  flex: none;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-pair {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 /* ---------- controls (shared) ----------
    One height, radius, and state model for every button, select and input:
    hover = raised bg, active = pressed bg, focus-visible = accent ring. */
