@@ -492,6 +492,18 @@ describe("AgentStore: a superseded session's events die at clear(), not at the n
     expect(s.snapshot().status).toBe("ended");
   });
 
+  it("a pid the OS recycles onto a fresh session is no longer superseded", () => {
+    // macOS wraps pids around ~100k, so a long bench run can hand a new
+    // agent child an old session's pid. agent_start returning it makes it
+    // definitionally ours again — its close (and alarms) must land.
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.clear();
+    s.sessionStarted(41); // recycled
+    s.closed("the agent process ended", 41);
+    expect(s.snapshot().status).toBe("ended");
+  });
+
   it("drops a superseded session's security_alarm and verify events", () => {
     const s = new AgentStore();
     s.sessionStarted(41);

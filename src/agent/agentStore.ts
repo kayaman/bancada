@@ -195,8 +195,11 @@ export class AgentStore {
     this.ver++;
   }
 
-  /** Bind this store to the session `agent_start` just returned. */
+  /** Bind this store to the session `agent_start` just returned. A pid the
+   *  OS recycled from a superseded session is ours again — evict it, or the
+   *  set would eat the live session's close and alarms. */
   sessionStarted(pid: number): void {
+    this.supersededPids.delete(pid);
     this.pidVal = pid;
   }
 
