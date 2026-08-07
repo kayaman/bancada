@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import type { DetectedPort, SketchYaml } from "../api";
 import { portOptions } from "../ports";
 import BrandMark from "./BrandMark";
+import RecentsMenu from "./RecentsMenu";
 
 interface Props {
   sketchDir: string | null;
@@ -12,6 +13,7 @@ interface Props {
   selectedPort: string | null;
   busy: boolean;
   onOpenSketch: () => void;
+  onOpenRecent: (dir: string) => void;
   onNewProject: () => void;
   onCloneProject: () => void;
   onCreateProfile: () => void;
@@ -51,6 +53,8 @@ export default function Toolbar(props: Props) {
         >
           {sketchName ? `📁 ${sketchName}` : "📁 Open Sketch…"}
         </button>
+
+        <RecentsMenu onOpen={props.onOpenRecent} />
 
         <button
           className="btn"

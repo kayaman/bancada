@@ -4,7 +4,7 @@ import {
   cloneProject,
   defaultProjectParent,
   loadSettings,
-  saveSettings,
+  setLastProjectParent,
 } from "../api";
 
 interface Props {
@@ -77,7 +77,7 @@ export default function CloneProject({
     try {
       const res = await cloneProject(source.trim(), parent, name.trim());
       // Remembering the parent is a convenience; never fail cloning over it.
-      saveSettings({ last_new_project_parent: parent }).catch(() => {});
+      setLastProjectParent(parent).catch(() => {});
       notify(
         res.warnings.length
           ? `Cloned into ${res.dir}, with notes: ${res.warnings.join("; ")}`

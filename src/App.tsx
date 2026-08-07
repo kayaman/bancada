@@ -5,6 +5,7 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
+import { matchesAccel, parseAccel } from "./keys";
 import { nextSelectedPort, visibleBoard } from "./ports";
 import { checkNewEntry, checkNewFile } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
@@ -64,6 +65,10 @@ const SIDEBAR_MIN = 220;
 const SIDEBAR_DEFAULT = 280;
 const clampSidebarWidth = (w: number) =>
   Math.min(Math.max(w, SIDEBAR_MIN), Math.round(window.innerWidth * 0.5));
+
+// Global accelerators; the specs are literals, so the parses cannot fail.
+const ACCEL_SAVE = parseAccel("Ctrl+S")!;
+const ACCEL_OPEN = parseAccel("Ctrl+O")!;
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
@@ -496,14 +501,17 @@ export default function App() {
       if (target) {
         await openFileInEditor(dir, target.rel_path);
       } else {
-        api
-          .saveSettings({ last_sketch_dir: dir, last_open_file: null })
-          .catch(() => {});
+        api.setLastSketch(dir, null).catch(() => {});
       }
       notify(`Opened ${dir}`);
+      // One recency hook for every route in: picker, restore, new, clone and
+      // a recents-click all funnel through loadSketch.
+      api.pushRecentProject(dir).catch(() => {});
       return true;
     } catch (e) {
       notify(String(e), true);
+      // A dir that no longer opens (moved, deleted) prunes itself.
+      api.removeRecentProject(dir).catch(() => {});
       return false;
     }
   };
@@ -518,9 +526,7 @@ export default function App() {
       // keep the tree oriented: reveal the file's folder chain
       useExplorerStore.getState().expandTo(relPath);
       useExplorerStore.getState().select(relPath);
-      api
-        .saveSettings({ last_sketch_dir: dir, last_open_file: relPath })
-        .catch(() => {});
+      api.setLastSketch(dir, relPath).catch(() => {});
     } catch (e) {
       notify(String(e), true);
     }
@@ -601,9 +607,7 @@ export default function App() {
         const np = pathAfterRename(openFile, from, to, wasDir);
         if (np !== null) {
           setOpenFile(np);
-          api
-            .saveSettings({ last_sketch_dir: sketchDir, last_open_file: np })
-            .catch(() => {});
+          api.setLastSketch(sketchDir, np).catch(() => {});
         }
       }
       notify(`Renamed ${from} → ${to}`);
@@ -643,9 +647,7 @@ export default function App() {
         } else {
           setOpenFile(null);
           setContent("");
-          api
-            .saveSettings({ last_sketch_dir: sketchDir, last_open_file: null })
-            .catch(() => {});
+          api.setLastSketch(sketchDir, null).catch(() => {});
         }
       }
       notify(`Moved ${relPath} to the trash`);
@@ -737,17 +739,24 @@ export default function App() {
     return block.blocked;
   };
 
-  // Ctrl+S
+  // Global accelerators: Ctrl+S save, Ctrl+O open. Both fire in inputs too —
+  // Ctrl+O must preventDefault there anyway, and keys.ts scopes the
+  // isTypingTarget guard to unmodified keys. openSketch is a per-render
+  // const, so this re-subscribes every render — the codebase's tolerated
+  // cost over a useCallback chain.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      if (matchesAccel(e, ACCEL_SAVE)) {
         e.preventDefault();
         saveCurrent();
+      } else if (matchesAccel(e, ACCEL_OPEN)) {
+        e.preventDefault();
+        void openSketch();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [saveCurrent]);
+  }, [saveCurrent, openSketch]);
 
   // ---------- build & flash ----------
 
@@ -1148,6 +1157,7 @@ export default function App() {
         selectedPort={selectedPort}
         busy={busy}
         onOpenSketch={openSketch}
+        onOpenRecent={(dir) => void loadSketch(dir)}
         onNewProject={() => {
           setCreatingProject(true);
           setCloningProject(false);

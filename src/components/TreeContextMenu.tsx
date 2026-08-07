@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState } from "react";
 import { useExplorerStore } from "../explorerStore";
+import Menu from "./Menu";
 
 interface Props {
   /** Is the target rel_path a directory? (root target is null) */
@@ -24,35 +24,6 @@ export default function TreeContextMenu({
 }: Props) {
   const menu = useExplorerStore((s) => s.contextMenu);
   const close = useExplorerStore((s) => s.closeContextMenu);
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
-
-  useLayoutEffect(() => {
-    if (!menu || !ref.current) return;
-    const r = ref.current.getBoundingClientRect();
-    setPos({
-      x: Math.min(menu.x, window.innerWidth - r.width - 4),
-      y: Math.min(menu.y, window.innerHeight - r.height - 4),
-    });
-  }, [menu]);
-
-  useLayoutEffect(() => {
-    if (!menu) return;
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("blur", close);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("blur", close);
-    };
-  }, [menu, close]);
 
   if (!menu) return null;
   const target = menu.target;
@@ -87,12 +58,7 @@ export default function TreeContextMenu({
   );
 
   return (
-    <div
-      ref={ref}
-      className="ctx-menu"
-      style={{ left: pos?.x ?? menu.x, top: pos?.y ?? menu.y }}
-      onContextMenu={(e) => e.preventDefault()}
-    >
+    <Menu x={menu.x} y={menu.y} onClose={close}>
       {item("New File…", () => onNewFile(parentDir))}
       {item("New Folder…", () => onNewFolder(parentDir))}
       {target !== null && onRename && (
@@ -102,6 +68,6 @@ export default function TreeContextMenu({
         </>
       )}
       {target !== null && onDelete && item("Delete", () => onDelete(target), prot, protTitle)}
-    </div>
+    </Menu>
   );
 }

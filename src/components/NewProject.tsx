@@ -6,8 +6,8 @@ import {
   defaultProjectParent,
   listAllBoards,
   loadSettings,
-  saveSettings,
   searchLibraries,
+  setLastProjectParent,
   type BoardOption,
   type IndexedLibrary,
 } from "../api";
@@ -105,7 +105,7 @@ export default function NewProject({
         libraries,
       );
       // Remembering the parent is a convenience; never fail creation over it.
-      saveSettings({ last_new_project_parent: parent }).catch(() => {});
+      setLastProjectParent(parent).catch(() => {});
       notify(
         res.library_errors.length
           ? `Created ${res.dir}, but ${res.library_errors.length} librar${res.library_errors.length === 1 ? "y" : "ies"} failed: ${res.library_errors.join("; ")}`

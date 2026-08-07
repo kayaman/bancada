@@ -171,6 +171,8 @@ export interface AppSettings {
   last_sketch_dir?: string | null;
   last_open_file?: string | null;
   last_new_project_parent?: string | null;
+  /** Most-recently-opened first; the backend caps and dedupes the list. */
+  recent_projects?: string[];
 }
 
 /** Where an installed platform stands relative to its newest release. */
@@ -526,8 +528,18 @@ export const forgetBoard = (id: string) =>
   invoke<FleetEntry[]>("forget_board", { id });
 
 export const loadSettings = () => invoke<AppSettings>("load_settings");
-export const saveSettings = (settings: AppSettings) =>
-  invoke<void>("save_settings", { settings });
+/** Remember the open sketch and file for the next launch's restore. */
+export const setLastSketch = (dir: string, openFile: string | null) =>
+  invoke<void>("set_last_sketch", { dir, openFile });
+/** Remember where the last project was created, for the New/Clone forms. */
+export const setLastProjectParent = (dir: string) =>
+  invoke<void>("set_last_project_parent", { dir });
+/** Move `dir` to the top of the recent-projects list (adding it if new). */
+export const pushRecentProject = (dir: string) =>
+  invoke<void>("push_recent_project", { dir });
+/** Drop `dir` from the recent-projects list — a failed open prunes it. */
+export const removeRecentProject = (dir: string) =>
+  invoke<void>("remove_recent_project", { dir });
 
 // ---------- assistant chat history ----------
 

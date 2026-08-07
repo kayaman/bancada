@@ -488,10 +488,32 @@ describe("fleet and settings", () => {
     expect(called()).toEqual(["forget_board", { id: "id1" }]);
   });
 
-  it("saveSettings nests the settings object", async () => {
-    const settings = { last_sketch_dir: "/s" } as never;
-    await api.saveSettings(settings);
-    expect(called()).toEqual(["save_settings", { settings }]);
+  it("setLastSketch passes dir and openFile", async () => {
+    await api.setLastSketch("/s", "a.ino");
+    expect(called()).toEqual([
+      "set_last_sketch",
+      { dir: "/s", openFile: "a.ino" },
+    ]);
+  });
+
+  it("setLastSketch forwards a null openFile rather than omitting it", async () => {
+    await api.setLastSketch("/s", null);
+    expect(called()).toEqual(["set_last_sketch", { dir: "/s", openFile: null }]);
+  });
+
+  it("setLastProjectParent passes the dir", async () => {
+    await api.setLastProjectParent("/home/x/Projects");
+    expect(called()).toEqual([
+      "set_last_project_parent",
+      { dir: "/home/x/Projects" },
+    ]);
+  });
+
+  it("pushRecentProject and removeRecentProject pass the dir", async () => {
+    await api.pushRecentProject("/s");
+    expect(called()).toEqual(["push_recent_project", { dir: "/s" }]);
+    await api.removeRecentProject("/s");
+    expect(called()).toEqual(["remove_recent_project", { dir: "/s" }]);
   });
 
   it("sketchHasGit passes sketchDir", async () => {

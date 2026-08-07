@@ -1362,12 +1362,37 @@ fn load_settings(app: AppHandle) -> Result<bancada_core::settings::AppSettings, 
     Ok(bancada_core::settings::load(&settings_path(&app)?))
 }
 
-#[tauri::command]
-fn save_settings(
-    app: AppHandle,
-    settings: bancada_core::settings::AppSettings,
+fn update_settings(
+    app: &AppHandle,
+    f: impl FnOnce(&mut bancada_core::settings::AppSettings),
 ) -> Result<(), String> {
-    bancada_core::settings::save(&settings_path(&app)?, &settings).map_err(err_str)
+    let path = settings_path(app)?;
+    let mut s = bancada_core::settings::load(&path);
+    f(&mut s);
+    bancada_core::settings::save(&path, &s).map_err(err_str)
+}
+
+// These four are deliberately non-async: they run on the main thread, so
+// read-modify-write cycles are serialized without needing a mutex.
+
+#[tauri::command]
+fn set_last_sketch(app: AppHandle, dir: String, open_file: Option<String>) -> Result<(), String> {
+    update_settings(&app, |s| s.set_last_sketch(dir, open_file))
+}
+
+#[tauri::command]
+fn set_last_project_parent(app: AppHandle, dir: String) -> Result<(), String> {
+    update_settings(&app, |s| s.set_last_project_parent(dir))
+}
+
+#[tauri::command]
+fn push_recent_project(app: AppHandle, dir: String) -> Result<(), String> {
+    update_settings(&app, |s| s.push_recent(dir))
+}
+
+#[tauri::command]
+fn remove_recent_project(app: AppHandle, dir: String) -> Result<(), String> {
+    update_settings(&app, |s| s.remove_recent(&dir))
 }
 
 // ---------- assistant chat history ----------
@@ -3087,7 +3112,10 @@ pub fn run() {
             save_text_file,
             save_binary_file,
             load_settings,
-            save_settings,
+            set_last_sketch,
+            set_last_project_parent,
+            push_recent_project,
+            remove_recent_project,
             read_board_mac,
             fleet_sync,
             set_board_nickname,
