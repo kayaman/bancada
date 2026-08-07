@@ -18,6 +18,7 @@ import type {
   AgentMessage,
   AgentStatus,
   AgentStore,
+  RawLogEntry,
 } from "../agent/agentStore";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -72,10 +73,11 @@ export default function AgentPanel({
   useEffect(() => {
     if (!active) return;
     const iv = window.setInterval(() => {
-      if (store.version !== lastVersionRef.current) {
-        lastVersionRef.current = store.version;
-        setTick((t) => t + 1);
-      }
+      const changed = store.version !== lastVersionRef.current;
+      if (changed) lastVersionRef.current = store.version;
+      // Repaint on every poll while a turn is live — the footer's elapsed
+      // counter ticks with wall time, not with store versions.
+      if (changed || store.snapshot().turnActive) setTick((t) => t + 1);
     }, POLL_MS);
     return () => window.clearInterval(iv);
   }, [active, store]);
@@ -98,6 +100,10 @@ export default function AgentPanel({
   // ---------- turn summary view (a turn_end divider was clicked) ----------
 
   const [viewTurn, setViewTurn] = useState<TurnEnd | null>(null);
+
+  // ---------- raw event debug log (🐛 footer toggle) ----------
+
+  const [debugOpen, setDebugOpen] = useState(false);
 
   // ---------- chat history (list of saved chats, and one replayed) ----------
 
@@ -221,6 +227,8 @@ export default function AgentPanel({
       <div className="agent-scroll" ref={scrollRef} onScroll={onScroll}>
         {viewTurn ? (
           <TurnSummaryView turn={viewTurn} onBack={() => setViewTurn(null)} />
+        ) : debugOpen ? (
+          <DebugLogView entries={snap.rawLog} />
         ) : histStore ? (
           <ReplayView
             store={histStore}
@@ -272,7 +280,8 @@ export default function AgentPanel({
 
       <div className="agent-footer">
         <span className="agent-status">
-          {activityLabel(snap) ?? statusLabel(snap.status, snap.verifyRunning)}
+          {activityLabel({ ...snap, now: Date.now() }) ??
+            statusLabel(snap.status, snap.verifyRunning)}
         </span>
         {(snap.sessionUsage.costUsd > 0 ||
           snap.sessionUsage.inputTokens > 0) && (
@@ -301,6 +310,13 @@ export default function AgentPanel({
             Stop
           </button>
         )}
+        <button
+          className={debugOpen ? "btn small primary" : "btn small"}
+          onClick={() => setDebugOpen((o) => !o)}
+          title="Raw agent event log (all stream-json events, including unmodelled ones)"
+        >
+          🐛
+        </button>
         <button className="btn small" onClick={openHistory} title="Saved chats for this sketch">
           🕘 History
         </button>
@@ -510,9 +526,22 @@ function ToolCard({
   }
 
   return (
-    <div className="agent-tool agent-tool-generic">
-      🔍 {msg.name}({argsSummary(msg.input)})
-    </div>
+    <details className="agent-tool agent-tool-generic">
+      <summary>
+        <span
+          className={
+            msg.status === "error" ? "agent-tool-icon fail" : "agent-tool-icon"
+          }
+        >
+          {msg.status === "running" ? "⟳" : msg.status === "error" ? "✗" : "✓"}
+        </span>{" "}
+        🔍 {msg.name}({argsSummary(msg.input)})
+      </summary>
+      <pre className="agent-tool-detail">{prettyJson(msg.input)}</pre>
+      {msg.result && (
+        <pre className="agent-tool-detail">{truncate(msg.result, 4000)}</pre>
+      )}
+    </details>
   );
 }
 
@@ -630,6 +659,34 @@ function HistListView({
   );
 }
 
+// ---------- raw event debug log ----------
+
+/** Every agent://event as received, one collapsible row each — including
+ *  shapes the store ignores (system:status, rate_limit_event, hooks…).
+ *  Coalesced stream_event rows show ×N. */
+function DebugLogView({ entries }: { entries: RawLogEntry[] }) {
+  if (entries.length === 0) {
+    return <div className="agent-empty">No events yet this session.</div>;
+  }
+  return (
+    <div className="agent-debug-log">
+      {entries.map((e, i) => (
+        <details key={`${e.ts}-${i}`} className="agent-debug-entry">
+          <summary>
+            <span className="agent-debug-time">
+              {new Date(e.ts).toLocaleTimeString()}
+            </span>{" "}
+            {e.type}
+            {e.subtype ? `/${e.subtype}` : ""}
+            {e.count > 1 ? ` ×${e.count}` : ""}
+          </summary>
+          <pre className="agent-debug-json">{e.json}</pre>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 // ---------- turn summary view ----------
 
 function turnEndLabel(msg: TurnEnd): string {
@@ -727,7 +784,10 @@ function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
     case "starting":
       return "Starting…";
     case "running":
-      return "Running";
+      // Only reachable between turns: while a turn is in flight,
+      // activityLabel always wins. So "running" here means the session is
+      // alive and the agent is waiting for the user.
+      return "Ready";
     case "ended":
       return "Session ended";
     default:
@@ -751,6 +811,15 @@ function stringField(input: unknown, key: string): string | undefined {
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+/** Pretty JSON for the expanded debug/tool views; never throws on cycles. */
+function prettyJson(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
 /** One-liner arg summary for tool cards this panel doesn't render specially. */
