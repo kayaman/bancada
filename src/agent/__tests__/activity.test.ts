@@ -12,6 +12,7 @@ const base = {
   status: "running" as const,
   verifyRunning: false,
   streaming: false,
+  turnActive: true,
   messages: [] as AgentMessage[],
 };
 
@@ -22,9 +23,17 @@ describe("activityLabel", () => {
     expect(activityLabel({ ...base, status: "starting" })).not.toBeNull();
   });
 
-  it("verify outranks everything", () => {
+  it("is null between turns even while the session runs", () => {
+    expect(activityLabel({ ...base, turnActive: false })).toBeNull();
+    expect(
+      activityLabel({ ...base, turnActive: false, streaming: true }),
+    ).toBeNull();
+  });
+
+  it("verify outranks everything, including the turnActive gate", () => {
     const a = activityLabel({
       ...base,
+      turnActive: false,
       verifyRunning: true,
       streaming: true,
       messages: [tool("Edit", "running", { file_path: "/x/soil.ino" })],
@@ -32,7 +41,7 @@ describe("activityLabel", () => {
     expect(a).toBe("🔨 verify (compiling)…");
   });
 
-  it("names the newest running tool with the file basename", () => {
+  it("names the newest running tool with the full file path", () => {
     const a = activityLabel({
       ...base,
       messages: [
@@ -40,7 +49,7 @@ describe("activityLabel", () => {
         tool("Edit", "running", { file_path: "/home/x/soil/soil.ino" }),
       ],
     });
-    expect(a).toBe("⚙ Edit soil.ino…");
+    expect(a).toBe("⚙ Edit /home/x/soil/soil.ino…");
   });
 
   it("uses the pattern for Grep and Glob", () => {
@@ -69,6 +78,31 @@ describe("activityLabel", () => {
   });
 
   it("defaults to thinking", () => {
+    expect(activityLabel(base)).toBe("thinking…");
+  });
+
+  it("appends elapsed seconds when timestamps are known", () => {
+    const msgs = [
+      {
+        ...tool("Edit", "running", { file_path: "/x/soil.ino" }),
+        startedAt: 1000,
+      },
+    ];
+    expect(activityLabel({ ...base, messages: msgs, now: 13400 })).toBe(
+      "⚙ Edit /x/soil.ino… 12s",
+    );
+    expect(
+      activityLabel({ ...base, streaming: true, turnStartedAt: 1000, now: 4000 }),
+    ).toBe("✍ writing… 3s");
+    expect(activityLabel({ ...base, turnStartedAt: 1000, now: 3100 })).toBe(
+      "thinking… 2s",
+    );
+  });
+
+  it("omits elapsed under one second or without timestamps", () => {
+    expect(activityLabel({ ...base, turnStartedAt: 1000, now: 1500 })).toBe(
+      "thinking…",
+    );
     expect(activityLabel(base)).toBe("thinking…");
   });
 });
