@@ -69,15 +69,18 @@ export default function CloneProject({
   };
 
   const clone = async () => {
-    if (!source || !name.trim() || !parent) return;
+    // The `working` guard matters: Enter in the name field bypasses the
+    // disabled button, and a second concurrent clone to the same name would
+    // sabotage the first one's staging dir (see core clone.rs caveat).
+    if (working || !source.trim() || !name.trim() || !parent) return;
     setWorking(true);
     try {
-      const res = await cloneProject(source, parent, name.trim());
+      const res = await cloneProject(source.trim(), parent, name.trim());
       // Remembering the parent is a convenience; never fail cloning over it.
       saveSettings({ last_new_project_parent: parent }).catch(() => {});
       notify(
         res.warnings.length
-          ? `Cloned with notes: ${res.warnings.join("; ")}`
+          ? `Cloned into ${res.dir}, with notes: ${res.warnings.join("; ")}`
           : `✓ Cloned into ${res.dir}`,
       );
       onCreated(res.dir);
@@ -99,7 +102,7 @@ export default function CloneProject({
         <button
           className="btn small primary"
           onClick={clone}
-          disabled={working || !source || !name.trim() || !parent}
+          disabled={working || !source.trim() || !name.trim() || !parent}
         >
           ⧉ Clone
         </button>
@@ -128,7 +131,9 @@ export default function CloneProject({
             value={name}
             onChange={(e) => {
               setName(e.target.value);
-              setNameTouched(true);
+              // Clearing the field hands the default back: picking a new
+              // source repopulates `<name>-copy` instead of staying empty.
+              setNameTouched(e.target.value !== "");
             }}
             onKeyDown={(e) => e.key === "Enter" && clone()}
           />

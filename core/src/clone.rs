@@ -99,6 +99,19 @@ pub fn clone_project(
             src_dir.join(expected).display()
         )));
     }
+    // is_file() above follows links, so a symlinked main ino would pass and
+    // then be recreated under its OLD name, breaking the retitle later.
+    if src_dir
+        .join(&main_ino)
+        .symlink_metadata()?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(Error::Other(format!(
+            "the main sketch {} is a symlink — clone the project that owns the real file instead",
+            src_dir.join(&main_ino).display()
+        )));
+    }
 
     std::fs::create_dir_all(dest_parent)?;
     let src = src_dir.canonicalize()?;
@@ -181,11 +194,24 @@ pub fn clone_project(
 
     // Overwrites the .gitignore the copy brought over with the merged one.
     let existing = std::fs::read_to_string(src.join(".gitignore")).unwrap_or_default();
-    std::fs::write(staging.join(".gitignore"), merged_gitignore(&existing))?;
+    let gi = staging.join(".gitignore");
+    // fs::write follows symlinks: writing through a recreated .gitignore link
+    // would append our entries into the link's target, outside the clone.
+    // The clone gets a regular file instead.
+    if gi
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        std::fs::remove_file(&gi)?;
+    }
+    std::fs::write(&gi, merged_gitignore(&existing))?;
 
     retitle_main_ino(&staging.join(format!("{name}.ino")), &src_name, &name)?;
     rewrite_sketch_yaml(&staging, &src, &dest, &mut warnings)?;
 
+    // Small TOCTOU window: a directory created at `dest` after the check
+    // above would be replaced by this rename if empty — single-user app,
+    // accepted.
     std::fs::rename(&staging, &dest)?;
     guard.disarm();
 
@@ -219,6 +245,14 @@ fn copy_dir(
         let name = entry.file_name();
         let name_s = name.to_string_lossy().into_owned();
         let ft = path.symlink_metadata()?.file_type();
+        // A worktree checkout has a top-level .git FILE ("gitdir: …");
+        // copying it would tie the clone to the source's repository — or
+        // collide with the fresh .git directory git-init just made. Top
+        // level only, any file type; everywhere else the dir-only skip
+        // semantics below apply.
+        if at_root && name_s == ".git" {
+            continue;
+        }
         if ft.is_symlink() {
             // Checked before is_dir(): a symlinked directory must be copied
             // as a link, not walked into.
@@ -252,13 +286,22 @@ fn copy_dir(
             let sub = dst.join(&name);
             std::fs::create_dir(&sub)?;
             copy_dir(&path, &sub, root, main_ino, new_ino, warnings)?;
-        } else {
+        } else if ft.is_file() {
             let to = if at_root && name_s == main_ino {
                 dst.join(new_ino)
             } else {
                 dst.join(&name)
             };
             std::fs::copy(&path, to)?;
+        } else {
+            // FIFOs, sockets, devices: fs::copy would open them — and block
+            // forever on a FIFO. A sketch has no use for special files.
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            warnings.push(format!("`{rel}` is not a regular file and was not copied"));
         }
     }
     Ok(())
@@ -317,8 +360,11 @@ fn retitle_main_ino(path: &Path, src_name: &str, new_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Repoint sketch.yaml `dir:` library deps that live *inside* the source
-/// project at the clone, and warn about relative deps that escape it.
+/// Repoint sketch.yaml `dir:` library deps so the clone resolves the same
+/// libraries the source did: absolute paths inside the source move to the
+/// clone, relative paths that climb out of the sketch are re-aimed at their
+/// original target from the clone's location, and everything that already
+/// resolves (inside-the-tree relatives, external absolutes) stays put.
 ///
 /// The parse is read-only, purely to find the local deps; the rewrite itself
 /// is textual because a serde round-trip is lossy — unknown arduino-cli keys,
@@ -333,6 +379,15 @@ fn rewrite_sketch_yaml(
     if !yaml_path.is_file() {
         return Ok(());
     }
+    // An absolute sketch.yaml symlink resolves outside the clone, and the
+    // rewrite below would edit the link's target. Leave links alone.
+    if yaml_path.symlink_metadata()?.file_type().is_symlink() {
+        warnings.push(
+            "sketch.yaml is a symlink shared with the source project — its library paths were not rewritten"
+                .into(),
+        );
+        return Ok(());
+    }
     let parsed = match sketch::SketchProject::open(staging)?.load_yaml() {
         Ok(y) => y,
         Err(e) => {
@@ -344,22 +399,42 @@ fn rewrite_sketch_yaml(
     };
 
     let mut rewrites: Vec<(String, String)> = Vec::new();
+    // The same dir may be pinned by several profiles, but one line rewrite
+    // (or one warning) covers every occurrence of the value.
+    let mut seen = std::collections::BTreeSet::new();
     for profile in parsed.profiles.values() {
         for lib in &profile.libraries {
             let sketch::LibraryDep::Local { dir } = lib else {
                 continue;
             };
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
             let p = Path::new(dir);
             if p.is_absolute() {
                 if let Ok(suffix) = p.strip_prefix(src) {
                     let new = dest.join(suffix).to_string_lossy().into_owned();
                     rewrites.push((dir.clone(), new));
                 }
-            } else if p.components().next() == Some(std::path::Component::ParentDir)
-                && dest.parent() != src.parent()
-            {
+                // Outside the source: valid from anywhere, leave it.
+                continue;
+            }
+            // Lexical resolution (sketch::normalize), not canonicalize: the
+            // target may not exist, and symlinks stay distinct on purpose.
+            let resolved = sketch::normalize(&src.join(p));
+            if resolved.starts_with(src) {
+                // Copied along with the tree; still resolves from the clone.
+                continue;
+            }
+            if resolved.symlink_metadata().is_ok() {
+                // Escapes the sketch but exists: re-aim it so the clone
+                // builds like the source. relativize prefers a clean `..`
+                // spelling and falls back to the absolute target itself.
+                rewrites.push((dir.clone(), sketch::relativize(dest, &resolved)));
+            } else {
                 warnings.push(format!(
-                    "sketch.yaml library path `{dir}` is relative and points outside the project — it may no longer resolve from the clone"
+                    "sketch.yaml library path `{dir}` points at nothing on disk ({}) — left unchanged",
+                    resolved.display()
                 ));
             }
         }
@@ -369,18 +444,31 @@ fn rewrite_sketch_yaml(
     }
 
     let text = std::fs::read_to_string(&yaml_path)?;
+    let mut applied = vec![false; rewrites.len()];
     let new_text: String = text
         .split_inclusive('\n')
         .map(|line| {
             if let Some(rest) = line.trim_start().strip_prefix("- dir:") {
                 let value = rest.trim();
-                if let Some((old, new)) = rewrites.iter().find(|(old, _)| old == value) {
+                if let Some(i) = rewrites.iter().position(|(old, _)| old == value) {
+                    applied[i] = true;
+                    let (old, new) = &rewrites[i];
                     return line.replacen(old.as_str(), new, 1);
                 }
             }
             line.to_string()
         })
         .collect();
+    // The textual pass only matches unquoted block-style `- dir:` lines; a
+    // planned rewrite it missed (quoted, folded, flow style…) stays pointing
+    // at the source and must be called out rather than left stale silently.
+    for (i, (old, _)) in rewrites.iter().enumerate() {
+        if !applied[i] {
+            warnings.push(format!(
+                "sketch.yaml library path `{old}` could not be rewritten — update it in the clone by hand"
+            ));
+        }
+    }
     std::fs::write(&yaml_path, new_text)?;
     Ok(())
 }
@@ -509,6 +597,25 @@ mod tests {
     }
 
     #[test]
+    fn a_top_level_git_file_from_a_worktree_is_not_copied() {
+        // A git-worktree checkout has a top-level .git FILE ("gitdir: …").
+        // Copying it would collide with the fresh .git directory (or, on a
+        // git-less machine, tie the clone to the source's repository).
+        let tmp = tempfile::tempdir().unwrap();
+        let src = sample_sketch(tmp.path(), "Src");
+        let gitfile = "gitdir: /somewhere/repo/.git/worktrees/Src\n";
+        std::fs::write(src.join(".git"), gitfile).unwrap();
+
+        let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
+
+        assert!(
+            !made.dir.join(".git").is_file(),
+            ".git in the clone must be absent or the fresh init directory"
+        );
+        assert_eq!(read(src.join(".git")), gitfile, "source .git file untouched");
+    }
+
+    #[test]
     fn exclusion_set_is_a_superset_of_the_sketch_walker_skip_list() {
         // Drift guard: a directory the file explorer hides must never be
         // copied into a clone either.
@@ -583,6 +690,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn gitignore_symlink_is_replaced_by_a_regular_merged_file() {
+        // fs::write follows symlinks: writing the merged .gitignore through a
+        // recreated link would append our entries into a file OUTSIDE the
+        // clone — possibly inside the source project.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = sketch_with_ino(tmp.path(), "Src", "// Src\n");
+        let shared = tmp.path().join("shared-gitignore");
+        std::fs::write(&shared, "shared.txt\n").unwrap();
+        std::os::unix::fs::symlink(&shared, src.join(".gitignore")).unwrap();
+
+        let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
+
+        // The link's target is byte-identical afterwards.
+        assert_eq!(read(shared), "shared.txt\n");
+        // The clone got a REGULAR .gitignore with the merged content.
+        let meta = made.dir.join(".gitignore").symlink_metadata().unwrap();
+        assert!(meta.file_type().is_file(), "must be a regular file");
+        assert_eq!(
+            read(made.dir.join(".gitignore")),
+            "shared.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+        );
+    }
+
+    #[test]
     fn gitignore_variant_spellings_are_not_duplicated() {
         let tmp = tempfile::tempdir().unwrap();
         let src = sketch_with_ino(tmp.path(), "Src", "// Src\n");
@@ -648,18 +780,184 @@ mod tests {
     }
 
     #[test]
-    fn yaml_warns_when_an_escaping_relative_path_may_break() {
+    fn escaping_relative_lib_paths_are_rewritten_to_resolve() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        // Sketch two levels down; the library outside it, reached with `..`.
+        let src = sketch_with_ino(&tmp.path().join("p/a/b"), "Src", "// Src\n");
+        std::fs::create_dir_all(tmp.path().join("p/a/libs/X")).unwrap();
+        let yaml = "profiles:\n  p:\n    fqbn: a:b:c\n    libraries:\n      - dir: ../../libs/X\n";
+        std::fs::write(src.join("sketch.yaml"), yaml).unwrap();
+
+        // The clone lands two levels shallower, so `../../libs/X` dangles
+        // unless it is repointed.
+        let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
+        let text = read(made.dir.join("sketch.yaml"));
+
+        let value = text
+            .lines()
+            .find_map(|l| l.trim_start().strip_prefix("- dir:"))
+            .expect("dir entry must survive")
+            .trim()
+            .to_string();
+        assert_ne!(value, "../../libs/X", "{text}");
+        let target = tmp.path().canonicalize().unwrap().join("p/a/libs/X");
+        let resolved = {
+            let p = Path::new(&value);
+            if p.is_absolute() {
+                sketch::normalize(p)
+            } else {
+                sketch::normalize(&made.dir.join(p))
+            }
+        };
+        assert_eq!(resolved, target, "{text}");
+        // Only that one value changed; every other byte is intact.
+        assert_eq!(text, yaml.replacen("../../libs/X", &value, 1));
+        assert!(made.warnings.is_empty(), "{:?}", made.warnings);
+    }
+
+    #[test]
+    fn a_dangling_relative_lib_path_is_left_with_a_warning() {
+        // A target that does not exist was already broken in the source —
+        // not ours to invent a destination for.
+        let tmp = tempfile::tempdir().unwrap();
         let src = sketch_with_ino(&tmp.path().join("a"), "Src", "// Src\n");
+        let yaml = "profiles:\n  p:\n    fqbn: a:b:c\n    libraries:\n      - dir: ../nowhere/Y\n";
+        std::fs::write(src.join("sketch.yaml"), yaml).unwrap();
+
+        let made = clone_project(&src, &tmp.path().join("b"), "New").unwrap();
+
+        assert_eq!(read(made.dir.join("sketch.yaml")), yaml, "must stay verbatim");
+        assert!(
+            made.warnings
+                .iter()
+                .any(|w| w.contains("../nowhere/Y") && w.contains("left unchanged")),
+            "{:?}",
+            made.warnings
+        );
+    }
+
+    #[test]
+    fn the_bench_shape_rewrites_every_escaping_relative_that_exists() {
+        // The live repro: a sketch nested under Projects/embedded whose deps
+        // climb out at three different depths, cloned somewhere shallower.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let src = sketch_with_ino(&root.join("Projects/embedded/soil"), "soil", "// soil\n");
+        for lib in [
+            "Projects/Arduino/libraries/HomeNode",
+            "Projects/embedded/lib/StatusLed",
+            "Projects/embedded/soil/shared/Util",
+        ] {
+            std::fs::create_dir_all(root.join(lib)).unwrap();
+        }
+        std::fs::create_dir_all(src.join("libs/Inner")).unwrap();
         std::fs::write(
             src.join("sketch.yaml"),
-            "profiles:\n  p:\n    fqbn: a:b:c\n    libraries:\n      - dir: ../libs/X\n",
+            "profiles:\n\
+             \x20 p:\n\
+             \x20   fqbn: a:b:c\n\
+             \x20   libraries:\n\
+             \x20     - HomeNode (1.0.0)\n\
+             \x20     - dir: libs/Inner\n\
+             \x20     - dir: ../../../Arduino/libraries/HomeNode\n\
+             \x20     - dir: ../../lib/StatusLed\n\
+             \x20     - dir: ../shared/Util\n",
         )
         .unwrap();
-        let made = clone_project(&src, &tmp.path().join("b"), "New").unwrap();
+
+        let made = clone_project(&src, &root.join("out"), "New").unwrap();
+        let text = read(made.dir.join("sketch.yaml"));
+
+        // Registry and inside-the-tree deps are untouched.
+        assert!(text.contains("- HomeNode (1.0.0)\n"), "{text}");
+        assert!(text.contains("- dir: libs/Inner\n"), "{text}");
+        // Every escaping relative still reaches its original target.
+        let canon_root = root.canonicalize().unwrap();
+        let values: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("- dir:"))
+            .map(|v| v.trim().to_string())
+            .filter(|v| v != "libs/Inner")
+            .collect();
+        assert_eq!(values.len(), 3, "{text}");
+        let resolved: Vec<PathBuf> = values
+            .iter()
+            .map(|v| {
+                let p = Path::new(v);
+                if p.is_absolute() {
+                    sketch::normalize(p)
+                } else {
+                    sketch::normalize(&made.dir.join(p))
+                }
+            })
+            .collect();
+        for want in [
+            canon_root.join("Projects/Arduino/libraries/HomeNode"),
+            canon_root.join("Projects/embedded/lib/StatusLed"),
+            canon_root.join("Projects/embedded/soil/shared/Util"),
+        ] {
+            assert!(resolved.contains(&want), "{want:?} not among {resolved:?}");
+        }
+        assert!(made.warnings.is_empty(), "{:?}", made.warnings);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn yaml_symlink_skips_the_rewrite_with_a_warning() {
+        // Rewriting through an absolute sketch.yaml symlink would edit the
+        // link's target outside the clone; the rewrite must not happen.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = sketch_with_ino(tmp.path(), "Src", "// Src\n");
+        std::fs::create_dir_all(src.join("libs/EnvSensor")).unwrap();
+        let abs_inside = src.canonicalize().unwrap().join("libs/EnvSensor");
+        let shared = tmp.path().join("shared-yaml");
+        let yaml = format!(
+            "profiles:\n  p:\n    fqbn: a:b:c\n    libraries:\n      - dir: {}\n",
+            abs_inside.display()
+        );
+        std::fs::write(&shared, &yaml).unwrap();
+        std::os::unix::fs::symlink(&shared, src.join("sketch.yaml")).unwrap();
+
+        let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
+
+        assert_eq!(read(shared), yaml, "link target must be untouched");
         assert!(
-            made.warnings.iter().any(|w| w.contains("may no longer resolve")),
+            made.dir
+                .join("sketch.yaml")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            made.warnings.iter().any(|w| w.contains("not rewritten")),
+            "{:?}",
+            made.warnings
+        );
+    }
+
+    #[test]
+    fn yaml_quoted_dir_entries_warn_instead_of_going_stale() {
+        // The textual pass only matches unquoted block-style `- dir:` lines;
+        // a quoted entry stays pointing at the source, which deserves a
+        // warning rather than silence.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = sketch_with_ino(tmp.path(), "Src", "// Src\n");
+        std::fs::create_dir_all(src.join("libs/EnvSensor")).unwrap();
+        let abs_inside = src.canonicalize().unwrap().join("libs/EnvSensor");
+        let yaml = format!(
+            "profiles:\n  p:\n    fqbn: a:b:c\n    libraries:\n      - dir: \"{}\"\n",
+            abs_inside.display()
+        );
+        std::fs::write(src.join("sketch.yaml"), &yaml).unwrap();
+
+        let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
+
+        assert_eq!(read(made.dir.join("sketch.yaml")), yaml, "must stay verbatim");
+        assert!(
+            made.warnings
+                .iter()
+                .any(|w| w.contains("could not be rewritten") && w.contains("libs/EnvSensor")),
             "{:?}",
             made.warnings
         );
@@ -742,6 +1040,23 @@ mod tests {
             .to_string();
         assert!(err.contains("not a sketch folder"), "{err}");
         assert!(err.contains("Src.ino"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refuses_a_symlinked_main_ino() {
+        // is_file() follows links, so a symlinked main ino used to pass
+        // validation and then break the retitle with a raw io error.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("Src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(tmp.path().join("real.ino"), "// Src\n").unwrap();
+        std::os::unix::fs::symlink("../real.ino", src.join("Src.ino")).unwrap();
+
+        let err = clone_project(&src, &tmp.path().join("out"), "New")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
     }
 
     #[test]
@@ -848,7 +1163,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = sample_sketch(tmp.path(), "Src");
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
-        assert!(made.warnings.is_empty(), "{:?}", made.warnings);
+        // Hermetic on a git-less machine: a git-not-found warning is about
+        // the environment, not this source tree.
+        let non_git: Vec<_> = made
+            .warnings
+            .iter()
+            .filter(|w| !w.contains("git"))
+            .collect();
+        assert!(non_git.is_empty(), "{:?}", made.warnings);
     }
 
     // ----- git -----

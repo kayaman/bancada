@@ -309,7 +309,7 @@ fn rel(root: &Path, p: &Path) -> String {
 /// Not `canonicalize`: that touches the filesystem, fails for a path that does
 /// not exist yet, and resolves symlinks — and a sketchbook routinely contains
 /// symlinked libraries we want to keep distinct from their targets.
-fn normalize(p: &Path) -> PathBuf {
+pub(crate) fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
@@ -333,7 +333,7 @@ fn normalize(p: &Path) -> PathBuf {
 }
 
 /// Best-effort relative path from `base` to `target` (walks up with `..`).
-fn relativize(base: &Path, target: &Path) -> String {
+pub(crate) fn relativize(base: &Path, target: &Path) -> String {
     let base: Vec<_> = base.components().collect();
     let target_c: Vec<_> = target.components().collect();
     let common = base

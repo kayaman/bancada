@@ -1158,7 +1158,12 @@ export default function App() {
           setCreatingProject(false);
           setCreatingProfile(false);
         }}
-        onCreateProfile={() => setCreatingProfile(true)}
+        onCreateProfile={() => {
+          setCreatingProfile(true);
+          // The three editor-area forms are mutually exclusive.
+          setCreatingProject(false);
+          setCloningProject(false);
+        }}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
         onRefreshPorts={refreshPorts}
