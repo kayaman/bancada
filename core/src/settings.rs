@@ -101,11 +101,11 @@ mod tests {
     #[test]
     fn push_recent_caps_at_ten() {
         let mut s = AppSettings::default();
-        for i in 0..11 {
+        for i in 0..=MAX_RECENT {
             s.push_recent(format!("/p{i}"));
         }
         assert_eq!(s.recent_projects.len(), MAX_RECENT);
-        assert_eq!(s.recent_projects[0], "/p10");
+        assert_eq!(s.recent_projects[0], format!("/p{MAX_RECENT}"));
         assert!(!s.recent_projects.contains(&"/p0".to_string()));
     }
 

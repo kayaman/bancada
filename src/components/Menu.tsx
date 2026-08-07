@@ -50,6 +50,7 @@ export default function Menu({ x, y, onClose, anchorRef, children }: Props) {
     <div
       ref={ref}
       className="ctx-menu"
+      role="menu"
       style={{ left: pos?.x ?? x, top: pos?.y ?? y }}
       onContextMenu={(e) => e.preventDefault()}
     >
