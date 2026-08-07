@@ -36,6 +36,8 @@ export type AgentMessage =
       input: unknown;
       status: "running" | "ok" | "error";
       result?: string;
+      /** Date.now() when the tool_use block arrived — for the footer's elapsed counter. */
+      startedAt?: number;
     }
   | { kind: "stderr"; line: string }
   /** Pushed on every `result` event: the turn's ledger line. `usage` is
@@ -73,6 +75,11 @@ export class AgentStore {
   private alarmVal?: AgentAlarm;
   /** Text deltas are streaming and no tool has started since — "✍ writing". */
   private streamingFlag = false;
+  /** True between userSent() and the turn's result/close/alarm — the
+   *  footer's "is the agent actually working" bit, distinct from
+   *  statusFlag ("is the session alive"). */
+  private turnActiveFlag = false;
+  private turnStartedAtVal?: number;
   private sessionUsageVal: SessionUsage = emptySessionUsage();
   /**
    * The child pid of the session this store is showing, set by
@@ -192,6 +199,8 @@ export class AgentStore {
     this.msgs.push({ kind: "user", text });
     this.currentAssistantIdx = undefined; // turn boundary
     this.streamingFlag = false;
+    this.turnActiveFlag = true;
+    this.turnStartedAtVal = Date.now();
     this.ver++;
   }
 
@@ -215,6 +224,7 @@ export class AgentStore {
     this.statusFlag = "ended";
     this.closedReasonVal = reason;
     this.streamingFlag = false;
+    this.turnActiveFlag = false;
     this.ver++;
   }
 
@@ -234,6 +244,8 @@ export class AgentStore {
     this.currentAssistantIdx = undefined;
     this.toolIndexById.clear();
     this.streamingFlag = false;
+    this.turnActiveFlag = false;
+    this.turnStartedAtVal = undefined;
     this.sessionUsageVal = emptySessionUsage();
     this.ver++;
   }
@@ -249,6 +261,8 @@ export class AgentStore {
     alarm?: AgentAlarm;
     pid?: number;
     streaming: boolean;
+    turnActive: boolean;
+    turnStartedAt?: number;
     sessionUsage: SessionUsage;
   } {
     return {
@@ -261,6 +275,8 @@ export class AgentStore {
       alarm: this.alarmVal,
       pid: this.pidVal,
       streaming: this.streamingFlag,
+      turnActive: this.turnActiveFlag,
+      turnStartedAt: this.turnStartedAtVal,
       sessionUsage: this.sessionUsageVal,
     };
   }
@@ -295,6 +311,7 @@ export class AgentStore {
           name: block.name,
           input: block.input,
           status: "running",
+          startedAt: Date.now(),
         });
         changed = true;
         // A tool call is itself a turn boundary for assistant *text*: the
@@ -371,6 +388,7 @@ export class AgentStore {
     });
     this.currentAssistantIdx = undefined; // turn boundary
     this.streamingFlag = false;
+    this.turnActiveFlag = false;
     this.ver++;
   }
 
@@ -392,6 +410,7 @@ export class AgentStore {
     };
     this.statusFlag = "ended";
     this.verifyRunningFlag = false;
+    this.turnActiveFlag = false;
     this.ver++;
   }
 

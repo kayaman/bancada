@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentStore } from "../agentStore";
 import type { AgentEvent } from "../types";
 import { AGENT_STREAM_PONG_FIXTURE } from "./fixtures/agentStreamPong";
@@ -105,6 +105,7 @@ describe("AgentStore: a tool call mid-turn is itself a text-bubble boundary", ()
       { kind: "assistant", text: "A: about to read the file" },
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "t1",
         name: "Read",
         input: { file_path: "/s/Blink.ino" },
@@ -135,6 +136,7 @@ describe("AgentStore: a tool call mid-turn is itself a text-bubble boundary", ()
       { kind: "assistant", text: "A: about to read the file" },
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "t1",
         name: "Read",
         input: { file_path: "/s/Blink.ino" },
@@ -159,6 +161,7 @@ describe("AgentStore: a tool call mid-turn is itself a text-bubble boundary", ()
       { kind: "assistant", text: "Step 1: read file A" },
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "t1",
         name: "Read",
         input: { file_path: "/a.ino" },
@@ -168,6 +171,7 @@ describe("AgentStore: a tool call mid-turn is itself a text-bubble boundary", ()
       { kind: "assistant", text: "Step 2: read file B" },
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "t2",
         name: "Read",
         input: { file_path: "/b.ino" },
@@ -186,6 +190,7 @@ describe("AgentStore: tool_use / tool_result lifecycle", () => {
     expect(s.snapshot().messages).toEqual([
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "toolu_01",
         name: "Read",
         input: { file_path: "/s/Blink.ino" },
@@ -197,6 +202,7 @@ describe("AgentStore: tool_use / tool_result lifecycle", () => {
     expect(s.snapshot().messages).toEqual([
       {
         kind: "tool",
+        startedAt: expect.any(Number),
         id: "toolu_01",
         name: "Read",
         input: { file_path: "/s/Blink.ino" },
@@ -830,5 +836,50 @@ describe("AgentStore: streaming flag", () => {
     s.push(streamDelta("again"));
     s.closed("bye");
     expect(s.snapshot().streaming).toBe(false);
+  });
+});
+
+describe("turn-in-flight tracking", () => {
+  it("is inactive until the user sends, active until result", () => {
+    const s = new AgentStore();
+    expect(s.snapshot().turnActive).toBe(false);
+    s.userSent("hi");
+    expect(s.snapshot().turnActive).toBe(true);
+    s.push({ type: "result", result: "done" });
+    expect(s.snapshot().turnActive).toBe(false);
+  });
+
+  it("clears on closed(), security_alarm and clear()", () => {
+    const a = new AgentStore();
+    a.userSent("hi");
+    a.closed("child exited");
+    expect(a.snapshot().turnActive).toBe(false);
+
+    const b = new AgentStore();
+    b.userSent("hi");
+    b.push({ type: "security_alarm", kind: "path_escape", detail: "x" });
+    expect(b.snapshot().turnActive).toBe(false);
+
+    const c = new AgentStore();
+    c.userSent("hi");
+    c.clear();
+    expect(c.snapshot().turnActive).toBe(false);
+  });
+
+  it("stamps turnStartedAt on userSent and startedAt on tool messages", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    const s = new AgentStore();
+    s.userSent("hi");
+    expect(s.snapshot().turnStartedAt).toBe(1000);
+    now.mockReturnValue(2500);
+    s.push({
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }],
+      },
+    });
+    const tool = s.snapshot().messages.find((m) => m.kind === "tool");
+    expect(tool && tool.kind === "tool" && tool.startedAt).toBe(2500);
+    now.mockRestore();
   });
 });
