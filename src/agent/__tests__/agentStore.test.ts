@@ -275,7 +275,7 @@ describe("AgentStore: closed mid-turn", () => {
 });
 
 describe("AgentStore: unknown event types", () => {
-  it("is ignored — no throw, no version bump, no message", () => {
+  it("paints no transcript message, but is recorded and repaints the debug view", () => {
     const s = new AgentStore();
     s.push(streamDelta("keep"));
     const v = s.version;
@@ -283,15 +283,19 @@ describe("AgentStore: unknown event types", () => {
     expect(() =>
       s.push({ type: "rate_limit_event", rate_limit_info: {} } as unknown as AgentEvent),
     ).not.toThrow();
-    expect(s.version).toBe(v);
+    // Version DOES bump now — an open 🐛 Debug view must show the event —
+    // but the transcript stays untouched.
+    expect(s.version).toBeGreaterThan(v);
     expect(s.snapshot().messages).toEqual(msgs);
+    const log = s.snapshot().rawLog;
+    expect(log[log.length - 1].type).toBe("rate_limit_event");
   });
 
-  it("a payload with no type field at all is also ignored", () => {
+  it("a payload with no type field is recorded as \"unknown\", no message", () => {
     const s = new AgentStore();
-    const v = s.version;
     s.push({} as unknown as AgentEvent);
-    expect(s.version).toBe(v);
+    expect(s.snapshot().messages).toEqual([]);
+    expect(s.snapshot().rawLog.map((e) => e.type)).toEqual(["unknown"]);
   });
 });
 
@@ -881,5 +885,70 @@ describe("turn-in-flight tracking", () => {
     const tool = s.snapshot().messages.find((m) => m.kind === "tool");
     expect(tool && tool.kind === "tool" && tool.startedAt).toBe(2500);
     now.mockRestore();
+  });
+});
+
+describe("raw event log", () => {
+  it("records every event — including types push ignores — and bumps version", () => {
+    const s = new AgentStore();
+    const v0 = s.version;
+    s.push({ type: "rate_limit_event" } as never);
+    expect(s.version).toBeGreaterThan(v0);
+    const log = s.snapshot().rawLog;
+    expect(log).toHaveLength(1);
+    expect(log[0].type).toBe("rate_limit_event");
+    expect(log[0].count).toBe(1);
+    // still no transcript message
+    expect(s.snapshot().messages).toHaveLength(0);
+  });
+
+  it("keeps system subtype and pretty JSON", () => {
+    const s = new AgentStore();
+    s.push({ type: "system", subtype: "status" });
+    const e = s.snapshot().rawLog[0];
+    expect(e.subtype).toBe("status");
+    expect(JSON.parse(e.json)).toEqual({ type: "system", subtype: "status" });
+  });
+
+  it("coalesces consecutive stream_event entries, keeping the newest json", () => {
+    const s = new AgentStore();
+    s.push(streamDelta("a"));
+    s.push(streamDelta("b"));
+    s.push({ type: "system", subtype: "status" });
+    s.push(streamDelta("c"));
+    const log = s.snapshot().rawLog;
+    expect(log.map((e) => [e.type, e.count])).toEqual([
+      ["stream_event", 2],
+      ["system", 1],
+      ["stream_event", 1],
+    ]);
+    expect(log[0].json).toContain('"b"');
+  });
+
+  it("caps the buffer at 500, dropping the oldest", () => {
+    const s = new AgentStore();
+    for (let i = 0; i < 510; i++) {
+      s.push({ type: "system", subtype: `s${i}` });
+    }
+    const log = s.snapshot().rawLog;
+    expect(log).toHaveLength(500);
+    expect(log[0].subtype).toBe("s10");
+  });
+
+  it("closed() appends a synthetic entry; clear() resets the log", () => {
+    const s = new AgentStore();
+    s.push({ type: "system", subtype: "init", session_id: "x" });
+    s.closed("child exited", undefined);
+    let log = s.snapshot().rawLog;
+    expect(log[log.length - 1].type).toBe("closed");
+    s.clear();
+    expect(s.snapshot().rawLog).toHaveLength(0);
+  });
+
+  it("events dropped by the pid guard are not logged", () => {
+    const s = new AgentStore();
+    s.sessionStarted(111);
+    s.push({ type: "verify_started", pid: 222 });
+    expect(s.snapshot().rawLog).toHaveLength(0);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AgentStore } from "../agentStore";
 import type { AgentEvent } from "../types";
 import { ChatRecorder, chatFileName, replayChat, type ChatOp } from "../chatLog";
@@ -154,6 +154,10 @@ describe("ChatRecorder", () => {
 
 describe("replayChat", () => {
   it("replaying a recorded round trip deep-equals driving a fresh store live", () => {
+    // Freeze the clock: snapshots now carry wall-time stamps (turnStartedAt,
+    // tool startedAt, rawLog ts) and the two stores are driven milliseconds
+    // apart — the equality under test is semantic, not chronometric.
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
     // The live session: user message, a tool call resolving ok, the turn's
     // result — recorded through the recorder exactly as App.tsx would.
     const ops: ChatOp[] = [
@@ -180,6 +184,7 @@ describe("replayChat", () => {
     const replayed = replayChat(lines);
     expect(replayed).toBeInstanceOf(AgentStore);
     expect(replayed.snapshot()).toEqual(live.snapshot());
+    now.mockRestore();
   });
 
   it("skips corrupt lines and unknown ops without throwing", () => {

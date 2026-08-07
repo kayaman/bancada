@@ -9,8 +9,10 @@
 // `src/agent/types.ts`) plus bancada's synthetic stderr/verify events. The
 // wire protocol is undocumented and deliberately under-modelled upstream
 // (core/src/agent.rs), so `push` must never throw on an event shape it
-// doesn't recognise — an unknown `type` is ignored outright (no version
-// bump, per the task brief).
+// doesn't recognise — an unknown `type` paints nothing into the transcript.
+// It does land in the raw debug log and bump `version` (the 🐛 Debug view
+// must repaint); the original "no version bump" task-brief rule predates
+// that view and only ever protected the transcript.
 
 import type {
   AgentEvent,
@@ -64,6 +66,19 @@ export interface AgentAlarm {
   detail: string;
 }
 
+/** One row of the 🐛 Debug view: a raw `agent://event` payload as received.
+ *  Consecutive `stream_event`s coalesce into one row (count > 1, newest
+ *  json wins) — text deltas arrive dozens per second. */
+export interface RawLogEntry {
+  ts: number;
+  type: string;
+  subtype?: string;
+  count: number;
+  json: string;
+}
+
+const RAW_LOG_CAP = 500;
+
 export class AgentStore {
   private msgs: AgentMessage[] = [];
   private ver = 0;
@@ -80,6 +95,7 @@ export class AgentStore {
    *  statusFlag ("is the session alive"). */
   private turnActiveFlag = false;
   private turnStartedAtVal?: number;
+  private rawLog: RawLogEntry[] = [];
   private sessionUsageVal: SessionUsage = emptySessionUsage();
   /**
    * The child pid of the session this store is showing, set by
@@ -157,6 +173,10 @@ export class AgentStore {
     ) {
       return;
     }
+    this.recordRaw(ev);
+    // Every surviving event repaints: an open 🐛 Debug view must show it
+    // even when no handler below changes transcript state.
+    this.ver++;
     switch (ev.type) {
       case "system":
         this.handleSystem(ev.subtype, ev.session_id);
@@ -188,9 +208,38 @@ export class AgentStore {
         this.handleAlarm(ev);
         break;
       default:
-        // Unrecognised type (or missing `type`) — ignore, bump nothing.
+        // Unrecognised type (or missing `type`) — no transcript message;
+        // it was already recorded into the raw log above.
         return;
     }
+  }
+
+  /** Append `payload` to the raw debug log (ring buffer, coalescing
+   *  consecutive stream_events). Never throws — this runs on every event. */
+  private recordRaw(payload: unknown): void {
+    const p = (payload ?? {}) as Record<string, unknown>;
+    const type = typeof p.type === "string" ? p.type : "unknown";
+    let json: string;
+    try {
+      json = JSON.stringify(payload, null, 2);
+    } catch {
+      json = String(payload);
+    }
+    const last = this.rawLog[this.rawLog.length - 1];
+    if (last && type === "stream_event" && last.type === "stream_event") {
+      last.count++;
+      last.json = json;
+      last.ts = Date.now();
+      return;
+    }
+    this.rawLog.push({
+      ts: Date.now(),
+      type,
+      subtype: typeof p.subtype === "string" ? p.subtype : undefined,
+      count: 1,
+      json,
+    });
+    if (this.rawLog.length > RAW_LOG_CAP) this.rawLog.shift();
   }
 
   /** Record a user-authored message. User messages never come from events. */
@@ -221,6 +270,8 @@ export class AgentStore {
    */
   closed(reason: string, pid?: number): void {
     if (!this.isOurs(pid)) return;
+    // Synthetic log row — session teardown must be visible in the 🐛 view.
+    this.recordRaw({ type: "closed", reason, pid });
     this.statusFlag = "ended";
     this.closedReasonVal = reason;
     this.streamingFlag = false;
@@ -246,6 +297,7 @@ export class AgentStore {
     this.streamingFlag = false;
     this.turnActiveFlag = false;
     this.turnStartedAtVal = undefined;
+    this.rawLog = [];
     this.sessionUsageVal = emptySessionUsage();
     this.ver++;
   }
@@ -263,6 +315,7 @@ export class AgentStore {
     streaming: boolean;
     turnActive: boolean;
     turnStartedAt?: number;
+    rawLog: RawLogEntry[];
     sessionUsage: SessionUsage;
   } {
     return {
@@ -277,6 +330,7 @@ export class AgentStore {
       streaming: this.streamingFlag,
       turnActive: this.turnActiveFlag,
       turnStartedAt: this.turnStartedAtVal,
+      rawLog: this.rawLog.slice(),
       sessionUsage: this.sessionUsageVal,
     };
   }
