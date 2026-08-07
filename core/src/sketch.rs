@@ -270,7 +270,7 @@ impl SketchProject {
     }
 }
 
-const SKIP_DIRS: &[&str] = &["build", ".git", ".pio", "node_modules", ".vscode"];
+pub(crate) const SKIP_DIRS: &[&str] = &["build", ".git", ".pio", "node_modules", ".vscode"];
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<SketchFile>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {

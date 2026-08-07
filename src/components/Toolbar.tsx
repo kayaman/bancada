@@ -13,6 +13,7 @@ interface Props {
   busy: boolean;
   onOpenSketch: () => void;
   onNewProject: () => void;
+  onCloneProject: () => void;
   onCreateProfile: () => void;
   onSelectProfile: (p: string) => void;
   onSelectPort: (p: string) => void;
@@ -57,6 +58,14 @@ export default function Toolbar(props: Props) {
           title="Create a sketch with a sketch.yaml profile"
         >
           ＋ New Project…
+        </button>
+
+        <button
+          className="btn"
+          onClick={props.onCloneProject}
+          title="Copy a sketch into a new project with a fresh git repo"
+        >
+          ⧉ Clone…
         </button>
       </div>
 

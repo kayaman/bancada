@@ -262,7 +262,7 @@ impl Manifest {
 
 // ---------- git ----------
 
-fn git(args: &[&str]) -> Result<String> {
+pub(crate) fn git(args: &[&str]) -> Result<String> {
     let out = Command::new("git").args(args).output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::ToolMissing("git".into())

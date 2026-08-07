@@ -202,6 +202,18 @@ describe("new project", () => {
     expect(args.libraries).toEqual(["ArduinoJson@7.4.2", "PubSubClient@2.8"]);
   });
 
+  it("cloneProject passes source, destination parent and new name", async () => {
+    await api.cloneProject("/s/demo", "/home/x/Projects", "demo-copy");
+    expect(called()).toEqual([
+      "clone_project",
+      {
+        srcDir: "/s/demo",
+        destParent: "/home/x/Projects",
+        newName: "demo-copy",
+      },
+    ]);
+  });
+
   it("listAllBoards and sketchbookDir take no arguments", async () => {
     await api.listAllBoards();
     expect(called()[0]).toBe("list_all_boards");

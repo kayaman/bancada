@@ -759,6 +759,39 @@ async fn create_project(
     .map_err(err_str)?
 }
 
+#[derive(serde::Serialize)]
+struct ClonedProject {
+    dir: String,
+    name: String,
+    /// Non-fatal notes (skipped vendored libs, shared symlinks, git trouble).
+    warnings: Vec<String>,
+}
+
+/// Copy an existing sketch to `dest_parent/new_name` — files, profile pins
+/// and a fresh (commit-less) git repository; never the source's history.
+#[tauri::command]
+async fn clone_project(
+    src_dir: String,
+    dest_parent: String,
+    new_name: String,
+) -> Result<ClonedProject, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let made = bancada_core::clone::clone_project(
+            Path::new(&src_dir),
+            Path::new(&dest_parent),
+            &new_name,
+        )
+        .map_err(err_str)?;
+        Ok(ClonedProject {
+            dir: made.dir.to_string_lossy().into_owned(),
+            name: made.name,
+            warnings: made.warnings,
+        })
+    })
+    .await
+    .map_err(err_str)?
+}
+
 // ---------- remote (git) libraries ----------
 
 /// Versions available for an alias, newest first, the library's own tag
@@ -3035,6 +3068,7 @@ pub fn run() {
             default_project_parent,
             list_all_boards,
             create_project,
+            clone_project,
             gh_list_versions,
             gh_manifest,
             gh_add_library,

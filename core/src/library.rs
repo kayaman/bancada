@@ -387,7 +387,7 @@ fn non_empty(value: &str, fallback: &str) -> String {
 
 /// On a case-insensitive filesystem two names differing only in case are the
 /// same directory, and arduino-cli would see a duplicate library either way.
-fn case_insensitive_clash(libraries_dir: &Path, folder: &str) -> Option<String> {
+pub(crate) fn case_insensitive_clash(libraries_dir: &Path, folder: &str) -> Option<String> {
     let entries = std::fs::read_dir(libraries_dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name();

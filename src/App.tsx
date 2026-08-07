@@ -28,6 +28,7 @@ import FleetManager from "./components/FleetManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
+import CloneProject from "./components/CloneProject";
 import ProfileInit from "./components/ProfileInit";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
@@ -99,6 +100,8 @@ export default function App() {
   const [profile, setProfile] = useState<string | null>(null);
   /** When true the editor area shows the New Project form instead. */
   const [creatingProject, setCreatingProject] = useState(false);
+  /** When true the editor area shows the Clone Project form instead. */
+  const [cloningProject, setCloningProject] = useState(false);
   /** When true a one-row profile-bootstrap form shows under the toolbar. */
   const [creatingProfile, setCreatingProfile] = useState(false);
   // Computed once per opened project (spec Risk R4): the Assistant panel
@@ -481,7 +484,11 @@ export default function App() {
       setDirtyFiles(new Set());
       setOpenFile(null);
       setContent("");
+      // Opening a sketch dismisses any open form — a leftover New Project or
+      // Clone form would otherwise keep covering the editor.
       setCreatingProfile(false);
+      setCreatingProject(false);
+      setCloningProject(false);
       const name = dir.split("/").pop();
       const target =
         (restoreFile && fs.find((f) => f.rel_path === restoreFile)) ||
@@ -1141,7 +1148,16 @@ export default function App() {
         selectedPort={selectedPort}
         busy={busy}
         onOpenSketch={openSketch}
-        onNewProject={() => setCreatingProject(true)}
+        onNewProject={() => {
+          setCreatingProject(true);
+          setCloningProject(false);
+          setCreatingProfile(false);
+        }}
+        onCloneProject={() => {
+          setCloningProject(true);
+          setCreatingProject(false);
+          setCreatingProfile(false);
+        }}
         onCreateProfile={() => setCreatingProfile(true)}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
@@ -1336,6 +1352,16 @@ export default function App() {
                 await loadSketch(dir);
               }}
               onCancel={() => setCreatingProject(false)}
+              notify={notify}
+            />
+          ) : cloningProject ? (
+            <CloneProject
+              sourceDir={sketchDir}
+              onCreated={async (dir) => {
+                setCloningProject(false);
+                await loadSketch(dir);
+              }}
+              onCancel={() => setCloningProject(false)}
               notify={notify}
             />
           ) : (

@@ -13,6 +13,7 @@ pub mod agent;
 pub mod boards;
 pub mod chatlog;
 pub mod cli;
+pub mod clone;
 pub mod esptool;
 pub mod files;
 pub mod fleet;

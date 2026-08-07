@@ -419,6 +419,15 @@ export const createProject = (
     libraries,
   });
 
+export interface ClonedProject {
+  dir: string;
+  name: string;
+  warnings: string[];
+}
+/** Copy a local sketch into a new project (fresh git repo; see clone_project). */
+export const cloneProject = (srcDir: string, destParent: string, newName: string) =>
+  invoke<ClonedProject>("clone_project", { srcDir, destParent, newName });
+
 // ---------- remote (git) libraries ----------
 
 /** Tags for an alias, newest first, the library's own namespace first. */
