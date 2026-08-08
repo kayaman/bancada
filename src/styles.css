@@ -409,9 +409,30 @@ body {
   flex: none;
 }
 
-.board-picker .select {
+/* The select lives in a fixed-height anchor so the open listbox can
+   overlay the content below instead of shoving it down. */
+.board-picker .board-select-anchor {
+  position: relative;
   flex: 1;
   min-width: 0;
+  height: 28px; /* the shared .select height — keeps the row from jumping */
+}
+
+.board-select-anchor .select {
+  width: 100%;
+}
+
+.board-select-anchor .select.board-select-open {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  height: auto;
+  padding: 4px 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 .editor {
