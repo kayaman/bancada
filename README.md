@@ -67,6 +67,11 @@ npm run tauri dev
 npm run tauri build
 ```
 
+Bundles land in `target/release/bundle/{rpm,deb,appimage}/` with the
+desktop entry and hicolor icon set included. **Installing them (and the
+serial-port/ModemManager setup an end user needs) is documented in
+[docs/INSTALL.md](docs/INSTALL.md).**
+
 ## Tests and coverage
 
 ```bash
