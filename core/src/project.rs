@@ -13,6 +13,47 @@ use crate::{Error, Result};
 const MAX_NAME_LEN: usize = 63;
 
 const TMPL_BLINK: &str = include_str!("templates/sketch/blink.ino.tmpl");
+const TMPL_I2C_SCAN: &str = include_str!("templates/sketch/i2c_scan.ino.tmpl");
+const TMPL_WIFI_SCAN: &str = include_str!("templates/sketch/wifi_scan.ino.tmpl");
+const TMPL_BOARD_INFO: &str = include_str!("templates/sketch/board_info.ino.tmpl");
+
+/// A starter sketch a new project can begin life as.
+#[derive(Clone, Copy, serde::Serialize)]
+pub struct SketchTemplate {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    #[serde(skip)]
+    tmpl: &'static str,
+}
+
+/// Every starter, Blink first — the order the UI presents them in.
+pub const TEMPLATES: &[SketchTemplate] = &[
+    SketchTemplate {
+        id: "blink",
+        label: "Blink",
+        description: "The hardware hello-world: one upload proves the toolchain, the serial port and the board.",
+        tmpl: TMPL_BLINK,
+    },
+    SketchTemplate {
+        id: "i2c-scan",
+        label: "I2C scanner",
+        description: "Prints every I2C device that answers, rescanning periodically — proves module wiring.",
+        tmpl: TMPL_I2C_SCAN,
+    },
+    SketchTemplate {
+        id: "wifi-scan",
+        label: "Wi-Fi scanner",
+        description: "Lists nearby networks strongest-first with RSSI and channel — proves radio and antenna.",
+        tmpl: TMPL_WIFI_SCAN,
+    },
+    SketchTemplate {
+        id: "board-info",
+        label: "Board info",
+        description: "Chip model, MAC, flash and PSRAM sizes, last reset reason — esptool facts as a sketch.",
+        tmpl: TMPL_BOARD_INFO,
+    },
+];
 
 fn is_allowed(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'
@@ -120,17 +161,30 @@ pub fn default_project_parent(home: &Path) -> PathBuf {
     }
 }
 
-/// The starter sketch for a new project: the canonical Blink, so the very
-/// first Verify + Upload proves the whole toolchain with a visible result.
-pub fn blink_sketch(name: &str) -> String {
-    TMPL_BLINK.replace("{name}", name)
+/// Render the template with `id` for a project called `name`. `None` for an
+/// id no template carries — the command layer turns that into a user error.
+pub fn sketch_from_template(id: &str, name: &str) -> Option<String> {
+    TEMPLATES
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.tmpl.replace("{name}", name))
 }
 
 /// Replace the main `.ino` that `arduino-cli sketch new` stubbed out with the
-/// Blink starter. Callers guarantee `dir` was created by us moments ago, so
+/// chosen starter. Callers guarantee `dir` was created by us moments ago, so
 /// this never clobbers user content.
-pub fn write_main_ino(dir: &Path, name: &str) -> Result<()> {
-    std::fs::write(dir.join(format!("{name}.ino")), blink_sketch(name))?;
+pub fn write_main_ino(dir: &Path, name: &str, template_id: &str) -> Result<()> {
+    let sketch = sketch_from_template(template_id, name).ok_or_else(|| {
+        Error::Other(format!(
+            "unknown sketch template `{template_id}` — expected one of {}",
+            TEMPLATES
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
+    std::fs::write(dir.join(format!("{name}.ino")), sketch)?;
     Ok(())
 }
 
@@ -219,14 +273,40 @@ mod tests {
     }
 
     #[test]
-    fn blink_sketch_is_a_complete_named_program() {
-        let s = blink_sketch("BlinkNode");
-        assert!(s.starts_with("// BlinkNode — "));
-        assert!(!s.contains("{name}"));
-        assert!(s.contains("void setup()"));
-        assert!(s.contains("void loop()"));
+    fn every_template_is_a_complete_named_program() {
+        for t in TEMPLATES {
+            let s = sketch_from_template(t.id, "TestNode").unwrap();
+            assert!(s.starts_with("// TestNode — "), "{}: bad header", t.id);
+            assert!(!s.contains("{name}"), "{}: unsubstituted name", t.id);
+            assert!(s.contains("void setup()"), "{}: no setup", t.id);
+            assert!(s.contains("void loop()"), "{}: no loop", t.id);
+            assert!(s.contains("Serial.begin(115200)"), "{}: not serial-verbose", t.id);
+        }
+    }
+
+    #[test]
+    fn blink_template_guards_led_builtin() {
         // must compile on cores that don't define LED_BUILTIN
+        let s = sketch_from_template("blink", "BlinkNode").unwrap();
         assert!(s.contains("#ifndef LED_BUILTIN"));
+    }
+
+    #[test]
+    fn template_ids_are_unique_and_blink_leads() {
+        assert_eq!(TEMPLATES[0].id, "blink");
+        let mut ids: Vec<_> = TEMPLATES.iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), TEMPLATES.len(), "duplicate template id");
+    }
+
+    #[test]
+    fn unknown_template_is_rejected_with_the_valid_ids() {
+        assert!(sketch_from_template("nope", "X").is_none());
+        let tmp = tempfile::tempdir().unwrap();
+        let err = write_main_ino(tmp.path(), "X", "nope").unwrap_err().to_string();
+        assert!(err.contains("unknown sketch template"), "{err}");
+        assert!(err.contains("blink"), "should list valid ids: {err}");
     }
 
     #[test]
@@ -257,7 +337,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Pisca");
         std::fs::create_dir(&dir).unwrap();
-        write_main_ino(&dir, "Pisca").unwrap();
+        write_main_ino(&dir, "Pisca", "blink").unwrap();
 
         let proj = crate::sketch::SketchProject::open(&dir).unwrap();
         let main = proj.main_ino().expect("main ino must be found");

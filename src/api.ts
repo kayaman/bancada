@@ -402,9 +402,18 @@ export const sketchbookDir = () => invoke<string>("sketchbook_dir");
 export const defaultProjectParent = () => invoke<string>("default_project_parent");
 /** Every board of every installed platform, grouped-ready for a picker. */
 export const listAllBoards = () => invoke<BoardOption[]>("list_all_boards");
+export interface SketchTemplate {
+  id: string;
+  label: string;
+  description: string;
+}
+/** The starter templates a new project can begin from, Blink first. */
+export const listSketchTemplates = () =>
+  invoke<SketchTemplate[]>("list_sketch_templates");
 /**
  * Create a sketch with a profile for `fqbn` and the given registry libraries
- * pinned. `libraries` entries are `Name` or `Name@version`.
+ * pinned. `libraries` entries are `Name` or `Name@version`. `template` picks
+ * the starter sketch (null → Blink).
  */
 export const createProject = (
   parent: string,
@@ -412,6 +421,7 @@ export const createProject = (
   fqbn: string,
   profile: string | null,
   libraries: string[],
+  template: string | null = null,
 ) =>
   invoke<CreatedProject>("create_project", {
     parent,
@@ -419,6 +429,7 @@ export const createProject = (
     fqbn,
     profile: profile ?? null,
     libraries,
+    template: template ?? null,
   });
 
 export interface ClonedProject {

@@ -178,7 +178,7 @@ describe("create library", () => {
 });
 
 describe("new project", () => {
-  it("createProject passes every field and nulls an omitted profile", async () => {
+  it("createProject passes every field, nulling omitted profile and template", async () => {
     await api.createProject("/parent", "Blink", "arduino:avr:uno", null, []);
     expect(called()).toEqual([
       "create_project",
@@ -188,8 +188,20 @@ describe("new project", () => {
         fqbn: "arduino:avr:uno",
         profile: null,
         libraries: [],
+        template: null,
       },
     ]);
+  });
+
+  it("createProject forwards the chosen starter template", async () => {
+    await api.createProject("/p", "N", "a:b:c", null, [], "i2c-scan");
+    const [, args] = called();
+    expect(args.template).toBe("i2c-scan");
+  });
+
+  it("listSketchTemplates takes no arguments", async () => {
+    await api.listSketchTemplates();
+    expect(called()[0]).toBe("list_sketch_templates");
   });
 
   it("createProject forwards pinned library specs", async () => {

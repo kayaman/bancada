@@ -1,0 +1,31 @@
+// {name} — starts life as a Wi-Fi scanner: one upload proves the radio and
+// the antenna. Lists nearby networks strongest-first, then rescans, so
+// walking the board around shows coverage live in the serial monitor.
+
+#include <WiFi.h>
+
+const uint32_t RESCAN_INTERVAL_MS = 5000;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();  // scanning wants a clean station state
+  Serial.println("wifi-scan: scanning every 5s");
+}
+
+void loop() {
+  int n = WiFi.scanNetworks();  // blocks for the scan (~2s)
+  if (n <= 0) {
+    Serial.println("  no networks found");
+  }
+  for (int i = 0; i < n; i++) {
+    // scanNetworks returns results sorted by RSSI, strongest first.
+    Serial.printf("  %2d  %4d dBm  ch%-2d  %s%s\n", i + 1, WiFi.RSSI(i),
+                  WiFi.channel(i), WiFi.SSID(i).c_str(),
+                  WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "  (open)" : "");
+  }
+  Serial.println("---");
+  WiFi.scanDelete();  // free the results before the next round
+  delay(RESCAN_INTERVAL_MS);
+}

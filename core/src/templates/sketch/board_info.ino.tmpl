@@ -1,0 +1,43 @@
+// {name} — starts life as board-info: one upload proves the chip's identity.
+// Prints model, revision, cores, MAC, flash and PSRAM sizes and the reason
+// for the last reset — the facts you'd otherwise dig out with esptool —
+// then idles so the output stays readable.
+
+#include <esp_system.h>
+
+const char *reset_reason_name(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_EXT: return "external reset";
+    default: return "unknown";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+
+  Serial.println("board-info:");
+  Serial.printf("  chip:       %s rev %d, %d core(s)\n", ESP.getChipModel(),
+                ESP.getChipRevision(), ESP.getChipCores());
+  Serial.printf("  cpu:        %lu MHz\n", (unsigned long)ESP.getCpuFreqMHz());
+  Serial.printf("  mac:        %012llX\n", ESP.getEfuseMac());
+  Serial.printf("  flash:      %lu bytes\n", (unsigned long)ESP.getFlashChipSize());
+  Serial.printf("  psram:      %lu bytes (%lu free)\n",
+                (unsigned long)ESP.getPsramSize(),
+                (unsigned long)ESP.getFreePsram());
+  Serial.printf("  heap free:  %lu bytes\n", (unsigned long)ESP.getFreeHeap());
+  Serial.printf("  sdk:        %s\n", ESP.getSdkVersion());
+  Serial.printf("  last reset: %s\n", reset_reason_name(esp_reset_reason()));
+}
+
+void loop() {
+  delay(1000);
+}

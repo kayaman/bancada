@@ -5,11 +5,13 @@ import {
   createProject,
   defaultProjectParent,
   listAllBoards,
+  listSketchTemplates,
   loadSettings,
   searchLibraries,
   setLastProjectParent,
   type BoardOption,
   type IndexedLibrary,
+  type SketchTemplate,
 } from "../api";
 
 interface Props {
@@ -37,6 +39,8 @@ export default function NewProject({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<IndexedLibrary[]>([]);
   const [picked, setPicked] = useState<Record<string, string>>({});
+  const [templates, setTemplates] = useState<SketchTemplate[]>([]);
+  const [template, setTemplate] = useState("blink");
   const [working, setWorking] = useState(false);
 
   // Default the location to wherever the last project went, falling back to
@@ -56,6 +60,13 @@ export default function NewProject({
         if (!cancelled) setBoards(b);
       })
       .catch((e) => notify(String(e), true));
+    // A missing template list degrades to the backend's Blink default —
+    // creation must not depend on this call succeeding.
+    listSketchTemplates()
+      .then((t) => {
+        if (!cancelled) setTemplates(t);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -103,6 +114,7 @@ export default function NewProject({
         fqbn,
         profile.trim() || null,
         libraries,
+        template,
       );
       // Remembering the parent is a convenience; never fail creation over it.
       setLastProjectParent(parent).catch(() => {});
@@ -183,6 +195,28 @@ export default function NewProject({
           <div className="empty-hint">
             No installed platforms found — install a core first (a board platform
             is required, because the profile pins its version).
+          </div>
+        )}
+
+        {templates.length > 0 && (
+          <div className="field">
+            Starter
+            <div className="np-tmpl-cards" role="radiogroup" aria-label="Starter template">
+              {templates.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={template === t.id}
+                  className={`np-tmpl-card${template === t.id ? " selected" : ""}`}
+                  onClick={() => setTemplate(t.id)}
+                  disabled={working}
+                >
+                  <span className="np-tmpl-label">{t.label}</span>
+                  <span className="np-tmpl-desc">{t.description}</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 

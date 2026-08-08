@@ -702,6 +702,7 @@ async fn create_project(
     fqbn: String,
     profile: Option<String>,
     libraries: Vec<String>,
+    template: Option<String>,
 ) -> Result<CreatedProject, String> {
     let cli = state.cli.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -730,8 +731,12 @@ async fn create_project(
         }
 
         cli.sketch_new(&dir).map_err(err_str)?;
-        // Swap the empty setup/loop stub for a real Blink starter.
-        bancada_core::project::write_main_ino(&dir, &name).map_err(err_str)?;
+        // Swap the empty setup/loop stub for the chosen starter.
+        let template = template
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "blink".to_string());
+        bancada_core::project::write_main_ino(&dir, &name, &template).map_err(err_str)?;
         cli.profile_create(&dir, &profile, &fqbn, true)
             .map_err(err_str)?;
 
@@ -757,6 +762,12 @@ async fn create_project(
     })
     .await
     .map_err(err_str)?
+}
+
+/// The starter templates a new project can begin from, Blink first.
+#[tauri::command]
+fn list_sketch_templates() -> Vec<bancada_core::project::SketchTemplate> {
+    bancada_core::project::TEMPLATES.to_vec()
 }
 
 #[derive(serde::Serialize)]
@@ -3093,6 +3104,7 @@ pub fn run() {
             default_project_parent,
             list_all_boards,
             create_project,
+            list_sketch_templates,
             clone_project,
             gh_list_versions,
             gh_manifest,
@@ -4529,7 +4541,7 @@ mod tests {
         let dir = tmp.path().join(&name);
 
         cli.sketch_new(&dir).expect("sketch new");
-        bancada_core::project::write_main_ino(&dir, &name).expect("write blink .ino");
+        bancada_core::project::write_main_ino(&dir, &name, "blink").expect("write blink .ino");
         cli.profile_create(&dir, &profile, &fqbn, true)
             .expect("profile create");
         let sketch_dir = dir.to_string_lossy().into_owned();

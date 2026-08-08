@@ -1,0 +1,38 @@
+// {name} — starts life as an I2C scanner: one upload proves the wiring of
+// any I2C module. Prints every device that ACKs, then rescans periodically,
+// so plugging and unplugging modules shows up live in the serial monitor.
+
+#include <Wire.h>
+
+// Change these if your board's I2C lives elsewhere (ESP32 defaults: 21/22,
+// ESP32-S3 DevKitC: 8/9 — pass them to Wire.begin below).
+const int PIN_SDA = -1;  // -1 = board default
+const int PIN_SCL = -1;
+const uint32_t RESCAN_INTERVAL_MS = 3000;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+  if (PIN_SDA >= 0 && PIN_SCL >= 0) {
+    Wire.begin(PIN_SDA, PIN_SCL);
+  } else {
+    Wire.begin();
+  }
+  Serial.println("i2c-scan: scanning every 3s — plug modules in and watch");
+}
+
+void loop() {
+  int found = 0;
+  for (uint8_t addr = 8; addr < 120; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("  device at 0x%02X\n", addr);
+      found++;
+    }
+  }
+  if (found == 0) {
+    Serial.println("  no devices found");
+  }
+  Serial.println("---");
+  delay(RESCAN_INTERVAL_MS);
+}
