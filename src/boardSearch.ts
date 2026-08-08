@@ -13,20 +13,11 @@ export function filterBoards(boards: BoardOption[], query: string): BoardOption[
   });
 }
 
-/**
- * The filtered list, with the selected board pinned when the filter would
- * drop it — a <select> whose value has no matching <option> silently shows
- * the wrong entry.
- */
-export function visibleBoards(
-  boards: BoardOption[],
-  query: string,
-  selectedFqbn: string,
-): BoardOption[] {
-  const shown = filterBoards(boards, query);
-  if (!selectedFqbn || shown.some((b) => b.fqbn === selectedFqbn)) return shown;
-  const selected = boards.find((b) => b.fqbn === selectedFqbn);
-  return selected ? [selected, ...shown] : shown;
+/** Rows for the open results listbox: matches + their optgroup headers,
+ *  clamped to [3, 10] — 3 keeps the "no boards match" state from looking
+ *  like a sliver, 10 keeps the overlay from swallowing the dialog. */
+export function listboxRows(matchCount: number, groupCount: number): number {
+  return Math.min(10, Math.max(3, matchCount + groupCount));
 }
 
 /** Boards grouped by platform, in first-seen order — optgroup-ready. */

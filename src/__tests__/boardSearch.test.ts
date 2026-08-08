@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterBoards, groupByPlatform, visibleBoards } from "../boardSearch";
+import { filterBoards, groupByPlatform, listboxRows } from "../boardSearch";
 import type { BoardOption } from "../api";
 
 const b = (fqbn: string, name: string, platform_name: string): BoardOption => ({
@@ -40,20 +40,18 @@ describe("filterBoards", () => {
   });
 });
 
-describe("visibleBoards", () => {
-  it("pins the selected board when the filter would drop it", () => {
-    expect(visibleBoards(boards, "uno", "esp32:esp32:esp32s3")).toEqual([
-      boards[0],
-      boards[2],
-    ]);
+describe("listboxRows", () => {
+  it("counts matches plus group headers", () => {
+    expect(listboxRows(4, 2)).toBe(6);
   });
 
-  it("does not duplicate a selected board that already matches", () => {
-    expect(visibleBoards(boards, "uno", "arduino:avr:uno")).toEqual([boards[2]]);
+  it("never below 3 (room for the no-match row)", () => {
+    expect(listboxRows(0, 0)).toBe(3);
+    expect(listboxRows(1, 1)).toBe(3);
   });
 
-  it("is plain filtering when nothing is selected", () => {
-    expect(visibleBoards(boards, "nano", "")).toEqual([boards[3]]);
+  it("caps at 10", () => {
+    expect(listboxRows(200, 30)).toBe(10);
   });
 });
 
