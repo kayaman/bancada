@@ -7,7 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { flashTargetMismatch, nextSelectedPort, visibleBoard } from "./ports";
-import { checkNewEntry, checkNewFile } from "./newFile";
+import { checkNewEntry } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
 import {
   affectedByDelete,
@@ -15,6 +15,14 @@ import {
   isNonEmptyDir,
   pathAfterRename,
 } from "./explorerOps";
+import {
+  closeAll,
+  closeOthers,
+  closeTab,
+  deleteTabs,
+  openTab,
+  renameTabs,
+} from "./editorTabs";
 import { arrivals, bridgeArrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
 import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
@@ -124,6 +132,11 @@ export default function App() {
   const [content, setContent] = useState("");
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set());
   const buffersRef = useRef(new Map<string, string>());
+  // Editor tab strip — the explicit open set (superset-of-one containing
+  // `openFile`), and the tab armed for "close again to discard" (a dirty
+  // close request arms once; any other action disarms it).
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const [armedTab, setArmedTab] = useState<string | null>(null);
   // Same story as sketchDirRef: mirrors `openFile` for the agent listeners.
   const openFileRef = useRef<string | null>(null);
   openFileRef.current = openFile;
@@ -489,6 +502,8 @@ export default function App() {
       setDirtyFiles(new Set());
       setOpenFile(null);
       setContent("");
+      setOpenTabs([]);
+      setArmedTab(null);
       // Opening a sketch dismisses any open form — a leftover New Project or
       // Clone form would otherwise keep covering the editor.
       setProfileForm(null);
@@ -516,6 +531,10 @@ export default function App() {
     }
   };
 
+  /** Central file-open routine — every path that puts a file in the editor
+   *  (tree click, create, delete's main.ino fallback, tab select, initial
+   *  sketch load) funnels through here, so this is also the one place that
+   *  opens its tab and disarms any pending close-confirmation. */
   const openFileInEditor = async (dir: string, relPath: string) => {
     try {
       const text =
@@ -523,6 +542,8 @@ export default function App() {
         (await api.readSketchFile(dir, relPath));
       setOpenFile(relPath);
       setContent(text);
+      setOpenTabs((prev) => openTab(prev, relPath));
+      setArmedTab(null);
       // keep the tree oriented: reveal the file's folder chain
       useExplorerStore.getState().expandTo(relPath);
       useExplorerStore.getState().select(relPath);
@@ -567,18 +588,6 @@ export default function App() {
     return true;
   };
 
-  /** Editor tab strip ＋ — files only, root-relative. */
-  const createNewFile = (raw: string): boolean => {
-    if (!sketchDir) return false;
-    const check = checkNewFile(raw, files);
-    if (!check.ok) {
-      notify(check.reason, true);
-      return false;
-    }
-    void doCreate(check.relPath, "file");
-    return true;
-  };
-
   /** Rename or move (drag-drop resolves here too). Remaps buffers, dirty
    *  flags and the open file so unsaved edits survive under the new path. */
   const handleRename = async (from: string, to: string): Promise<boolean> => {
@@ -603,6 +612,11 @@ export default function App() {
       setDirtyFiles(
         (prev) => new Set([...prev].map((p) => pathAfterRename(p, from, to, wasDir) ?? p)),
       );
+      setOpenTabs((prev) => renameTabs(prev, from, to, wasDir));
+      if (armedTab) {
+        const np = pathAfterRename(armedTab, from, to, wasDir);
+        if (np !== null) setArmedTab(np);
+      }
       if (openFile) {
         const np = pathAfterRename(openFile, from, to, wasDir);
         if (np !== null) {
@@ -639,20 +653,107 @@ export default function App() {
       setDirtyFiles(
         (prev) => new Set([...prev].filter((p) => !affectedByDelete(p, relPath, wasDir))),
       );
+      const remainingTabs = deleteTabs(openTabs, relPath, wasDir);
+      setOpenTabs(remainingTabs);
+      if (armedTab && affectedByDelete(armedTab, relPath, wasDir)) setArmedTab(null);
       if (openFile && affectedByDelete(openFile, relPath, wasDir)) {
         const name = sketchDir.split("/").pop();
         const main = fs.find((f) => f.rel_path === `${name}.ino`);
         if (main) {
           await openFileInEditor(sketchDir, main.rel_path);
         } else {
-          setOpenFile(null);
-          setContent("");
-          api.setLastSketch(sketchDir, null).catch(() => {});
+          const next = remainingTabs[0] ?? null;
+          if (next) {
+            await openFileInEditor(sketchDir, next);
+          } else {
+            setOpenFile(null);
+            setContent("");
+            api.setLastSketch(sketchDir, null).catch(() => {});
+          }
         }
       }
       notify(`Moved ${relPath} to the trash`);
     } catch (e) {
       notify(String(e), true);
+    }
+  };
+
+  /** Tab strip select — arming is a one-shot; any other action disarms it. */
+  const handleTabSelect = (rel: string) => {
+    setArmedTab(null);
+    if (rel !== openFile && sketchDir) void openFileInEditor(sketchDir, rel);
+  };
+
+  /** Tab strip close (✕, middle-click, or the confirmed second click on an
+   *  armed tab). A dirty buffer arms once instead of closing — the second
+   *  close (armedTab === rel) discards it. */
+  const handleTabClose = (rel: string) => {
+    if (dirtyFiles.has(rel) && armedTab !== rel) {
+      setArmedTab(rel);
+      notify(`${rel} has unsaved changes — close again to discard`);
+      return;
+    }
+    const result = closeTab(openTabs, rel, openFile);
+    setOpenTabs(result.tabs);
+    setArmedTab(null);
+    buffersRef.current.delete(rel);
+    setDirtyFiles((prev) => {
+      if (!prev.has(rel)) return prev;
+      const next = new Set(prev);
+      next.delete(rel);
+      return next;
+    });
+    if (agentConflictsRef.current.delete(rel)) setConflicts([...agentConflictsRef.current]);
+    if (rel === openFile) {
+      if (result.nextActive && sketchDir) {
+        void openFileInEditor(sketchDir, result.nextActive);
+      } else {
+        setOpenFile(null);
+        setContent("");
+        if (sketchDir) api.setLastSketch(sketchDir, null).catch(() => {});
+      }
+    }
+  };
+
+  /** Context-menu "Close others" — dirty tabs are never bulk-closed. */
+  const handleCloseOthers = (rel: string) => {
+    const before = openTabs;
+    const kept = closeOthers(before, rel, dirtyFiles);
+    const keptDirty = kept.filter((t) => t !== rel && dirtyFiles.has(t)).length;
+    setOpenTabs(kept);
+    setArmedTab(null);
+    for (const t of before) {
+      if (!kept.includes(t)) buffersRef.current.delete(t);
+    }
+    if (openFile && !kept.includes(openFile) && sketchDir) {
+      void openFileInEditor(sketchDir, rel);
+    }
+    if (keptDirty > 0) {
+      notify(`Kept ${keptDirty} unsaved tab${keptDirty === 1 ? "" : "s"}`);
+    }
+  };
+
+  /** Context-menu "Close all" — dirty tabs are never bulk-closed. */
+  const handleCloseAll = () => {
+    const before = openTabs;
+    const kept = closeAll(before, dirtyFiles);
+    setOpenTabs(kept);
+    setArmedTab(null);
+    for (const t of before) {
+      if (!kept.includes(t)) buffersRef.current.delete(t);
+    }
+    if (openFile && !kept.includes(openFile)) {
+      const next = kept[0] ?? null;
+      if (next && sketchDir) {
+        void openFileInEditor(sketchDir, next);
+      } else {
+        setOpenFile(null);
+        setContent("");
+        if (sketchDir) api.setLastSketch(sketchDir, null).catch(() => {});
+      }
+    }
+    if (kept.length > 0) {
+      notify(`Kept ${kept.length} unsaved tab${kept.length === 1 ? "" : "s"}`);
     }
   };
 
@@ -1412,11 +1513,14 @@ export default function App() {
           ) : (
             <>
           <EditorTabs
-            files={files}
-            openFile={openFile}
-            dirtyFiles={dirtyFiles}
-            onOpen={(p) => sketchDir && openFileInEditor(sketchDir, p)}
-            onCreate={createNewFile}
+            tabs={openTabs}
+            active={openFile}
+            dirty={dirtyFiles}
+            armed={armedTab}
+            onSelect={handleTabSelect}
+            onClose={handleTabClose}
+            onCloseOthers={handleCloseOthers}
+            onCloseAll={handleCloseAll}
           />
           <CodeMirror
             className="editor"
