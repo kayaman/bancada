@@ -39,6 +39,7 @@ import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 import CloneProject from "./components/CloneProject";
 import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
+import UsageDashboard from "./components/UsageDashboard";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
 import AgentPanel from "./components/AgentPanel";
@@ -115,6 +116,8 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   /** When true the editor area shows the Clone Project form instead. */
   const [cloningProject, setCloningProject] = useState(false);
+  /** When true the editor area shows the usage dashboard instead. */
+  const [showingUsage, setShowingUsage] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
   // Computed once per opened project (spec Risk R4): the Assistant panel
@@ -509,6 +512,7 @@ export default function App() {
       setProfileForm(null);
       setCreatingProject(false);
       setCloningProject(false);
+      setShowingUsage(false);
       const name = dir.split("/").pop();
       const target =
         (restoreFile && fs.find((f) => f.rel_path === restoreFile)) ||
@@ -1279,10 +1283,18 @@ export default function App() {
           setCreatingProject(true);
           setCloningProject(false);
           setProfileForm(null);
+          setShowingUsage(false);
         }}
         onCloneProject={() => {
           setCloningProject(true);
           setCreatingProject(false);
+          setProfileForm(null);
+          setShowingUsage(false);
+        }}
+        onUsage={() => {
+          setShowingUsage(true);
+          setCreatingProject(false);
+          setCloningProject(false);
           setProfileForm(null);
         }}
         onCreateProfile={() => {
@@ -1290,16 +1302,19 @@ export default function App() {
           // The three editor-area forms are mutually exclusive.
           setCreatingProject(false);
           setCloningProject(false);
+          setShowingUsage(false);
         }}
         onAddProfile={() => {
           setProfileForm("add");
           setCreatingProject(false);
           setCloningProject(false);
+          setShowingUsage(false);
         }}
         onRetargetProfile={() => {
           setProfileForm("retarget");
           setCreatingProject(false);
           setCloningProject(false);
+          setShowingUsage(false);
         }}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
@@ -1511,6 +1526,11 @@ export default function App() {
               }}
               onCancel={() => setCloningProject(false)}
               notify={notify}
+            />
+          ) : showingUsage ? (
+            <UsageDashboard
+              onClose={() => setShowingUsage(false)}
+              openBottomTab={openBottomTab}
             />
           ) : (
             <>

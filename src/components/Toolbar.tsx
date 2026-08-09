@@ -16,6 +16,7 @@ interface Props {
   onOpenRecent: (dir: string) => void;
   onNewProject: () => void;
   onCloneProject: () => void;
+  onUsage: () => void;
   onCreateProfile: () => void;
   onAddProfile: () => void;
   onRetargetProfile: () => void;
@@ -72,6 +73,14 @@ export default function Toolbar(props: Props) {
           title="Copy a sketch into a new project with a fresh git repo"
         >
           ⧉ Clone…
+        </button>
+
+        <button
+          className="btn"
+          onClick={props.onUsage}
+          title="Token usage and cost per project"
+        >
+          📊 Usage
         </button>
       </div>
 
