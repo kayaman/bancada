@@ -70,6 +70,98 @@ pub fn verify_tool_def() -> ToolDef {
     }
 }
 
+/// The `upload` tool definition: flash the current sketch to the UI-selected
+/// board.
+///
+/// Same no-parameter principle as [`verify_tool_def`]: the sketch dir and
+/// profile/fqbn are session-bound, and the port/baud mirror the UI selection
+/// — the agent never chooses a flash target. The tool is additionally gated
+/// by the panel's "Allow uploads" switch; unarmed calls return an error
+/// instructing the agent to ask the user.
+pub fn upload_tool_def() -> ToolDef {
+    ToolDef {
+        name: "upload".to_string(),
+        description: "Flash (upload) the current sketch to the board selected \
+            in the UI, compiling first — the same path as the toolbar's \
+            Upload button. Takes no arguments; the target board, port and \
+            profile are the ones selected in the UI. Requires the user's \
+            'Allow uploads' switch to be on; if it is off this returns an \
+            error and you must ask the user to enable it. Returns whether \
+            the flash succeeded, its exit code, and a capped summary of the \
+            output. The serial monitor is stopped for the flash and is NOT \
+            restarted — call serial_read afterwards to restart it and watch \
+            the boot output."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// The `serial_read` tool definition: read new serial-monitor output.
+///
+/// Reads everything this session has not yet seen from the monitor's ring
+/// buffer (bounded; old lines fall off). Auto-starts the monitor on the
+/// UI-selected port/baud when nothing owns the serial port. `wait_s` bounds
+/// a short poll for fresh output — capped low so one call never monopolizes
+/// the single-threaded MCP listener; the agent keeps waiting by calling
+/// again.
+pub fn serial_read_tool_def() -> ToolDef {
+    ToolDef {
+        name: "serial_read".to_string(),
+        description: "Read serial monitor output that arrived since your \
+            last serial_read, from the board selected in the UI. Starts the \
+            serial monitor automatically (at the UI-selected port and baud) \
+            if it is not running. Optional wait_s (0-10): wait up to that \
+            many seconds for new output before returning; for longer waits \
+            call again — output is buffered between calls, so nothing is \
+            lost. Returns the new lines, with a note when old lines were \
+            dropped from the buffer."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "wait_s": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "description": "Seconds to wait for new output (default 0)."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// The `serial_send` tool definition: transmit one line to the board.
+///
+/// Same path as the Monitor tab's send box (a newline is appended). Requires
+/// the monitor to be running — `serial_read` starts it.
+pub fn serial_send_tool_def() -> ToolDef {
+    ToolDef {
+        name: "serial_send".to_string(),
+        description: "Send one line to the board over the running serial \
+            monitor (a newline is appended), exactly like typing in the \
+            Monitor tab. Errors if the monitor is not running — call \
+            serial_read first to start it. To see the board's response, \
+            call serial_read after sending."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "string",
+                    "description": "The line to transmit (newline appended)."
+                }
+            },
+            "required": ["data"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 // ---------- JSON-RPC wire types ----------
 
 /// A JSON-RPC 2.0 request. `id` is kept as a raw [`Value`] because the spec
@@ -406,6 +498,92 @@ mod tests {
         }
     }
 
+    // ---------- hardware tool definitions ----------
+
+    #[test]
+    fn upload_tool_takes_no_arguments_like_verify() {
+        let def = upload_tool_def();
+        assert_eq!(def.name, "upload");
+        // Same no-parameter principle as verify: the target is bound to the
+        // session + UI selection, never chosen by the agent.
+        assert_eq!(
+            def.input_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
+        );
+        let desc = def.description.to_lowercase();
+        assert!(desc.contains("flash"));
+        assert!(desc.contains("allow uploads"));
+    }
+
+    #[test]
+    fn serial_read_tool_accepts_only_a_bounded_wait() {
+        let def = serial_read_tool_def();
+        assert_eq!(def.name, "serial_read");
+        assert_eq!(def.input_schema["type"], "object");
+        assert_eq!(def.input_schema["additionalProperties"], false);
+        let wait = &def.input_schema["properties"]["wait_s"];
+        assert_eq!(wait["type"], "integer");
+        assert_eq!(wait["minimum"], 0);
+        assert_eq!(wait["maximum"], 10);
+        // wait_s is optional: nothing is required.
+        assert!(def.input_schema.get("required").is_none());
+        let desc = def.description.to_lowercase();
+        assert!(desc.contains("call again"));
+    }
+
+    #[test]
+    fn serial_send_tool_requires_the_data_line() {
+        let def = serial_send_tool_def();
+        assert_eq!(def.name, "serial_send");
+        assert_eq!(
+            def.input_schema["properties"]["data"]["type"],
+            "string"
+        );
+        assert_eq!(def.input_schema["required"], serde_json::json!(["data"]));
+        assert_eq!(def.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn tools_list_advertises_all_four_tools() {
+        let all = vec![
+            verify_tool_def(),
+            upload_tool_def(),
+            serial_read_tool_def(),
+            serial_send_tool_def(),
+        ];
+        let body = r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
+        match handle_request(body, &all) {
+            McpReply::Json(json) => {
+                let value: Value = serde_json::from_str(&json).unwrap();
+                let names: Vec<&str> = value["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert_eq!(names, ["verify", "upload", "serial_read", "serial_send"]);
+            }
+            other => panic!("expected Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tools_call_serial_send_extracts_its_data_argument() {
+        let all = vec![verify_tool_def(), serial_send_tool_def()];
+        let body = r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"serial_send","arguments":{"data":"AT+RST"}}}"#;
+        match handle_request(body, &all) {
+            McpReply::CallTool { name, args, .. } => {
+                assert_eq!(name, "serial_send");
+                assert_eq!(args["data"], "AT+RST");
+            }
+            other => panic!("expected CallTool, got {other:?}"),
+        }
+    }
+
     // ---------- tools/call ----------
 
     #[test]
@@ -434,7 +612,7 @@ mod tests {
 
     #[test]
     fn tools_call_unknown_tool_is_invalid_params_error() {
-        let body = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"upload"}}"#;
+        let body = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"reboot"}}"#;
         match handle_request(body, &tools()) {
             McpReply::Json(json) => {
                 let value: Value = serde_json::from_str(&json).unwrap();
