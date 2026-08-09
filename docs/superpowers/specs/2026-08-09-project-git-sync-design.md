@@ -46,11 +46,13 @@ Clicking the pill opens a small popover (the listbox-overlay pattern):
 Status refreshes on project open, after saves, after agent side-effects,
 and after each git action. Event-driven; no polling.
 
-## Core module: `core/src/gitproj.rs`
+## Core module: `core/src/git.rs`
 
-The `ghlib.rs` pattern — pure, unit-tested decision logic; thin runners
-that shell out to `git` (resolved from PATH at startup; `gh` likewise,
-its absence merely hiding the create-repo button).
+Extends the module the `fix-git-detection` branch introduces (git runner,
+`is_under_git`, `repo_root`, `init_repo`) — the `ghlib.rs` pattern: pure,
+unit-tested decision logic; thin runners that shell out to `git` (resolved
+from PATH per call, like every other engine; `gh` likewise, its absence
+merely hiding the create-repo button).
 
 One read call powers the pill: `git status --porcelain=v2 --branch -- .`
 (branch, upstream, ahead/behind and the change list in a single
