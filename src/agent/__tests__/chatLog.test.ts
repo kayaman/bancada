@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentStore } from "../agentStore";
 import type { AgentEvent } from "../types";
-import { ChatRecorder, chatFileName, replayChat, type ChatOp } from "../chatLog";
+import {
+  applyChatOps,
+  ChatRecorder,
+  chatFileName,
+  replayChat,
+  type ChatOp,
+} from "../chatLog";
 
 // The recorder's whole contract is "what exact NDJSON lines reach the
 // injected send" — so every test drives it against a spy that captures
@@ -147,6 +153,108 @@ describe("ChatRecorder", () => {
       throw new Error("invoke exploded");
     });
     expect(() => rec.record({ op: "userSent", text: "hi" })).not.toThrow();
+  });
+});
+
+// ---------- ChatRecorder.resume ----------
+
+describe("ChatRecorder.resume", () => {
+  it("writes NO meta line, ever — ops append straight to the existing file", () => {
+    const sent: { file: string; line: string }[] = [];
+    const rec = new ChatRecorder();
+    rec.resume("2026-08-05T14-02-31.ndjson", (file, line) => {
+      sent.push({ file, line });
+      return Promise.resolve();
+    });
+    expect(rec.active).toBe(true);
+    rec.record({ op: "sessionStarted", pid: 555 });
+    rec.record({ op: "userSent", text: "continue please" });
+
+    expect(sent.map((s) => s.line)).toEqual([
+      '{"op":"sessionStarted","pid":555}',
+      '{"op":"userSent","text":"continue please"}',
+    ]);
+    expect(sent.every((s) => !s.line.includes('"op":"meta"'))).toBe(true);
+  });
+
+  it("resume after a prior start replaces the pending (unflushed) meta — no leftover meta fires later", () => {
+    const sent: { file: string; line: string }[] = [];
+    const rec = new ChatRecorder();
+    rec.start("old.ndjson", { sketchDir: "/s", startedAt: "t0" }, (file, line) => {
+      sent.push({ file, line });
+      return Promise.resolve();
+    });
+    // start() alone writes nothing yet (meta is pending) — resume() before
+    // any record() must drop that pending meta, not flush it later.
+    rec.resume("new.ndjson", (file, line) => {
+      sent.push({ file, line });
+      return Promise.resolve();
+    });
+    rec.record({ op: "userSent", text: "hi" });
+
+    expect(sent).toEqual([
+      { file: "new.ndjson", line: '{"op":"userSent","text":"hi"}' },
+    ]);
+  });
+
+  it("stop() after resume() behaves exactly as after start()", () => {
+    const rec = new ChatRecorder();
+    const sent: { file: string; line: string }[] = [];
+    rec.resume("f.ndjson", (file, line) => {
+      sent.push({ file, line });
+      return Promise.resolve();
+    });
+    rec.stop();
+    expect(rec.active).toBe(false);
+    rec.record({ op: "userSent", text: "late" });
+    expect(sent).toEqual([]);
+  });
+});
+
+// ---------- applyChatOps ----------
+
+describe("applyChatOps", () => {
+  it("populates a caller-provided store identically to replayChat", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const lines = [
+      '{"op":"userSent","text":"read the sketch"}',
+      '{"op":"sessionStarted","pid":42}',
+      '{"op":"push","ev":{"type":"stderr","line":"warn"}}',
+      '{"op":"closed","reason":"the agent process ended","pid":42}',
+    ];
+
+    const viaReplay = replayChat(lines);
+    const store = new AgentStore();
+    applyChatOps(store, lines);
+
+    expect(store.snapshot()).toEqual(viaReplay.snapshot());
+    now.mockRestore();
+  });
+
+  it("applies onto whatever state the store already had — additive, not a reset", () => {
+    const store = new AgentStore();
+    store.sessionStarted(7);
+    store.userSent("earlier, live message");
+
+    applyChatOps(store, ['{"op":"userSent","text":"from disk"}']);
+
+    expect(store.snapshot().messages).toEqual([
+      { kind: "user", text: "earlier, live message" },
+      { kind: "user", text: "from disk" },
+    ]);
+  });
+
+  it("skips corrupt lines and unknown ops without throwing", () => {
+    const store = new AgentStore();
+    expect(() => {
+      applyChatOps(store, [
+        '{"op":"userSent","text":"hi"}',
+        "{oops",
+        '{"op":"wat"}',
+        '"just a string"',
+      ]);
+    }).not.toThrow();
+    expect(store.snapshot().messages).toEqual([{ kind: "user", text: "hi" }]);
   });
 });
 

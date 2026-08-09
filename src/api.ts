@@ -717,18 +717,27 @@ export const agentProbe = () => invoke<AgentProbe>("agent_probe");
  * `verify_done`, `security_alarm`), so the caller must hand it to
  * `agentStore.sessionStarted` — otherwise a stale event from a session the
  * user already stopped repaints the new one's panel.
+ *
+ * `resumeSessionId` asks the CLI's native `--resume <id>` to pick up a past
+ * session's own transcript. `contextFacts` rides the system prompt for the
+ * fallback path (native resume unavailable or failed) — a bounded summary
+ * of the saved chat so a fresh session still has the old one's context.
  */
 export const agentStart = (
   sketchDir: string,
   profile?: string,
   fqbn?: string,
   uploadsArmed = false,
+  resumeSessionId?: string,
+  contextFacts?: string,
 ) =>
   invoke<number>("agent_start", {
     sketchDir,
     profile: profile ?? null,
     fqbn: fqbn ?? null,
     uploadsArmed,
+    resumeSessionId: resumeSessionId ?? null,
+    contextFacts: contextFacts ?? null,
   });
 /** Flip the live session's "Allow uploads" switch (no-op without a session —
  *  the pre-session state rides `agentStart`'s `uploadsArmed`). */

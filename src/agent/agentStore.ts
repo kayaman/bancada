@@ -79,6 +79,26 @@ export interface RawLogEntry {
 
 const RAW_LOG_CAP = 500;
 
+/** The read-time view `AgentStore.snapshot()` returns — named so pure
+ *  consumers (e.g. `continueChat.ts`'s `distillFacts`) can depend on the
+ *  shape without importing the store class itself. */
+export interface AgentSnapshot {
+  messages: AgentMessage[];
+  status: AgentStatus;
+  lastResult?: AgentResult;
+  sessionId?: string;
+  verifyRunning: boolean;
+  uploadRunning: boolean;
+  closedReason?: string;
+  alarm?: AgentAlarm;
+  pid?: number;
+  streaming: boolean;
+  turnActive: boolean;
+  turnStartedAt?: number;
+  rawLog: RawLogEntry[];
+  sessionUsage: SessionUsage;
+}
+
 export class AgentStore {
   private msgs: AgentMessage[] = [];
   private ver = 0;
@@ -315,23 +335,36 @@ export class AgentStore {
     this.ver++;
   }
 
+  /**
+   * Keep this store's transcript alive across a NEW child process taking
+   * over the same chat — "Continue this chat" (native `--resume`, or the
+   * facts-only fallback respawn), never "New session".
+   *
+   * Unlike `clear()`, the messages, `sessionId`, session usage totals and
+   * raw debug log all survive: it is still the same conversation, just with
+   * a new pid about to arrive via `sessionStarted`. Only session-liveness
+   * state resets: the dead pid is superseded (so a late `closed`/alarm/
+   * verify event addressed to it cannot touch what comes next — same
+   * mechanism `clear()` uses), status drops to "idle" so `sendToAgent`'s
+   * lazy-start branch fires again, and the assistant-text cursor resets so
+   * the next assistant event starts a fresh bubble instead of overwriting
+   * the old session's last one mid-sentence.
+   */
+  prepareContinuation(): void {
+    if (this.pidVal !== undefined) this.supersededPids.add(this.pidVal);
+    this.pidVal = undefined;
+    this.statusFlag = "idle";
+    this.closedReasonVal = undefined;
+    this.alarmVal = undefined;
+    this.turnActiveFlag = false;
+    this.turnStartedAtVal = undefined;
+    this.streamingFlag = false;
+    this.currentAssistantIdx = undefined;
+    this.ver++;
+  }
+
   /** Read-time immutable-ish view (a fresh array; message objects are not cloned). */
-  snapshot(): {
-    messages: AgentMessage[];
-    status: AgentStatus;
-    lastResult?: AgentResult;
-    sessionId?: string;
-    verifyRunning: boolean;
-    uploadRunning: boolean;
-    closedReason?: string;
-    alarm?: AgentAlarm;
-    pid?: number;
-    streaming: boolean;
-    turnActive: boolean;
-    turnStartedAt?: number;
-    rawLog: RawLogEntry[];
-    sessionUsage: SessionUsage;
-  } {
+  snapshot(): AgentSnapshot {
     return {
       messages: this.msgs.slice(),
       status: this.statusFlag,

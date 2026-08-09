@@ -351,6 +351,79 @@ describe("AgentStore: clear()", () => {
   });
 });
 
+describe("AgentStore: prepareContinuation()", () => {
+  it("drops to idle, clears session-liveness state, but keeps messages/sessionId/usage/rawLog", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.push({ type: "system", subtype: "init", session_id: "s-old" });
+    s.userSent("fix the wifi reconnect loop");
+    s.push(toolUse("t1", "Edit", { file_path: "/x/soil.ino" }));
+    s.push(toolResult("t1", "ok", false));
+    s.push(usageResult());
+
+    const messagesBefore = s.snapshot().messages;
+    const rawLogBefore = s.snapshot().rawLog;
+
+    s.prepareContinuation();
+    const snap = s.snapshot();
+
+    expect(snap.status).toBe("idle");
+    expect(snap.sessionId).toBe("s-old");
+    expect(snap.messages).toEqual(messagesBefore);
+    expect(snap.rawLog).toEqual(rawLogBefore);
+    expect(snap.sessionUsage.inputTokens).toBeGreaterThan(0);
+    expect(snap.pid).toBeUndefined();
+    expect(snap.closedReason).toBeUndefined();
+    expect(snap.alarm).toBeUndefined();
+    expect(snap.turnActive).toBe(false);
+    expect(snap.streaming).toBe(false);
+  });
+
+  it("a late close for the superseded pid is ignored after prepareContinuation", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.userSent("hi");
+    s.prepareContinuation();
+    const v = s.version;
+
+    s.closed("old child EOF", 41);
+
+    const snap = s.snapshot();
+    expect(snap.status).toBe("idle");
+    expect(snap.closedReason).toBeUndefined();
+    expect(s.version).toBe(v);
+  });
+
+  it("a new sessionStarted + assistant event after prepareContinuation appends a NEW bubble", () => {
+    const s = new AgentStore();
+    s.sessionStarted(41);
+    s.push(assistantText("old session's last words"));
+    s.prepareContinuation();
+
+    s.sessionStarted(42);
+    s.push(assistantText("brand new turn"));
+
+    expect(s.snapshot().messages).toEqual([
+      { kind: "assistant", text: "old session's last words" },
+      { kind: "assistant", text: "brand new turn" },
+    ]);
+  });
+
+  it("bumps version so an open panel repaints", () => {
+    const s = new AgentStore();
+    s.sessionStarted(1);
+    const v = s.version;
+    s.prepareContinuation();
+    expect(s.version).toBeGreaterThan(v);
+  });
+
+  it("is a no-op-safe on a fresh store with no prior session", () => {
+    const s = new AgentStore();
+    expect(() => s.prepareContinuation()).not.toThrow();
+    expect(s.snapshot().status).toBe("idle");
+  });
+});
+
 describe("AgentStore: version discipline", () => {
   it("snapshot never bumps version", () => {
     const s = new AgentStore();

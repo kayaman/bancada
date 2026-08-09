@@ -309,11 +309,18 @@ describe("events", () => {
 });
 
 describe("agent commands", () => {
-  it("agentStart nulls omitted profile/fqbn and defaults uploads to unarmed", async () => {
+  it("agentStart nulls omitted profile/fqbn/resume/facts and defaults uploads to unarmed", async () => {
     await api.agentStart("/s");
     expect(called()).toEqual([
       "agent_start",
-      { sketchDir: "/s", profile: null, fqbn: null, uploadsArmed: false },
+      {
+        sketchDir: "/s",
+        profile: null,
+        fqbn: null,
+        uploadsArmed: false,
+        resumeSessionId: null,
+        contextFacts: null,
+      },
     ]);
   });
 
@@ -326,6 +333,30 @@ describe("agent commands", () => {
         profile: "esp32s3",
         fqbn: "esp32:esp32:esp32s3",
         uploadsArmed: true,
+        resumeSessionId: null,
+        contextFacts: null,
+      },
+    ]);
+  });
+
+  it("agentStart forwards a resume session id and context facts", async () => {
+    await api.agentStart(
+      "/s",
+      "esp32s3",
+      "esp32:esp32:esp32s3",
+      true,
+      "abc-123",
+      "Recent requests:\n- fix wifi",
+    );
+    expect(called()).toEqual([
+      "agent_start",
+      {
+        sketchDir: "/s",
+        profile: "esp32s3",
+        fqbn: "esp32:esp32:esp32s3",
+        uploadsArmed: true,
+        resumeSessionId: "abc-123",
+        contextFacts: "Recent requests:\n- fix wifi",
       },
     ]);
   });
