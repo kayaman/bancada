@@ -43,12 +43,14 @@ pub struct PlatformDep {
     pub platform_index_url: Option<String>,
 }
 
-/// A profile library dependency: either a registry entry like
-/// `"ArduinoJson (7.4.2)"` or a local path entry `{ dir: ../libs/Foo }`.
+/// A profile library dependency: a registry entry like
+/// `"ArduinoJson (7.4.2)"`, a resolved dependency arduino-cli records as
+/// `dependency: Name (v)`, or a local path entry `{ dir: ../libs/Foo }`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum LibraryDep {
     Registry(String),
+    Dependency { dependency: String },
     Local { dir: String },
 }
 
@@ -189,7 +191,7 @@ impl SketchProject {
         let target = normalize(&self.dir.join(lib_dir));
         let already = profile.libraries.iter().any(|l| match l {
             LibraryDep::Local { dir } => normalize(&self.dir.join(dir)) == target,
-            LibraryDep::Registry(_) => false,
+            LibraryDep::Registry(_) | LibraryDep::Dependency { .. } => false,
         });
         if !already {
             let stored = match style {
@@ -264,7 +266,7 @@ impl SketchProject {
                     let p = PathBuf::from(dir);
                     Some(if p.is_absolute() { p } else { self.dir.join(p) })
                 }
-                LibraryDep::Registry(_) => None,
+                LibraryDep::Registry(_) | LibraryDep::Dependency { .. } => None,
             })
             .collect())
     }
@@ -706,5 +708,36 @@ profiles:
         let proj = SketchProject::open(tmp.path()).unwrap();
         assert!(proj.init_profile("  ", "esp32:esp32:esp32").is_err());
         assert!(proj.init_profile("weather", "  ").is_err());
+    }
+
+    #[test]
+    fn parses_and_round_trips_dependency_library_entries() {
+        // `profile lib add` writes resolved deps as `- dependency: Name (v)`.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        std::fs::write(
+            proj.dir.join("sketch.yaml"),
+            r#"profiles:
+  unoq:
+    fqbn: arduino:zephyr:unoq
+    libraries:
+      - dependency: Arduino_RPClite (0.3.0)
+      - Arduino_RouterBridge (0.4.3)
+      - dir: ../libs/Foo
+default_profile: unoq
+"#,
+        )
+        .unwrap();
+        let y = proj.load_yaml().expect("dependency: entries must parse");
+        let libs = &y.profiles["unoq"].libraries;
+        assert_eq!(libs.len(), 3);
+        assert_eq!(
+            libs[0],
+            LibraryDep::Dependency { dependency: "Arduino_RPClite (0.3.0)".into() }
+        );
+        // Round-trip: saving must keep the mapping form arduino-cli understands.
+        proj.save_yaml(&y).unwrap();
+        let text = std::fs::read_to_string(proj.dir.join("sketch.yaml")).unwrap();
+        assert!(text.contains("dependency: Arduino_RPClite (0.3.0)"), "{text}");
     }
 }

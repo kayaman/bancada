@@ -136,7 +136,7 @@ export interface SketchFile {
   is_dir: boolean;
 }
 
-export type LibraryDep = string | { dir: string };
+export type LibraryDep = string | { dependency: string } | { dir: string };
 
 export interface Profile {
   fqbn: string;
