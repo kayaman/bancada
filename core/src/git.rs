@@ -17,6 +17,7 @@
 //!   thing the Assistant panel's warning is about.
 
 use crate::{Error, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -177,6 +178,140 @@ pub fn repo_root(dir: &Path) -> Option<PathBuf> {
         cur = d.parent();
     }
     None
+}
+
+/// One dirty path, with its two-letter porcelain XY status (`??` untracked).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChangedPath {
+    pub path: String,
+    pub status: String,
+}
+
+/// Everything `git status --porcelain=v2 --branch` says, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusV2 {
+    pub branch: String,
+    pub detached: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub dirty: Vec<ChangedPath>,
+}
+
+/// Parse porcelain v2. Headers are `# branch.*` lines; entries start with
+/// `1` (ordinary), `2` (rename/copy — new path first, then a tab and the
+/// original), `u` (unmerged) or `?` (untracked). Unknown lines are skipped:
+/// git adds header kinds over time and a status pill must not break on them.
+pub fn parse_status_v2(out: &str) -> StatusV2 {
+    let mut s = StatusV2 {
+        branch: String::new(),
+        detached: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        dirty: Vec::new(),
+    };
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            s.detached = rest == "(detached)";
+            s.branch = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+            s.upstream = Some(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+            for part in rest.split_whitespace() {
+                if let Some(n) = part.strip_prefix('+') {
+                    s.ahead = n.parse().unwrap_or(0);
+                } else if let Some(n) = part.strip_prefix('-') {
+                    s.behind = n.parse().unwrap_or(0);
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("? ") {
+            s.dirty.push(ChangedPath {
+                path: rest.to_string(),
+                status: "??".to_string(),
+            });
+        } else if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
+            let status = line.get(2..4).unwrap_or("").to_string();
+            // Fields are space-separated; the path is everything from field 8
+            // (ordinary) / 9 (unmerged has an extra mode) onward. Taking the
+            // tail after the 8th space and splitting a rename's `\t` is
+            // simpler and survives spaces in filenames.
+            let n_meta = if line.starts_with("u ") { 10 } else { 8 };
+            let mut rest = line;
+            for _ in 0..n_meta {
+                rest = match rest.split_once(' ') {
+                    Some((_, r)) => r,
+                    None => "",
+                };
+            }
+            let mut path = rest.split('\t').next().unwrap_or("").to_string();
+            // For renames/copies, strip the score prefix (e.g., "R100 " or "C75 ")
+            if line.starts_with("2 ") {
+                if let Some(space_idx) = path.find(' ') {
+                    let prefix = &path[..space_idx];
+                    if (prefix.starts_with('R') || prefix.starts_with('C'))
+                        && prefix[1..].chars().all(|c| c.is_ascii_digit())
+                    {
+                        path = path[space_idx + 1..].to_string();
+                    }
+                }
+            }
+            if !path.is_empty() {
+                s.dirty.push(ChangedPath { path, status });
+            }
+        }
+    }
+    s
+}
+
+/// `checkpoint: a, b (+N)` — the first two paths by name, the rest counted.
+pub fn suggested_message(dirty: &[ChangedPath]) -> String {
+    let names: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
+    match names.len() {
+        0 => "checkpoint".to_string(),
+        1 => format!("checkpoint: {}", names[0]),
+        2 => format!("checkpoint: {}, {}", names[0], names[1]),
+        n => format!("checkpoint: {}, {} (+{})", names[0], names[1], n - 2),
+    }
+}
+
+/// Credential-named files among `git ls-files` output — files `.gitignore`
+/// can no longer protect, because they are already tracked.
+pub fn tracked_secrets(ls_files_out: &str) -> Vec<String> {
+    let secret_names = ["secrets.h", "arduino_secrets.h", ".env"];
+    ls_files_out
+        .lines()
+        .filter(|p| {
+            let base = p.rsplit('/').next().unwrap_or(p);
+            secret_names.contains(&base)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The git pill's whole world, computed in one place.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RepoState {
+    /// No repository here or above.
+    NoGit,
+    /// The sketch directory is itself the repository root.
+    Root {
+        branch: String,
+        detached: bool,
+        dirty: Vec<ChangedPath>,
+        remote: Option<String>,
+        has_upstream: bool,
+        ahead: u32,
+        behind: u32,
+        tracked_secrets: Vec<String>,
+        suggested_message: String,
+    },
+    /// The sketch lives inside a bigger repository (e.g. ~/Projects).
+    Nested {
+        root: String,
+        dirty: Vec<ChangedPath>,
+    },
 }
 
 #[cfg(test)]
@@ -368,5 +503,83 @@ mod tests {
         assert!(tracked.contains("x.ino"));
         assert!(!tracked.contains("secrets.h"), "tracked {tracked:?}");
         assert!(tracked.contains(".gitignore"));
+    }
+
+    // ----- porcelain-v2 parsing -----
+
+    // Real `git status --porcelain=v2 --branch` output shapes. `1` = ordinary
+    // change, `2` = rename (path\tab origPath), `?` = untracked, `u` = unmerged.
+    const STATUS_V2: &str = "\
+# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445
+# branch.head main
+# branch.upstream origin/main
+# branch.ab +2 -1
+1 .M N... 100644 100644 100644 aaaa bbbb sketch.ino
+1 A. N... 000000 100644 100644 0000 cccc web/index.html
+2 R. N... 100644 100644 100644 dddd eeee R100 renamed.h\told.h
+? notes.txt
+";
+
+    const STATUS_V2_DETACHED: &str = "\
+# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445
+# branch.head (detached)
+";
+
+    #[test]
+    fn parses_branch_upstream_and_ahead_behind() {
+        let s = parse_status_v2(STATUS_V2);
+        assert_eq!(s.branch, "main");
+        assert!(!s.detached);
+        assert_eq!(s.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(s.ahead, 2);
+        assert_eq!(s.behind, 1);
+    }
+
+    #[test]
+    fn parses_ordinary_rename_and_untracked_entries() {
+        let s = parse_status_v2(STATUS_V2);
+        let paths: Vec<&str> = s.dirty.iter().map(|c| c.path.as_str()).collect();
+        // The rename reports its *new* path, not the tab-joined pair.
+        assert_eq!(paths, ["sketch.ino", "web/index.html", "renamed.h", "notes.txt"]);
+        assert_eq!(s.dirty[0].status, ".M");
+        assert_eq!(s.dirty[3].status, "??");
+    }
+
+    #[test]
+    fn detached_head_is_reported_with_no_upstream() {
+        let s = parse_status_v2(STATUS_V2_DETACHED);
+        assert!(s.detached);
+        assert_eq!(s.upstream, None);
+        assert_eq!((s.ahead, s.behind), (0, 0));
+        assert!(s.dirty.is_empty());
+    }
+
+    #[test]
+    fn a_clean_repo_without_upstream_parses_to_empty() {
+        let s = parse_status_v2("# branch.oid aaaa\n# branch.head main\n");
+        assert_eq!(s.branch, "main");
+        assert_eq!(s.upstream, None);
+        assert!(s.dirty.is_empty());
+    }
+
+    #[test]
+    fn suggested_message_names_two_files_and_counts_the_rest() {
+        let dirty: Vec<ChangedPath> = ["a.ino", "sketch.yaml", "web/x.py", "y.h"]
+            .iter()
+            .map(|p| ChangedPath { path: p.to_string(), status: ".M".into() })
+            .collect();
+        assert_eq!(
+            suggested_message(&dirty),
+            "checkpoint: a.ino, sketch.yaml (+2)"
+        );
+        assert_eq!(suggested_message(&dirty[..1]), "checkpoint: a.ino");
+        assert_eq!(suggested_message(&[]), "checkpoint");
+    }
+
+    #[test]
+    fn tracked_secrets_flags_only_credential_basenames() {
+        let out = "sketch.ino\nsecrets.h\nweb/.env\nnotes/secrets.h.example\n";
+        assert_eq!(tracked_secrets(out), vec!["secrets.h", "web/.env"]);
+        assert!(tracked_secrets("sketch.ino\n").is_empty());
     }
 }
