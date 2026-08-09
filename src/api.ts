@@ -278,14 +278,55 @@ export interface ScopeSingleCfg {
 
 // ---------- commands ----------
 
+// ---------- project git (checkpoint & sync) ----------
+
+/** One dirty path with its porcelain XY status ("??" = untracked). */
+export interface ChangedPath {
+  path: string;
+  status: string;
+}
+/** Mirror of core::git::RepoState (serde tag = "kind"). */
+export type RepoState =
+  | { kind: "no_git" }
+  | {
+      kind: "root";
+      branch: string;
+      detached: boolean;
+      dirty: ChangedPath[];
+      remote: string | null;
+      has_upstream: boolean;
+      ahead: number;
+      behind: number;
+      tracked_secrets: string[];
+      suggested_message: string;
+    }
+  | { kind: "nested"; root: string; dirty: ChangedPath[] };
+
+export type CommitOutcome = "committed" | "nothing_to_commit";
+export type SyncOutcome = "synced" | "dirty_tree" | "diverged" | "no_remote" | "not_root";
+
+/** The git pill's whole world — see core::git::repo_state. */
+export const gitState = (sketchDir: string) =>
+  invoke<RepoState>("git_state", { sketchDir });
+export const gitCommit = (sketchDir: string, message: string) =>
+  invoke<CommitOutcome>("git_commit", { sketchDir, message });
+/** Init + credential .gitignore + baseline commit; returns the fresh state. */
+export const gitInit = (sketchDir: string) =>
+  invoke<RepoState>("git_init", { sketchDir });
+/** fetch → rebase → push; output streams to build://line. */
+export const gitSync = (sketchDir: string) =>
+  invoke<SyncOutcome>("git_sync", { sketchDir });
+export const gitCreateRemote = (sketchDir: string, name: string) =>
+  invoke<void>("git_create_remote", { sketchDir, name });
+export const gitSetRemote = (sketchDir: string, url: string) =>
+  invoke<void>("git_set_remote", { sketchDir, url });
+export const ghAvailable = () => invoke<boolean>("gh_available");
+
 export const cliVersion = () => invoke<string>("cli_version");
 export const listBoards = () => invoke<DetectedPort[]>("list_boards");
 
 export const listSketchFiles = (sketchDir: string) =>
   invoke<SketchFile[]>("list_sketch_files", { sketchDir });
-/** Whether `sketchDir` is under git — backs the Assistant panel's no-undo warning. */
-export const sketchHasGit = (sketchDir: string) =>
-  invoke<boolean>("sketch_has_git", { sketchDir });
 export const readSketchFile = (sketchDir: string, relPath: string) =>
   invoke<string>("read_sketch_file", { sketchDir, relPath });
 export const writeSketchFile = (
