@@ -44,6 +44,10 @@ pip install --user esptool
 # git (>= 2.25 for sparse checkout) — used to fetch pinned libraries from a repo
 sudo zypper install git
 
+# gh (GitHub CLI) — optional: powers the one-button "create private repo"
+# in the git pill; without it, paste any git remote URL instead.
+sudo zypper install gh   # then: gh auth login
+
 # claude CLI (for the AI Assistant panel) — resolved from PATH like the two
 # above; install it, then run `claude` once and follow the login prompt.
 # See https://claude.com/product/claude-code for the current install options
