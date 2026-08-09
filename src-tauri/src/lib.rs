@@ -300,19 +300,6 @@ fn list_sketch_files(sketch_dir: String) -> Result<Vec<bancada_core::sketch::Ske
     proj.list_files().map_err(err_str)
 }
 
-/// Whether the sketch dir is under git — the Assistant panel warns when it
-/// isn't, since auto-applied agent edits have no undo path without it (spec
-/// Risk R4).
-///
-/// Answered by walking the ancestors, not by looking only in the sketch
-/// directory: a sketch normally lives *inside* a repository rather than being
-/// one, so the narrower check warned about files that were tracked all along.
-/// See `bancada_core::git::is_under_git` for the trade-offs.
-#[tauri::command]
-fn sketch_has_git(sketch_dir: String) -> bool {
-    bancada_core::git::is_under_git(Path::new(&sketch_dir))
-}
-
 #[tauri::command]
 fn read_sketch_file(sketch_dir: String, rel_path: String) -> Result<String, String> {
     let full = safe_join(&sketch_dir, &rel_path)?;
@@ -1150,6 +1137,93 @@ async fn upload_sketch(
     })
     .await
     .map_err(err_str)?
+}
+
+// ---------- project git (checkpoint & sync) ----------
+
+#[tauri::command]
+async fn git_state(sketch_dir: String) -> Result<bancada_core::git::RepoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::git::repo_state(Path::new(&sketch_dir)).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn git_commit(
+    sketch_dir: String,
+    message: String,
+) -> Result<bancada_core::git::CommitOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::git::commit(Path::new(&sketch_dir), &message).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Initialize a repository (with the credential .gitignore and a baseline
+/// commit) and return the fresh state, so the pill updates in one round trip.
+#[tauri::command]
+async fn git_init(sketch_dir: String) -> Result<bancada_core::git::RepoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&sketch_dir);
+        if bancada_core::git::is_under_git(dir) {
+            return Err("already under git".to_string());
+        }
+        bancada_core::git::init_repo(dir).map_err(err_str)?;
+        bancada_core::git::repo_state(dir).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn git_sync(
+    app: AppHandle,
+    sketch_dir: String,
+) -> Result<bancada_core::git::SyncOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::git::sync(Path::new(&sketch_dir), |line| {
+            let _ = app.emit("build://line", &line);
+        })
+        .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn git_create_remote(
+    app: AppHandle,
+    sketch_dir: String,
+    name: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::git::create_remote(Path::new(&sketch_dir), &name, |line| {
+            let _ = app.emit("build://line", &line);
+        })
+        .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn git_set_remote(app: AppHandle, sketch_dir: String, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        bancada_core::git::set_remote(Path::new(&sketch_dir), &url, |line| {
+            let _ = app.emit("build://line", &line);
+        })
+        .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+fn gh_available() -> bool {
+    bancada_core::git::gh_available()
 }
 
 // ---------- serial monitor ----------
@@ -3291,7 +3365,6 @@ pub fn run() {
             chat_delete,
             chat_totals,
             list_sketch_files,
-            sketch_has_git,
             read_sketch_file,
             write_sketch_file,
             create_sketch_file,
@@ -3327,6 +3400,13 @@ pub fn run() {
             gh_restore,
             compile_sketch,
             upload_sketch,
+            git_state,
+            git_commit,
+            git_init,
+            git_sync,
+            git_create_remote,
+            git_set_remote,
+            gh_available,
             start_monitor,
             set_selected_target,
             stop_monitor,
@@ -3570,33 +3650,30 @@ mod tests {
 
     // ---------- git detection ----------
 
-    /// The reported bug: a project created inside `~/Projects` — which is
-    /// itself a checkout — showed "not under git" in the Assistant panel, so
-    /// the panel warned there was no undo path for files git was tracking all
-    /// along. The command must answer for the sketch's ancestry, not just for
-    /// a `.git` sitting in the sketch directory.
+    /// The reported bug the ancestry walk fixed, now answered by repo_state:
+    /// a sketch inside ~/Projects (itself a checkout) is Nested, not NoGit.
     #[test]
-    fn sketch_has_git_sees_a_repo_above_the_sketch() {
+    fn git_state_sees_a_repo_above_the_sketch() {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         bancada_core::git::init_repo(&root).unwrap();
-
         let sketch = root.join("notundergit");
         std::fs::create_dir_all(&sketch).unwrap();
 
+        let state = bancada_core::git::repo_state(&sketch).unwrap();
         assert!(
-            !sketch.join(".git").exists(),
-            "premise: the sketch has no .git of its own — what the old check looked for"
+            matches!(state, bancada_core::git::RepoState::Nested { .. }),
+            "got {state:?}"
         );
-        assert!(sketch_has_git(sketch.to_string_lossy().into_owned()));
     }
 
     #[test]
-    fn sketch_has_git_is_false_outside_any_repo() {
+    fn git_state_is_no_git_outside_any_repo() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().canonicalize().unwrap().join("loose");
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!sketch_has_git(dir.to_string_lossy().into_owned()));
+        let state = bancada_core::git::repo_state(&dir).unwrap();
+        assert!(matches!(state, bancada_core::git::RepoState::NoGit), "got {state:?}");
     }
 
     // ---------- JSON-RPC over HTTP ----------
