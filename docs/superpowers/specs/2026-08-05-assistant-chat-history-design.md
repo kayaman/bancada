@@ -87,7 +87,9 @@ calling `chat_delete`). Clicking a chat loads its lines, replays them
 into a separate read-only `AgentStore`, and renders with the existing
 `MessageView` components; the input row is replaced by a
 `← Back to current chat` bar. The live store, session, and unseen-dot
-plumbing are untouched while browsing. No search, no resume, no export.
+plumbing are untouched while browsing. No search, no export. (Resume was
+deferred here and later shipped 2026-08-09 — see
+`docs/superpowers/plans/2026-08-09-continue-ai-session.md`.)
 
 ## Retention and sensitivity
 
