@@ -150,6 +150,70 @@ impl UsageStore {
     }
 }
 
+/// Seed a store from whatever chat files still exist under `chats_root`.
+///
+/// Used exactly once, when `usage.json` is absent: re-running after new
+/// appends would double-count, so the caller must save the result
+/// immediately. Best-effort like `project_totals`: unreadable directories,
+/// files and lines are skipped, never an error.
+pub fn backfill(chats_root: &Path) -> UsageStore {
+    let mut store = UsageStore::default();
+    let Ok(entries) = std::fs::read_dir(chats_root) else {
+        return store;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Ok(key) = entry.file_name().into_string() else {
+            continue;
+        };
+        let t = crate::chatlog::project_totals(chats_root, &key);
+        if t.chats == 0 {
+            continue;
+        }
+        let sketch_dir = sketch_dir_from_meta(chats_root, &key).unwrap_or_else(|| key.clone());
+        store.projects.insert(
+            key,
+            ProjectUsage {
+                sketch_dir,
+                cost_usd: t.cost_usd,
+                input_tokens: t.input_tokens,
+                output_tokens: t.output_tokens,
+                turns: t.turns,
+                sessions: t.chats as u64,
+                last_chat: t.last_chat,
+            },
+        );
+    }
+    store
+}
+
+/// The original sketch path, recovered from any chat's `meta` op. The
+/// recorder writes meta as line 1 of every file, but scan a few lines of
+/// every file rather than trusting one — a truncated first file must not
+/// erase the path for the whole project.
+fn sketch_dir_from_meta(chats_root: &Path, key: &str) -> Option<String> {
+    let entries = std::fs::read_dir(chats_root.join(key)).ok()?;
+    for e in entries.filter_map(|e| e.ok()) {
+        let Ok(f) = std::fs::File::open(e.path()) else {
+            continue;
+        };
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(f).lines().take(3).map_while(|l| l.ok()) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if v.get("op").and_then(|o| o.as_str()) == Some("meta") {
+                if let Some(d) = v.get("sketchDir").and_then(|s| s.as_str()) {
+                    return Some(d.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +223,69 @@ mod tests {
         format!(
             r#"{{"op":"push","ev":{{"type":"result","total_cost_usd":{cost},"num_turns":{turns},"usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
         )
+    }
+
+    fn write_chat(root: &Path, key: &str, file: &str, lines: &[&str]) {
+        let dir = root.join(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut text = lines.join("\n");
+        text.push('\n');
+        std::fs::write(dir.join(file), text).unwrap();
+    }
+
+    #[test]
+    fn backfill_seeds_from_surviving_chats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = result_line(0.01, 100, 10, 2);
+        let r2 = result_line(0.04, 400, 40, 1);
+        write_chat(
+            tmp.path(),
+            "aaaa-blink",
+            "2026-08-08T10-00-00.ndjson",
+            &[r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#, &r1],
+        );
+        write_chat(
+            tmp.path(),
+            "aaaa-blink",
+            "2026-08-09T09-00-00.ndjson",
+            &[r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#, &r2],
+        );
+        // A directory with chats but no results still counts its sessions.
+        write_chat(
+            tmp.path(),
+            "bbbb-idle",
+            "2026-08-01T08-00-00.ndjson",
+            &[r#"{"op":"meta","sketchDir":"/home/me/Idle","startedAt":"t"}"#],
+        );
+
+        let s = backfill(tmp.path());
+        let p = &s.projects["aaaa-blink"];
+        assert_eq!(p.sketch_dir, "/home/me/Blink");
+        assert!((p.cost_usd - 0.05).abs() < 1e-9);
+        assert_eq!(p.input_tokens, 500);
+        assert_eq!(p.output_tokens, 50);
+        assert_eq!(p.turns, 3);
+        assert_eq!(p.sessions, 2);
+        assert_eq!(p.last_chat.as_deref(), Some("2026-08-09T09-00-00"));
+        assert_eq!(s.projects["bbbb-idle"].sessions, 1);
+        assert!((s.projects["bbbb-idle"].cost_usd).abs() < 1e-9);
+    }
+
+    #[test]
+    fn backfill_of_missing_root_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(backfill(&tmp.path().join("never-created")).projects.is_empty());
+    }
+
+    #[test]
+    fn backfill_without_meta_falls_back_to_the_key() {
+        // Old or hand-damaged chats may lack the meta line; the key is at
+        // least recognisable (it ends with the sanitized basename).
+        let tmp = tempfile::tempdir().unwrap();
+        write_chat(tmp.path(), "cccc-mystery", "2026-08-01T08-00-00.ndjson",
+            &[&result_line(0.01, 1, 1, 1)]);
+        let s = backfill(tmp.path());
+        assert_eq!(s.projects["cccc-mystery"].sketch_dir, "cccc-mystery");
     }
 
     #[test]
