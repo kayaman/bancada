@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { parentName, pillLabel, popoverMode, syncDisabledReason } from "../gitStatus";
-import type { RepoState } from "../api";
+import {
+  parentName,
+  pillLabel,
+  popoverMode,
+  suggestedMessage,
+  syncDisabledReason,
+} from "../gitStatus";
+import type { ChangedPath, RepoState } from "../api";
 
 const root = (over: Partial<Extract<RepoState, { kind: "root" }>> = {}): RepoState => ({
   kind: "root",
@@ -33,6 +39,46 @@ describe("pillLabel", () => {
     expect(
       pillLabel({ kind: "nested", root: "/home/u/Projects", dirty: [] }),
     ).toBe("tracked by Projects");
+  });
+  it("marks a detached HEAD instead of clean/changed", () => {
+    expect(pillLabel(root({ detached: true }))).toBe("detached");
+    expect(
+      pillLabel(root({ detached: true, dirty: [{ path: "a.ino", status: ".M" }] })),
+    ).toBe("detached · 1 changed");
+    expect(
+      pillLabel(root({ detached: true, ahead: 2, behind: 1 })),
+    ).toBe("detached ↑2 ↓1");
+    expect(
+      pillLabel(
+        root({
+          detached: true,
+          dirty: [{ path: "a.ino", status: ".M" }],
+          ahead: 2,
+        }),
+      ),
+    ).toBe("detached · 1 changed ↑2");
+  });
+});
+
+describe("suggestedMessage", () => {
+  const path = (p: string): ChangedPath => ({ path: p, status: ".M" });
+  it("mirrors core::git::suggested_message", () => {
+    expect(suggestedMessage([])).toBe("checkpoint");
+    expect(suggestedMessage([path("a.ino")])).toBe("checkpoint: a.ino");
+    expect(suggestedMessage([path("a.ino"), path("b.h")])).toBe(
+      "checkpoint: a.ino, b.h",
+    );
+    expect(
+      suggestedMessage([path("a.ino"), path("b.h"), path("c.cpp")]),
+    ).toBe("checkpoint: a.ino, b.h (+1)");
+    expect(
+      suggestedMessage([
+        path("a.ino"),
+        path("b.h"),
+        path("c.cpp"),
+        path("d.txt"),
+      ]),
+    ).toBe("checkpoint: a.ino, b.h (+2)");
   });
 });
 

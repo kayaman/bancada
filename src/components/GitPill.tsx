@@ -1,7 +1,13 @@
 import { useCallback, useRef, useState } from "react";
 import Menu from "./Menu";
 import type { RepoState } from "../api";
-import { parentName, pillLabel, popoverMode, syncDisabledReason } from "../gitStatus";
+import {
+  parentName,
+  pillLabel,
+  popoverMode,
+  suggestedMessage,
+  syncDisabledReason,
+} from "../gitStatus";
 
 interface Props {
   state: RepoState | null;
@@ -37,6 +43,8 @@ export default function GitPill(props: Props) {
       return;
     }
     if (state.kind === "root") setMessage(state.suggested_message);
+    else if (state.kind === "nested") setMessage(suggestedMessage(state.dirty));
+    else setMessage("");
     setRepoName(props.defaultRepoName);
     const r = btnRef.current?.getBoundingClientRect();
     if (r) setAnchor({ x: r.left, y: r.bottom + 4 });

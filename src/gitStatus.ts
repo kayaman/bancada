@@ -1,7 +1,7 @@
 // Pure derivations for the toolbar git pill — kept out of the component so
 // the pill's whole vocabulary is unit-testable, like ports.ts is for ports.
 
-import type { RepoState } from "./api";
+import type { ChangedPath, RepoState } from "./api";
 
 /** Last path segment, for "tracked by <parent>". */
 export function parentName(root: string): string {
@@ -18,11 +18,34 @@ export function pillLabel(state: RepoState | null): string | null {
     case "nested":
       return `tracked by ${parentName(state.root)}`;
     case "root": {
-      let label = state.dirty.length === 0 ? "✓ clean" : `${state.dirty.length} changed`;
+      let label: string;
+      if (state.detached) {
+        label = state.dirty.length === 0 ? "detached" : `detached · ${state.dirty.length} changed`;
+      } else {
+        label = state.dirty.length === 0 ? "✓ clean" : `${state.dirty.length} changed`;
+      }
       if (state.ahead > 0) label += ` ↑${state.ahead}`;
       if (state.behind > 0) label += ` ↓${state.behind}`;
       return label;
     }
+  }
+}
+
+/** Mirrors core::git::suggested_message — `checkpoint: a, b (+N)`, the first
+ *  two paths by name and the rest counted. Used to prefill the commit box
+ *  for non-root states (nested), which carry a `dirty` list but no
+ *  `suggested_message` of their own from core. */
+export function suggestedMessage(dirty: ChangedPath[]): string {
+  const names = dirty.map((c) => c.path);
+  switch (names.length) {
+    case 0:
+      return "checkpoint";
+    case 1:
+      return `checkpoint: ${names[0]}`;
+    case 2:
+      return `checkpoint: ${names[0]}, ${names[1]}`;
+    default:
+      return `checkpoint: ${names[0]}, ${names[1]} (+${names.length - 2})`;
   }
 }
 

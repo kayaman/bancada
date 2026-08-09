@@ -284,8 +284,9 @@ export default function App() {
     setUnseen((u) => (u[bottomTab] ? { ...u, [bottomTab]: false } : u));
   }, [bottomTab]);
 
-  // Whether `gh` is installed and authenticated — gates the "Create on
-  // GitHub" option in the git pill's remote-setup popover.
+  // Whether `gh` is installed and on PATH — gates the "Create on GitHub"
+  // option in the git pill's remote-setup popover. Not a check that it's
+  // authenticated; an auth failure surfaces later, at create time.
   useEffect(() => {
     api.ghAvailable().then(setGhOk).catch(() => setGhOk(false));
   }, []);
@@ -1048,8 +1049,12 @@ export default function App() {
 
   const gitInit = async () => {
     if (!sketchDir) return;
+    const dir = sketchDir;
     try {
-      setGitState(await api.gitInit(sketchDir));
+      const s = await api.gitInit(dir);
+      // Guarded like refreshGitState: a slow init for a project the user has
+      // since switched away from must not clobber the new one's state.
+      if (dir === sketchDirRef.current) setGitState(s);
       notify("✓ Repository initialized (credential .gitignore + baseline commit)");
     } catch (e) {
       notify(String(e), true);
