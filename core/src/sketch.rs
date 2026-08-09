@@ -191,6 +191,35 @@ impl SketchProject {
         Ok(y)
     }
 
+    /// Point an existing profile at a different board, replacing its platform
+    /// pin and touching nothing else — name, libraries, port and notes stay.
+    /// Replacing the pin is not optional: a leftover `arduino:avr` pin under
+    /// an `arduino:zephyr` fqbn is exactly the broken state this prevents.
+    pub fn retarget_profile(
+        &self,
+        profile_name: &str,
+        fqbn: &str,
+        platform_entry: &str,
+    ) -> Result<SketchYaml> {
+        let name = profile_name.trim();
+        let fqbn = fqbn.trim();
+        if fqbn.is_empty() {
+            return Err(Error::Other("a profile needs a board (FQBN)".into()));
+        }
+        let mut y = self.load_yaml()?;
+        let p = y
+            .profiles
+            .get_mut(name)
+            .ok_or_else(|| Error::Other(format!("profile `{name}` not found")))?;
+        p.fqbn = fqbn.to_string();
+        p.platforms = vec![PlatformDep {
+            platform: platform_entry.to_string(),
+            platform_index_url: None,
+        }];
+        self.save_yaml(&y)?;
+        Ok(y)
+    }
+
     /// Add (or no-op if present) a local library `dir:` entry to a profile.
     /// The stored path is made relative to the sketch dir when possible, so
     /// the project stays relocatable.
@@ -836,5 +865,59 @@ default_profile: unoq
         proj.save_yaml(&y).unwrap();
         let text = std::fs::read_to_string(proj.dir.join("sketch.yaml")).unwrap();
         assert!(text.contains("dependency: Arduino_RPClite (0.3.0)"), "{text}");
+    }
+
+    // ---------- retarget_profile ----------
+
+    #[test]
+    fn retarget_swaps_fqbn_and_platform_pin_keeping_everything_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.add_profile("uno", "arduino:avr:uno", Some("arduino:avr (1.8.8)"), None)
+            .unwrap();
+        let mut y = proj.load_yaml().unwrap();
+        {
+            let p = y.profiles.get_mut("uno").unwrap();
+            p.libraries = vec![LibraryDep::Registry("ArduinoJson (7.4.2)".into())];
+            p.port = Some("/dev/ttyACM0".into());
+            p.notes = Some("bench uno".into());
+        }
+        proj.save_yaml(&y).unwrap();
+
+        let out = proj
+            .retarget_profile("uno", "arduino:zephyr:unoq", "arduino:zephyr (0.90.0)")
+            .unwrap();
+        let p = &out.profiles["uno"];
+        assert_eq!(p.fqbn, "arduino:zephyr:unoq");
+        assert_eq!(p.platforms.len(), 1);
+        assert_eq!(p.platforms[0].platform, "arduino:zephyr (0.90.0)");
+        // The point of "in place": name, libraries, port and notes survive.
+        assert_eq!(p.libraries, vec![LibraryDep::Registry("ArduinoJson (7.4.2)".into())]);
+        assert_eq!(p.port.as_deref(), Some("/dev/ttyACM0"));
+        assert_eq!(p.notes.as_deref(), Some("bench uno"));
+        // Persisted, and default_profile untouched.
+        assert_eq!(proj.load_yaml().unwrap().profiles["uno"].fqbn, "arduino:zephyr:unoq");
+        assert_eq!(out.default_profile.as_deref(), Some("uno"));
+    }
+
+    #[test]
+    fn retarget_to_the_same_board_is_a_no_op_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.add_profile("uno", "arduino:avr:uno", Some("arduino:avr (1.8.8)"), None)
+            .unwrap();
+        let out = proj
+            .retarget_profile("uno", "arduino:avr:uno", "arduino:avr (1.8.8)")
+            .unwrap();
+        assert_eq!(out.profiles["uno"].fqbn, "arduino:avr:uno");
+    }
+
+    #[test]
+    fn retarget_rejects_an_unknown_profile_and_blank_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.add_profile("uno", "arduino:avr:uno", None, None).unwrap();
+        assert!(proj.retarget_profile("mega", "arduino:avr:nano", "arduino:avr (1.8.8)").is_err());
+        assert!(proj.retarget_profile("uno", "  ", "arduino:avr (1.8.8)").is_err());
     }
 }
