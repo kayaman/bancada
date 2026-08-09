@@ -327,6 +327,20 @@ mod tests {
     }
 
     #[test]
+    fn i2c_scan_template_avoids_esp32_only_apis() {
+        // must compile on cores whose Serial has no printf (AVR, the Uno Q's
+        // BridgeMonitor) and whose Wire::begin takes no pin arguments
+        // (everything that isn't ESP32) — found the hard way by retargeting
+        // an i2c-scan project from esp32s3 to arduino:zephyr:unoq
+        let s = sketch_from_template("i2c-scan", "ScanNode").unwrap();
+        assert!(!s.contains("Serial.printf"), "printf is an ESP32-core extra");
+        assert!(
+            s.contains("#if defined(ARDUINO_ARCH_ESP32)"),
+            "runtime pin override exists only on ESP32 cores and must be guarded"
+        );
+    }
+
+    #[test]
     fn template_ids_are_unique_and_blink_leads() {
         assert_eq!(TEMPLATES[0].id, "blink");
         let mut ids: Vec<_> = TEMPLATES.iter().map(|t| t.id).collect();
