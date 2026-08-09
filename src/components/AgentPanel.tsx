@@ -29,7 +29,7 @@ import { activityLabel } from "../agent/activity";
 import { formatTokens } from "../agent/usage";
 import type { BottomTab } from "../bottomTabs";
 
-type TurnEnd = Extract<AgentMessage, { kind: "turn_end" }>;
+export type TurnEnd = Extract<AgentMessage, { kind: "turn_end" }>;
 
 /** Markdown as the assistant wrote it — GFM, raw HTML stays escaped. */
 function Md({ text }: { text: string }) {
@@ -592,7 +592,7 @@ function ProjectCard({
 
 /** A saved chat through the same components as a live one — including the
  *  session-end line and any alarm, or the replay wouldn't be faithful. */
-function ReplayView({
+export function ReplayView({
   store,
   openBottomTab,
   onOpenTurn,
@@ -701,7 +701,7 @@ function turnEndLabel(msg: TurnEnd): string {
 }
 
 /** The "info at the end" view: the turn's wrap-up, rendered richly. */
-function TurnSummaryView({
+export function TurnSummaryView({
   turn,
   onBack,
 }: {
