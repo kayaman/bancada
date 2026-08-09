@@ -1,8 +1,10 @@
 # bancada 0.12.0
 
-The workbench learns what it costs: every project's Assistant spend is now
-banked permanently and browsable on a dashboard, profiles can switch boards
-without leaving the toolbar, and the editor grows real tabs.
+The Assistant closes the hardware loop — it can now flash the board (behind
+a per-session arm switch), watch and type to the serial monitor, and reach
+the web. And the workbench learns what it costs: every project's Assistant
+spend is now banked permanently and browsable on a dashboard, profiles can
+switch boards without leaving the toolbar, and the editor grows real tabs.
 
 ## Usage dashboard
 
