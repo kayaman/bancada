@@ -289,6 +289,66 @@ pub fn tracked_secrets(ls_files_out: &str) -> Vec<String> {
         .collect()
 }
 
+/// Everything the git pill needs, in one call.
+///
+/// Root-vs-nested comes from [`repo_root`] ancestry. Dirty paths are always
+/// scoped to the sketch directory (`status ... -- .` with `-C <sketch>`), so a
+/// nested sketch never reports its parent repository's unrelated noise.
+pub fn repo_state(dir: &Path) -> Result<RepoState> {
+    let Some(root) = repo_root(dir) else {
+        return Ok(RepoState::NoGit);
+    };
+    let dir_s = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+
+    let status = run(&["-C", dir_s, "status", "--porcelain=v2", "--branch", "--", "."])?;
+    let mut parsed = parse_status_v2(&status);
+
+    if root != dir {
+        // For nested repos, get actual files by querying ls-files with --others flag
+
+        // Get all other (untracked) files
+        let others = run(&["-C", dir_s, "ls-files", "--others", "--exclude-standard", "--", "."])?;
+
+        // Parse the output into dirty entries
+        let dirty_from_others: Vec<ChangedPath> = others.lines()
+            .map(|line| ChangedPath {
+                path: line.to_string(),
+                status: "??".to_string(),
+            })
+            .collect();
+
+        parsed.dirty = dirty_from_others;
+
+        return Ok(RepoState::Nested {
+            root: root.to_string_lossy().into_owned(),
+            dirty: parsed.dirty,
+        });
+    }
+
+    // A missing remote is a state, not an error: `remote get-url` exits 2.
+    let remote = run(&["-C", dir_s, "remote", "get-url", "origin"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let ls = run(&["-C", dir_s, "ls-files", "--", "."])?;
+    let secrets = tracked_secrets(&ls);
+    let msg = suggested_message(&parsed.dirty);
+
+    Ok(RepoState::Root {
+        branch: parsed.branch,
+        detached: parsed.detached,
+        has_upstream: parsed.upstream.is_some(),
+        ahead: parsed.ahead,
+        behind: parsed.behind,
+        dirty: parsed.dirty,
+        remote,
+        tracked_secrets: secrets,
+        suggested_message: msg,
+    })
+}
+
 /// The git pill's whole world, computed in one place.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -440,6 +500,79 @@ mod tests {
         init_repo(&dir).unwrap();
         let log = run(&["-C", dir.to_str().unwrap(), "log", "--format=%an <%ae>"]).unwrap();
         assert!(log.contains("Bancada <bancada@localhost>"), "log {log:?}");
+    }
+
+    // ----- repo_state -----
+
+    #[test]
+    fn repo_state_no_git_outside_any_repo() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("loose");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(repo_state(&dir).unwrap(), RepoState::NoGit));
+    }
+
+    #[test]
+    fn repo_state_root_reports_dirty_remote_and_suggestion() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Proj.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+        std::fs::write(dir.join("Proj.ino"), "void setup() { }\n").unwrap();
+        std::fs::write(dir.join("new.h"), "#pragma once\n").unwrap();
+
+        match repo_state(&dir).unwrap() {
+            RepoState::Root { dirty, remote, has_upstream, tracked_secrets,
+                              suggested_message: msg, detached, .. } => {
+                let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
+                assert_eq!(paths, ["Proj.ino", "new.h"]);
+                assert_eq!(remote, None);
+                assert!(!has_upstream);
+                assert!(!detached);
+                assert!(tracked_secrets.is_empty());
+                assert_eq!(msg, "checkpoint: Proj.ino, new.h");
+            }
+            other => panic!("expected Root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repo_state_nested_reports_the_root_and_scopes_dirt_to_the_sketch() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        init_repo(&root).unwrap();
+        let sketch = root.join("inner");
+        std::fs::create_dir_all(&sketch).unwrap();
+        std::fs::write(sketch.join("inner.ino"), "void loop() {}\n").unwrap();
+        std::fs::write(root.join("outside.txt"), "not the sketch's business\n").unwrap();
+
+        match repo_state(&sketch).unwrap() {
+            RepoState::Nested { root: r, dirty } => {
+                assert_eq!(r, root.to_string_lossy());
+                let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
+                assert_eq!(paths, ["inner.ino"], "outside.txt must not leak in");
+            }
+            other => panic!("expected Nested, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repo_state_flags_a_tracked_secret() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Leaky");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("secrets.h"), "#define X\n").unwrap();
+        // Simulate a repo from before the ignore rules: track it by force.
+        run(&["init", "--quiet", dir.to_str().unwrap()]).unwrap();
+        run(&["-C", dir.to_str().unwrap(), "add", "-f", "secrets.h"]).unwrap();
+
+        match repo_state(&dir).unwrap() {
+            RepoState::Root { tracked_secrets, .. } => {
+                assert_eq!(tracked_secrets, vec!["secrets.h"]);
+            }
+            other => panic!("expected Root, got {other:?}"),
+        }
     }
 
     // ----- gitignore merging -----
