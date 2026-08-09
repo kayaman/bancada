@@ -24,6 +24,7 @@ pub mod mqtt;
 pub mod ports;
 pub mod project;
 pub mod scope;
+pub mod serialring;
 pub mod settings;
 pub mod sketch;
 pub mod types;
