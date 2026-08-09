@@ -302,9 +302,23 @@ export const deleteSketchEntry = (sketchDir: string, relPath: string) =>
 
 export const loadSketchYaml = (sketchDir: string) =>
   invoke<SketchYaml>("load_sketch_yaml", { sketchDir });
-/** Create sketch.yaml (when absent) with a first profile for `fqbn`. */
-export const initProfile = (sketchDir: string, profile: string, fqbn: string) =>
-  invoke<SketchYaml>("init_profile", { sketchDir, profile, fqbn });
+/** Create sketch.yaml (when absent) with a profile for `fqbn`; optionally
+ *  copy another profile's libraries so the project builds on the new board. */
+export const initProfile = (
+  sketchDir: string,
+  profile: string,
+  fqbn: string,
+  copyLibsFrom?: string,
+) =>
+  invoke<SketchYaml>("init_profile", {
+    sketchDir,
+    profile,
+    fqbn,
+    copyLibsFrom: copyLibsFrom ?? null,
+  });
+/** Point an existing profile at a different board, keeping its libraries. */
+export const retargetProfile = (sketchDir: string, profile: string, fqbn: string) =>
+  invoke<SketchYaml>("retarget_profile", { sketchDir, profile, fqbn });
 export const addLocalLibrary = (
   sketchDir: string,
   profile: string,

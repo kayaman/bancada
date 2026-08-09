@@ -380,11 +380,24 @@ describe("argument-less commands", () => {
 });
 
 describe("profiles and cores", () => {
-  it("initProfile passes sketchDir, profile and fqbn", async () => {
-    await api.initProfile("/s", "esp32s3", "esp32:esp32:esp32s3");
+  it("initProfile passes sketchDir, profile, fqbn and copyLibsFrom", async () => {
+    await api.initProfile("/s", "nano", "arduino:avr:nano", "uno");
     expect(called()).toEqual([
       "init_profile",
-      { sketchDir: "/s", profile: "esp32s3", fqbn: "esp32:esp32:esp32s3" },
+      { sketchDir: "/s", profile: "nano", fqbn: "arduino:avr:nano", copyLibsFrom: "uno" },
+    ]);
+    await api.initProfile("/s", "uno", "arduino:avr:uno");
+    expect(called()).toEqual([
+      "init_profile",
+      { sketchDir: "/s", profile: "uno", fqbn: "arduino:avr:uno", copyLibsFrom: null },
+    ]);
+  });
+
+  it("retargetProfile passes sketchDir, profile and fqbn", async () => {
+    await api.retargetProfile("/s", "uno", "arduino:zephyr:unoq");
+    expect(called()).toEqual([
+      "retarget_profile",
+      { sketchDir: "/s", profile: "uno", fqbn: "arduino:zephyr:unoq" },
     ]);
   });
 
