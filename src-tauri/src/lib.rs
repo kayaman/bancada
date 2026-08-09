@@ -821,10 +821,18 @@ async fn create_project(
         // the failed spec surfaces in the same channel, naming what to add.)
         let mut library_errors = Vec::new();
         let required = bancada_core::project::required_profile_libs(&fqbn);
+        // Compare by library name, not the exact spec string: a user-supplied
+        // "Arduino_RouterBridge (0.4.3)" or "Arduino_RouterBridge@0.4.3" is
+        // the same library as the bare required name "Arduino_RouterBridge"
+        // and would otherwise slip past this filter and get added twice.
+        fn lib_name(spec: &str) -> &str {
+            let trimmed = spec.trim();
+            trimmed.split(['(', '@']).next().unwrap_or(trimmed).trim()
+        }
         let requested: Vec<&str> = required
             .iter()
             .copied()
-            .filter(|r| !libraries.iter().any(|l| l.trim() == *r))
+            .filter(|r| !libraries.iter().any(|l| lib_name(l) == *r))
             .chain(libraries.iter().map(String::as_str))
             .collect();
         for spec in requested {

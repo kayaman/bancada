@@ -3,11 +3,12 @@ import BoardPicker from "./BoardPicker";
 import {
   initProfile,
   listAllBoards,
+  loadSketchYaml,
   retargetProfile,
   type BoardOption,
   type SketchYaml,
 } from "../api";
-import { profileNameForFqbn } from "../profileInit";
+import { initialFqbn as computeInitialFqbn, profileNameForFqbn, submitPlan } from "../profileInit";
 
 export type ProfileFormMode = "bootstrap" | "add" | "retarget";
 
@@ -23,6 +24,12 @@ interface Props {
   onDone: (yaml: SketchYaml, profile: string) => void;
   onCancel: () => void;
   notify: (msg: string, isError?: boolean) => void;
+  /** Called with the on-disk yaml after a failed submit: the backend writes
+   *  sketch.yaml before pinning board-required libraries, so a pin failure
+   *  still leaves a new/retargeted profile on disk. Without this, App's
+   *  sketchYaml goes stale — the profile exists but the UI doesn't show it,
+   *  and retrying reports "profile already exists". */
+  onYamlChanged: (yaml: SketchYaml) => void;
 }
 
 const LABEL: Record<ProfileFormMode, string> = {
@@ -43,12 +50,13 @@ export default function ProfileInit({
   onDone,
   onCancel,
   notify,
+  onYamlChanged,
 }: Props) {
-  const initialFqbn = (mode === "retarget" ? currentFqbn : detectedFqbn) ?? "";
+  const startFqbn = computeInitialFqbn(mode, currentFqbn, detectedFqbn);
   const [boards, setBoards] = useState<BoardOption[]>([]);
-  const [fqbn, setFqbn] = useState(initialFqbn);
+  const [fqbn, setFqbn] = useState(startFqbn);
   const [name, setName] = useState(
-    mode !== "retarget" && initialFqbn ? profileNameForFqbn(initialFqbn) : "",
+    mode !== "retarget" && startFqbn ? profileNameForFqbn(startFqbn) : "",
   );
   const [nameTouched, setNameTouched] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -67,31 +75,37 @@ export default function ProfileInit({
   };
 
   const submit = async () => {
+    const plan = submitPlan(mode, currentProfile, name, fqbn);
+    if (!plan) return; // button is disabled unless the plan is valid
     setBusy(true);
     try {
-      if (mode === "retarget") {
-        if (!currentProfile) return; // button is disabled without a profile
-        const yaml = await retargetProfile(sketchDir, currentProfile, fqbn);
-        notify(`✓ Profile “${currentProfile}” now builds for ${fqbn}`);
-        onDone(yaml, currentProfile);
+      if (plan.kind === "retarget") {
+        const yaml = await retargetProfile(sketchDir, plan.profile, plan.fqbn);
+        notify(`✓ Profile “${plan.profile}” now builds for ${plan.fqbn}`);
+        onDone(yaml, plan.profile);
       } else {
-        const yaml = await initProfile(
-          sketchDir,
-          name.trim(),
-          fqbn,
-          mode === "add" ? (currentProfile ?? undefined) : undefined,
-        );
-        notify(`✓ Profile “${name.trim()}” written to sketch.yaml`);
-        onDone(yaml, name.trim());
+        const yaml = await initProfile(sketchDir, plan.profile, plan.fqbn, plan.copyLibsFrom);
+        notify(`✓ Profile “${plan.profile}” written to sketch.yaml`);
+        onDone(yaml, plan.profile);
       }
     } catch (e) {
       notify(String(e), true);
+      // The backend writes sketch.yaml before pinning board-required
+      // libraries, so a pin failure still leaves a new/retargeted profile on
+      // disk. Refetch and propagate so App's sketchYaml doesn't go stale —
+      // without this a retry reports "profile already exists" for a profile
+      // the user can't see.
+      try {
+        onYamlChanged(await loadSketchYaml(sketchDir));
+      } catch {
+        // Best effort — the submit error above is already surfaced.
+      }
     } finally {
       setBusy(false);
     }
   };
 
-  const ready = mode === "retarget" ? !!fqbn : !!fqbn && !!name.trim();
+  const ready = submitPlan(mode, currentProfile, name, fqbn) !== null;
   return (
     <div className="profile-init">
       <span className="profile-init-label">{LABEL[mode]}</span>

@@ -9,3 +9,45 @@ export function profileNameForFqbn(fqbn: string): string {
   if (candidate) return candidate;
   return sanitize(fqbn.trim()) || "default";
 }
+
+export type ProfileFormMode = "bootstrap" | "add" | "retarget";
+
+export type SubmitPlan =
+  | { kind: "retarget"; profile: string; fqbn: string }
+  | { kind: "create"; profile: string; fqbn: string; copyLibsFrom?: string };
+
+/** Pure decision behind ProfileInit's submit button: what command to call and
+ *  with what arguments, or null when the form isn't valid yet. Mirrors the
+ *  three modes' rules — retarget targets the *selected* profile (not the
+ *  name field, which retarget doesn't show); add carries copyLibsFrom from
+ *  the currently selected profile; bootstrap never copies libraries. */
+export function submitPlan(
+  mode: ProfileFormMode,
+  currentProfile: string | null,
+  name: string,
+  fqbn: string,
+): SubmitPlan | null {
+  if (!fqbn.trim()) return null;
+  if (mode === "retarget") {
+    if (!currentProfile) return null;
+    return { kind: "retarget", profile: currentProfile, fqbn };
+  }
+  const profile = name.trim();
+  if (!profile) return null;
+  return {
+    kind: "create",
+    profile,
+    fqbn,
+    copyLibsFrom: mode === "add" ? (currentProfile ?? undefined) : undefined,
+  };
+}
+
+/** Board picker's preselected value: retarget offers the profile's current
+ *  board, bootstrap/add offer the board detected on the selected port. */
+export function initialFqbn(
+  mode: ProfileFormMode,
+  currentFqbn: string | null,
+  detectedFqbn: string | null,
+): string {
+  return (mode === "retarget" ? currentFqbn : detectedFqbn) ?? "";
+}

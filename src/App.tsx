@@ -1221,6 +1221,7 @@ export default function App() {
           }}
           onCancel={() => setProfileForm(null)}
           notify={notify}
+          onYamlChanged={setSketchYaml}
         />
       )}
 
