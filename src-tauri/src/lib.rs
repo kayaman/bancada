@@ -353,8 +353,69 @@ fn load_sketch_yaml(sketch_dir: String) -> Result<SketchYaml, String> {
     proj.load_yaml().map_err(err_str)
 }
 
+/// The pinned `platform:` entry for `fqbn`, from the installed platform.
+/// Not installed → an error naming the core to install; nothing is written
+/// by callers before this succeeds.
+fn installed_platform_entry(cli: &ArduinoCli, fqbn: &str) -> Result<String, String> {
+    let id = bancada_core::boards::fqbn_platform_id(fqbn).map_err(err_str)?;
+    let platforms = cli.core_list().map_err(err_str)?;
+    let installed = platforms
+        .iter()
+        .find(|p| p.id == id && !p.installed_version.is_empty())
+        .ok_or_else(|| {
+            format!("the {id} core is not installed — install it in the Boards manager first")
+        })?;
+    Ok(bancada_core::boards::platform_dep_entry(
+        &id,
+        &installed.installed_version,
+    ))
+}
+
+/// Pin `required_profile_libs` into a fresh or retargeted profile, loud on
+/// failure — a profile that silently cannot build is the bug this replaces.
+fn pin_required_libs(
+    cli: &ArduinoCli,
+    sketch_dir: &str,
+    profile: &str,
+    fqbn: &str,
+) -> Result<(), String> {
+    for lib in bancada_core::project::required_profile_libs(fqbn) {
+        cli.profile_lib_add(Path::new(sketch_dir), profile, lib)
+            .map_err(|e| {
+                format!(
+                    "profile \"{profile}\" was written, but this board needs the \
+                     {lib} library and pinning it failed: {e}. Add it in the \
+                     Library manager before building."
+                )
+            })?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn init_profile(
+    state: State<'_, AppState>,
+    sketch_dir: String,
+    profile: String,
+    fqbn: String,
+    copy_libs_from: Option<String>,
+) -> Result<SketchYaml, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = installed_platform_entry(&cli, &fqbn)?;
+        let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+        proj.add_profile(&profile, &fqbn, Some(&entry), copy_libs_from.as_deref())
+            .map_err(err_str)?;
+        pin_required_libs(&cli, &sketch_dir, &profile, &fqbn)?;
+        // Reload: profile lib add rewrites sketch.yaml behind the first write.
+        proj.load_yaml().map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn retarget_profile(
     state: State<'_, AppState>,
     sketch_dir: String,
     profile: String,
@@ -362,29 +423,12 @@ async fn init_profile(
 ) -> Result<SketchYaml, String> {
     let cli = state.cli.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let entry = installed_platform_entry(&cli, &fqbn)?;
         let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
-        let yaml = proj.init_profile(&profile, &fqbn).map_err(err_str)?;
-        // Boards whose core hard-requires a companion library (UNO Q →
-        // Arduino_RouterBridge) get it pinned now: a hermetic profile build
-        // never sees globally installed libraries, so without the pin every
-        // compile of this fresh profile fails. Loud on failure — returning a
-        // profile that cannot build, silently, is how this bug shipped.
-        for lib in bancada_core::project::required_profile_libs(&fqbn) {
-            cli.profile_lib_add(Path::new(&sketch_dir), &profile, lib)
-                .map_err(|e| {
-                    format!(
-                        "profile \"{profile}\" was created, but this board needs the \
-                         {lib} library and pinning it failed: {e}. Add it in the \
-                         Library manager before building."
-                    )
-                })?;
-        }
-        if bancada_core::project::required_profile_libs(&fqbn).is_empty() {
-            Ok(yaml)
-        } else {
-            // Reload: profile lib add rewrote sketch.yaml behind the first read.
-            proj.load_yaml().map_err(err_str)
-        }
+        proj.retarget_profile(&profile, &fqbn, &entry)
+            .map_err(err_str)?;
+        pin_required_libs(&cli, &sketch_dir, &profile, &fqbn)?;
+        proj.load_yaml().map_err(err_str)
     })
     .await
     .map_err(err_str)?
@@ -3126,6 +3170,7 @@ pub fn run() {
             delete_sketch_entry,
             load_sketch_yaml,
             init_profile,
+            retarget_profile,
             add_local_library,
             add_registry_library_to_profile,
             search_libraries,

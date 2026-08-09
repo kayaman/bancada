@@ -42,6 +42,20 @@ pub fn parse_core_id(raw: &str) -> Result<CoreId> {
     })
 }
 
+/// The `packager:architecture` platform id of a board FQBN
+/// (`arduino:avr:uno` → `arduino:avr`). Board options after the third
+/// segment are ignored; fewer than three segments is not an FQBN.
+pub fn fqbn_platform_id(fqbn: &str) -> Result<String> {
+    let trimmed = fqbn.trim();
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if parts.len() < 3 || parts[..3].iter().any(|p| p.is_empty()) {
+        return Err(Error::Other(format!(
+            "`{trimmed}` is not a board FQBN (expected `packager:architecture:board`)"
+        )));
+    }
+    Ok(format!("{}:{}", parts[0], parts[1]))
+}
+
 /// Where a platform stands relative to its newest published release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -238,6 +252,22 @@ mod tests {
     fn rejects_malformed_ids() {
         for bad in ["esp32", "", ":", "esp32:", ":esp32"] {
             assert!(parse_core_id(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn fqbn_platform_id_takes_the_first_two_segments() {
+        assert_eq!(fqbn_platform_id("arduino:avr:uno").unwrap(), "arduino:avr");
+        assert_eq!(
+            fqbn_platform_id("esp32:esp32:esp32s3:CDCOnBoot=cdc").unwrap(),
+            "esp32:esp32"
+        );
+    }
+
+    #[test]
+    fn fqbn_platform_id_rejects_malformed_fqbns() {
+        for bad in ["arduino", "arduino:avr", "", ":a:b", "a::b"] {
+            assert!(fqbn_platform_id(bad).is_err(), "{bad:?} should be rejected");
         }
     }
 
