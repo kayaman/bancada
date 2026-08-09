@@ -1516,12 +1516,31 @@ fn chat_append(
 ) -> Result<(), String> {
     let root = chats_root(&app)?;
     let key = bancada_core::chatlog::sketch_key(&sketch_dir);
+    // Load (or first-time seed) the usage record BEFORE the append, so a
+    // backfill can never count the file/line this call is about to add and
+    // then count it again below.
+    let usage = load_usage(&app).ok();
     let created =
         bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
     // A new chat is the moment to bound the directory. Prune is silent and
-    // best-effort, so a failed cleanup can never cost the append.
+    // best-effort, so a failed cleanup can never cost the append. The usage
+    // record is why pruning is safe: totals were banked at append time.
     if created {
         bancada_core::chatlog::prune(&root, &key, 50);
+    }
+    // Usage bookkeeping must not turn a good append into an error
+    // (note_board_fqbn precedent) — errors are logged and swallowed.
+    if let Some((path, mut store)) = usage {
+        let mut changed = false;
+        if created {
+            changed |= store.note_new_chat(&key, &sketch_dir);
+        }
+        changed |= store.record_line(&key, &sketch_dir, &file, &line);
+        if changed {
+            if let Err(e) = store.save(&path) {
+                eprintln!("usage record not saved: {e}");
+            }
+        }
     }
     Ok(())
 }
@@ -1570,6 +1589,50 @@ fn chat_delete(app: AppHandle, sketch_dir: String, file: String) -> Result<(), S
         &file,
     )
     .map_err(err_str)
+}
+
+// ---------- assistant usage record ----------
+
+fn usage_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("usage.json"))
+        .map_err(err_str)
+}
+
+/// Load the usage record, seeding it from surviving chat files the first
+/// time. The seed is saved immediately so backfill can never run twice —
+/// running it again after new appends would double-count.
+fn load_usage(app: &AppHandle) -> Result<(PathBuf, bancada_core::usage::UsageStore), String> {
+    let path = usage_path(app)?;
+    if !path.exists() {
+        let store = bancada_core::usage::backfill(&chats_root(app)?);
+        store.save(&path).map_err(err_str)?;
+        return Ok((path, store));
+    }
+    bancada_core::usage::UsageStore::load(&path)
+        .map(|s| (path, s))
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn usage_overview(
+    app: AppHandle,
+) -> Result<Vec<bancada_core::usage::ProjectUsage>, String> {
+    let (_path, store) = load_usage(&app)?;
+    Ok(store.overview())
+}
+
+#[tauri::command]
+fn chat_list_usage(
+    app: AppHandle,
+    sketch_dir: String,
+) -> Result<Vec<bancada_core::chatlog::SessionEntry>, String> {
+    let root = chats_root(&app)?;
+    Ok(bancada_core::chatlog::list_chats_with_usage(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+    ))
 }
 
 // ---------- board utilities ----------
@@ -3168,6 +3231,8 @@ pub fn run() {
             chat_load,
             chat_delete,
             chat_totals,
+            usage_overview,
+            chat_list_usage,
             list_sketch_files,
             sketch_has_git,
             read_sketch_file,
