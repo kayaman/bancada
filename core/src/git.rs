@@ -517,6 +517,7 @@ mod tests {
 1 .M N... 100644 100644 100644 aaaa bbbb sketch.ino
 1 A. N... 000000 100644 100644 0000 cccc web/index.html
 2 R. N... 100644 100644 100644 dddd eeee R100 renamed.h\told.h
+u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
 ? notes.txt
 ";
 
@@ -540,9 +541,10 @@ mod tests {
         let s = parse_status_v2(STATUS_V2);
         let paths: Vec<&str> = s.dirty.iter().map(|c| c.path.as_str()).collect();
         // The rename reports its *new* path, not the tab-joined pair.
-        assert_eq!(paths, ["sketch.ino", "web/index.html", "renamed.h", "notes.txt"]);
+        assert_eq!(paths, ["sketch.ino", "web/index.html", "renamed.h", "conflict.txt", "notes.txt"]);
         assert_eq!(s.dirty[0].status, ".M");
-        assert_eq!(s.dirty[3].status, "??");
+        assert_eq!(s.dirty[3].status, "UU");
+        assert_eq!(s.dirty[4].status, "??");
     }
 
     #[test]
