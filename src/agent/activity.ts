@@ -9,6 +9,7 @@ import type { AgentMessage, AgentStatus } from "./agentStore";
 export interface ActivityInput {
   status: AgentStatus;
   verifyRunning: boolean;
+  uploadRunning: boolean;
   streaming: boolean;
   /** A turn is in flight (userSent → result/close/alarm). Off between
    *  turns, so the footer can say "Ready" instead of a phantom
@@ -47,6 +48,9 @@ function elapsed(since: number | undefined, now: number | undefined): string {
 
 export function activityLabel(a: ActivityInput): string | null {
   if (a.status !== "running" && a.status !== "starting") return null;
+  // A flash outranks a compile: upload's build phase can raise both flags,
+  // and "flashing" is the one the user must not interrupt.
+  if (a.uploadRunning) return "📡 upload (flashing)…";
   if (a.verifyRunning) return "🔨 verify (compiling)…";
   if (!a.turnActive) return null;
   for (let i = a.messages.length - 1; i >= 0; i--) {

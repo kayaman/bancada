@@ -225,6 +225,15 @@ export default function App() {
    */
   const [agentBuilding, setAgentBuilding] = useState(false);
   const busy = userBusy || agentBuilding;
+  /** The Assistant's "Allow uploads" arm switch — per session, off by
+   *  default; lives here (not panel-local) because it must survive the
+   *  panel unmounting and ride `agentStart` for a pre-session toggle. */
+  const [uploadsArmed, setUploadsArmed] = useState(false);
+  const uploadsArmedRef = useRef(false);
+  uploadsArmedRef.current = uploadsArmed;
+  /** An agent flash is in flight — suppresses the monitor auto-start effect
+   *  (a monitor grabbing the port mid-flash kills the flash). */
+  const agentFlashingRef = useRef(false);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
@@ -339,6 +348,9 @@ export default function App() {
           setUnseen((u) => ({ ...u, serial: true }));
       }),
       api.onSerialClosed(() => setMonitorOn(false)),
+      // The agent's serial_read auto-start: keep the Monitor toggle honest
+      // (and monitorOnRef with it, so startMonitorQuiet never double-starts).
+      api.onSerialStarted(() => setMonitorOn(true)),
       api.onPortsChanged(() => {
         if (busyRef.current) {
           // arduino-cli probing ports mid-flash can disrupt esptool — defer.
@@ -997,6 +1009,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPort]);
 
+  // Mirror the UI's selected target into Rust so the agent's upload and
+  // serial_read tools flash/watch the board the user is looking at.
+  useEffect(() => {
+    api.setSelectedTarget(selectedPort, baudrate).catch(() => {});
+  }, [selectedPort, baudrate]);
+
   // Capture by default, part 2: the Serial Monitor tab being visible is a
   // standing request for capture. The port-selection auto-start above is a
   // one-shot whose failure is deliberately silent, so a lost attempt (port
@@ -1006,7 +1024,8 @@ export default function App() {
   // Stop while staying on the tab stays stopped; leaving and returning
   // re-requests capture. busyRef guards flash-time port contention.
   useEffect(() => {
-    if (bottomTab !== "serial" || busyRef.current) return;
+    if (bottomTab !== "serial" || busyRef.current || agentFlashingRef.current)
+      return;
     startMonitorQuiet();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bottomTab, selectedPort, startMonitorQuiet]);
@@ -1145,9 +1164,23 @@ export default function App() {
       setAgentBuilding(ev.type === "verify_started");
       return;
     }
+    // An agent flash: disable the toolbar's build buttons like a verify,
+    // and suppress the monitor auto-start effect until the port is free
+    // again — a monitor stealing the port mid-flash kills the flash.
+    if (ev.type === "upload_started" || ev.type === "upload_done") {
+      const pid = typeof ev.pid === "number" ? ev.pid : undefined;
+      const ours = agentStore.snapshot().pid;
+      if (pid !== undefined && ours !== undefined && pid !== ours) return;
+      const flashing = ev.type === "upload_started";
+      agentFlashingRef.current = flashing;
+      setAgentBuilding(flashing);
+      if (!flashing) openBottomTab("serial");
+      return;
+    }
     // The host has already killed the child, so no verify_done is coming.
     if (ev.type === "security_alarm") {
       setAgentBuilding(false);
+      agentFlashingRef.current = false;
       return;
     }
     if (ev.type !== "user") return;
@@ -1214,7 +1247,12 @@ export default function App() {
       try {
         // The pid identifies this session for every host event that can
         // outlive it (FE-C1) — record it before any of them can arrive.
-        const pid = await api.agentStart(sketchDir, target.profile, target.fqbn);
+        const pid = await api.agentStart(
+          sketchDir,
+          target.profile,
+          target.fqbn,
+          uploadsArmedRef.current,
+        );
         agentStore.sessionStarted(pid);
         chatRecorder.record({ op: "sessionStarted", pid });
       } catch (e) {
@@ -1233,6 +1271,13 @@ export default function App() {
 
   const interruptAgent = () => {
     api.agentInterrupt().catch((e) => notify(String(e), true));
+  };
+
+  /** Arm/disarm agent uploads: local state for the pre-session case, and the
+   *  live session's flag via the backend (a no-op when none is running). */
+  const toggleUploadsArmed = (armed: boolean) => {
+    setUploadsArmed(armed);
+    api.agentSetUploadsArmed(armed).catch((e) => notify(String(e), true));
   };
 
   /** Hard session boundary: stop the child, close the recording, drop the
@@ -1257,6 +1302,10 @@ export default function App() {
     // now — the backend cancels it — so release the flag here rather than
     // leaving the toolbar disabled forever.
     setAgentBuilding(false);
+    agentFlashingRef.current = false;
+    // Arming is per-session and dangerous-by-default: a new session starts
+    // locked no matter what the last one was allowed to do.
+    setUploadsArmed(false);
   };
 
   /** Stop the session and drop the transcript back to a clean slate. */
@@ -1675,6 +1724,8 @@ export default function App() {
             onNewSession={newAgentSession}
             openBottomTab={openBottomTab}
             gitWarning={gitWarning}
+            uploadsArmed={uploadsArmed}
+            onToggleUploadsArmed={toggleUploadsArmed}
           />
         )}
       </section>
