@@ -292,18 +292,30 @@ pub struct AgentCfg {
 /// 2.1.220 by reading the `system`/`init` line's `tools` array: without it a
 /// session lists 25 built-ins including `Skill`, `Task*`, `Monitor`,
 /// `Workflow`, `SendMessage`, `LSP`, `EnterWorktree` and `Cron*`; with it the
-/// array is exactly these five plus `mcp__bancada__verify`.
-pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep";
+/// array was exactly the allow-listed built-ins plus the `mcp__bancada__*`
+/// tools. `WebFetch`/`WebSearch` joined in 0.12.0 (deliberate egress
+/// trade-off — see the README's safety section); re-probe the init line
+/// whenever this list or the CLI version changes.
+pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
 
 /// The complete set of tools an embedded session is expected to report in its
-/// `system`/`init` line — [`BUILTIN_TOOLS`] plus the one MCP tool.
+/// `system`/`init` line — [`BUILTIN_TOOLS`] plus the bancada MCP tools.
+///
+/// Must change in the SAME commit as [`BUILTIN_TOOLS`] and `agent_args`'s
+/// `--allowedTools` literal: drift between them either alarms on every
+/// session at init (A2 kills it) or stops asserting anything.
 pub const EXPECTED_TOOLS: &[&str] = &[
     "Read",
     "Edit",
     "Write",
     "Glob",
     "Grep",
+    "WebFetch",
+    "WebSearch",
     "mcp__bancada__verify",
+    "mcp__bancada__upload",
+    "mcp__bancada__serial_read",
+    "mcp__bancada__serial_send",
 ];
 
 /// Tools present in a session's `system`/`init` `tools` array that Bancada did
@@ -690,9 +702,13 @@ fn deny_json(reason: &str) -> String {
 ///   the deny (also probe-verified), so the user's own hooks cannot open it.
 /// - **`--strict-mcp-config`** keeps the user's personal MCP servers out,
 ///   leaving only the loopback `bancada` server from `--mcp-config`.
-/// - The `mcp__bancada__verify` entry in `--allowedTools` is load-bearing:
+/// - The `mcp__bancada__*` entries in `--allowedTools` are load-bearing:
 ///   a headless (`-p`) session with an MCP tool absent from the allow-list
 ///   stalls forever on a permission prompt it has no way to answer.
+/// - `WebFetch`/`WebSearch` are allowed as of 0.12.0. This is a deliberate
+///   *egress* trade-off, not a confinement change: reads were never
+///   confined, and web access lets what is read leave the machine. Recorded
+///   in the README's safety section; `Bash` remains structurally out.
 /// - `--mcp-config` and `--settings` both take *file paths*, never inline
 ///   JSON: inline JSON would put the loopback server's bearer token (and the
 ///   hook command line) straight into argv, world-readable via
@@ -736,9 +752,11 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--tools".to_string(),
         BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
-        "Read,Edit,Write,Glob,Grep,mcp__bancada__verify".to_string(),
+        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+         mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
+            .to_string(),
         "--disallowedTools".to_string(),
-        "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput".to_string(),
+        "Bash,Task,NotebookEdit,KillShell,BashOutput".to_string(),
         "--mcp-config".to_string(),
         cfg.mcp_config_path.clone(),
         "--strict-mcp-config".to_string(),
@@ -1193,9 +1211,9 @@ mod tests {
     // ---------- agent_args ----------
 
     #[test]
-    fn agent_args_allows_the_verify_tool() {
-        // Load-bearing: without this in --allowedTools, a headless
-        // tools/call for mcp__bancada__verify stalls on a permission
+    fn agent_args_allows_every_bancada_mcp_tool() {
+        // Load-bearing: without these in --allowedTools, a headless
+        // tools/call for any mcp__bancada__* tool stalls on a permission
         // prompt that can never be answered.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/bancada-agent-mcp-abc.json".to_string(),
@@ -1206,13 +1224,13 @@ mod tests {
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(
             args[allowed_idx + 1],
-            "Read,Edit,Write,Glob,Grep,mcp__bancada__verify"
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+             mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
         );
-        assert!(args[allowed_idx + 1].contains("mcp__bancada__verify"));
     }
 
     #[test]
-    fn agent_args_disallows_bash_and_friends() {
+    fn agent_args_disallows_bash_and_friends_but_not_the_web() {
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
@@ -1220,10 +1238,12 @@ mod tests {
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
-        assert_eq!(
-            args[idx + 1],
-            "Bash,WebFetch,WebSearch,Task,NotebookEdit,KillShell,BashOutput"
-        );
+        assert_eq!(args[idx + 1], "Bash,Task,NotebookEdit,KillShell,BashOutput");
+        // WebFetch/WebSearch moved to the allow side in 0.12.0 (documented
+        // egress trade-off); Bash stays firmly denied.
+        assert!(!args[idx + 1].contains("WebFetch"));
+        assert!(!args[idx + 1].contains("WebSearch"));
+        assert!(args[idx + 1].contains("Bash"));
     }
 
     #[test]
@@ -1295,7 +1315,7 @@ mod tests {
             .iter()
             .position(|a| a == "--tools")
             .expect("--tools must be present");
-        assert_eq!(args[idx + 1], "Read,Edit,Write,Glob,Grep");
+        assert_eq!(args[idx + 1], "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch");
         assert!(
             !args[idx + 1].contains("Bash"),
             "Bash must never be in the built-in allow-list"
