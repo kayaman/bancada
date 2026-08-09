@@ -109,11 +109,16 @@ const relativeToSketchDir = (filePath: string, dir: string): string => {
  *  native `--resume <sessionId>` attempt, or (no recorded session_id) a
  *  facts-only fresh spawn from the start. Cleared once consumed (a
  *  confirmed resume, or a fallback respawn) or by `teardownAgentSession`, so
- *  a later plain message can never accidentally resume a stale session. */
+ *  a later plain message can never accidentally resume a stale session.
+ *  `sketchDir` is captured from `sketchDirRef.current` at stash-creation time
+ *  (not read again from the `sketchDir` render closure later) so a project
+ *  switch mid-flight can never make `fallbackRespawn` spawn into the wrong
+ *  directory — it compares this against the live ref instead. */
 interface ContinuationStash {
   file: string;
   sessionId?: string;
   facts: string;
+  sketchDir: string;
 }
 
 export default function App() {
@@ -256,6 +261,15 @@ export default function App() {
   /** Armed only while a native `--resume` attempt's outcome is unknown; see
    *  src/agent/resumeWatch.ts. */
   const resumeWatchRef = useRef<ResumeWatch | null>(null);
+  /** Bumped by `teardownAgentSession` (every call) and by `continueChat`'s
+   *  entry, so it strictly increases across any session boundary — a
+   *  teardown, a "New session", a project switch, or a second `continueChat`
+   *  — including ones that land *during* an in-flight `fallbackRespawn`'s
+   *  awaits. `fallbackRespawn` captures the epoch at the moment its watch
+   *  was armed and re-checks it after every await: a mismatch means the
+   *  world moved on while it was suspended, and it must abort rather than
+   *  write into (or spawn a child for) whatever chat/session is now live. */
+  const teardownEpochRef = useRef(0);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
@@ -1309,25 +1323,35 @@ export default function App() {
         );
         agentStore.sessionStarted(pid);
         chatRecorder.record({ op: "sessionStarted", pid });
+        // A continuation spawn (native-resume attempt or facts-only) always
+        // starts unarmed on the backend (the `stash ? false : ...` above) —
+        // snap the UI toggle to match so a fast click on "Allow uploads"
+        // between `continueChat` and this send can't leave it showing armed
+        // while the child is actually locked.
+        if (stash) setUploadsArmed(false);
         if (stash?.sessionId) {
           // Native resume attempted: hold events back until the child
-          // proves itself or dies trying.
-          let confirmed = false;
+          // proves itself or dies trying. Capture the teardown epoch now —
+          // this is the moment the fallback is "armed" — so a teardown or a
+          // newer `continueChat` that lands during `fallbackRespawn`'s later
+          // awaits is detectable even though the stash-identity check alone
+          // cannot see it (see `fallbackRespawn`'s doc).
+          const armEpoch = teardownEpochRef.current;
           resumeWatchRef.current = createResumeWatch({
             pid,
+            onConfirmed: () => {
+              // The attempt is live — whether proven by `system/init` or by
+              // the watch's own timeout backstop (which fires `onConfirmed`
+              // even with nothing buffered — `onDeliver` alone can't signal
+              // that case). The stash has done its job either way.
+              continuationRef.current = null;
+            },
             onDeliver: (ev) => {
-              // The first delivered event — whether via `system/init` or the
-              // watch's own timeout backstop — means this attempt is live.
-              // The stash has done its job.
-              if (!confirmed) {
-                confirmed = true;
-                continuationRef.current = null;
-              }
               deliverAgentEvent(ev as AgentEvent);
             },
             onFailed: () => {
               resumeWatchRef.current = null;
-              void fallbackRespawn(pid, stash, text);
+              void fallbackRespawn(pid, stash, text, armEpoch);
             },
           });
         } else if (stash) {
@@ -1356,37 +1380,74 @@ export default function App() {
    *  bubble already exist from `sendToAgent` — only the wire send is redone,
    *  never duplicated).
    *
-   *  Guarded by stash identity: if `continuationRef` no longer points at
-   *  this exact stash object — `teardownAgentSession` ran (double-continue,
-   *  project switch, New session) or a newer `continueChat` replaced it —
-   *  this attempt is stale and must not touch a store/recorder that now
-   *  belong to whatever superseded it. */
+   *  Guarded by stash identity (`continuationRef.current !== stash` means
+   *  `teardownAgentSession` ran or a newer `continueChat` replaced it) AND
+   *  by `epoch`, the `teardownEpochRef` snapshot taken at the moment this
+   *  fallback was armed (in `sendToAgent`, when the resume watch was
+   *  created). Stash identity alone is a single point-in-time check made
+   *  before any `await` in this function; it cannot see a teardown or a
+   *  second `continueChat` that lands *during* one of the awaits below (the
+   *  window between `agentStop`/`agentStart` resolving), which would
+   *  otherwise leave an orphaned child running, write `sessionStarted`/
+   *  `userSent` ops into whatever chat is now live, or send this stash's
+   *  `pendingText` into a session it no longer belongs to. `epoch` is
+   *  re-checked after every await for exactly that reason, and the function
+   *  aborts silently (reaping any child it already spawned, pid-scoped so it
+   *  can never touch a successor session) the instant it detects the world
+   *  moved on without it.
+   *
+   *  `stash.sketchDir` (captured at stash-creation time from
+   *  `sketchDirRef.current`, not read again from a render closure) is used
+   *  for the respawn — and re-checked against the live `sketchDirRef`
+   *  before spawning — so a project switch mid-flight can never respawn
+   *  into the wrong directory. */
   const fallbackRespawn = async (
     oldPid: number,
     stash: ContinuationStash,
     pendingText: string,
+    epoch: number,
   ) => {
     if (continuationRef.current !== stash) return; // superseded — drop it
+    if (teardownEpochRef.current !== epoch) return; // a teardown/continue raced ahead of us
     continuationRef.current = null; // consumed: this is the fallback spawn
     await api.agentStop(oldPid).catch(() => {});
-    if (!sketchDir) return; // sketch closed mid-flight — nothing to respawn into
+    if (teardownEpochRef.current !== epoch) return; // moved on while stopping the old child
+    if (sketchDirRef.current !== stash.sketchDir) return; // project switched under us
     const target = resolveTarget();
     if (!target) return; // resolveTarget already notified
+    let pid2: number | undefined;
     try {
-      const pid2 = await api.agentStart(
-        sketchDir,
+      pid2 = await api.agentStart(
+        stash.sketchDir,
         target.profile,
         target.fqbn,
         false,
         undefined,
         stash.facts,
       );
+      if (teardownEpochRef.current !== epoch) {
+        // Superseded while spawning: this child belongs to no chat we still
+        // track. Reap it (pid-scoped, so it can never kill whatever
+        // teardownAgentSession/continueChat already started in its place)
+        // and stop — touching neither store nor recorder, which now belong
+        // to the session that superseded this attempt.
+        await api.agentStop(pid2).catch(() => {});
+        return;
+      }
+      // Matches sendToAgent's continuation-spawn invariant: always unarmed,
+      // and the toggle must show it.
+      setUploadsArmed(false);
       agentStore.sessionStarted(pid2);
       chatRecorder.record({ op: "sessionStarted", pid: pid2 });
       await api.agentSend(pendingText);
     } catch (e) {
+      if (teardownEpochRef.current !== epoch) return; // don't stomp a successor's state
       notify(String(e), true);
-      agentStore.closed("continuation fallback failed");
+      // pid-scoped: agentStore.closed(reason) with no pid matches ANY
+      // current session (see AgentStore.isOurs), which could flip a
+      // successor session that has since taken over to "ended". Scope it to
+      // whichever pid this attempt actually owns.
+      agentStore.closed("continuation fallback failed", pid2 ?? oldPid);
       chatRecorder.record({ op: "closed", reason: "continuation fallback failed" });
       chatRecorder.stop();
     }
@@ -1407,6 +1468,10 @@ export default function App() {
    *  transcript/usage and agent-related UI flags. Idempotent — safe when no
    *  session exists (startup restore, double-switch). */
   const teardownAgentSession = (reason: string) => {
+    // Every teardown is a session boundary an in-flight `fallbackRespawn`
+    // must be able to detect across its awaits — see `teardownEpochRef`'s
+    // doc and `fallbackRespawn`.
+    teardownEpochRef.current++;
     // Replays stay honest: a torn-down chat ends with a closed line, not a
     // silent truncation. Status guard: an armed-but-never-started recorder
     // (agentStart threw before userSent → still "idle") must not flush a
@@ -1452,9 +1517,21 @@ export default function App() {
    *  start a new one. */
   const continueChat = async (file: string) => {
     if (!sketchDir) return; // re-entry gate — no project, nothing to continue into
+    // This call is itself a session boundary — bump the epoch on entry, in
+    // addition to the bump inside `teardownAgentSession` right below, so any
+    // `fallbackRespawn` already in flight (from whatever session existed
+    // before this call) is guaranteed stale as of this exact line, before
+    // any `await` here gives it a chance to run. See `teardownEpochRef`'s
+    // doc.
+    teardownEpochRef.current++;
     teardownAgentSession("continued another chat");
     try {
       const lines = await api.chatLoad(sketchDir, file);
+      // The project may have been closed or switched while chatLoad was in
+      // flight — re-read the live ref rather than trusting the `sketchDir`
+      // closure captured before the await.
+      const dir = sketchDirRef.current;
+      if (!dir) return;
       applyChatOps(agentStore, lines);
       agentStore.prepareContinuation();
       const snap = agentStore.snapshot();
@@ -1462,8 +1539,9 @@ export default function App() {
         file,
         sessionId: snap.sessionId,
         facts: distillFacts(snap),
+        sketchDir: dir,
       };
-      chatRecorder.resume(file, (f, l) => api.chatAppend(sketchDir, f, l));
+      chatRecorder.resume(file, (f, l) => api.chatAppend(dir, f, l));
     } catch (e) {
       notify(String(e), true);
     }

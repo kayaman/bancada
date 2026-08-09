@@ -3060,10 +3060,17 @@ fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&st
 /// observed session-id shapes, while still rejecting a leading `--resume`
 /// (contains letters outside a-f and starts with `-` twice, but more
 /// importantly contains `r`/`s`/`u`/`m`/`e`), embedded whitespace, or
-/// anything non-ASCII.
+/// anything non-ASCII. Also rejects anything starting with `-` (a bare
+/// `-x`-shaped value could still be mistaken for a flag by a shell even
+/// though the hex/length checks alone would admit it) and anything with no
+/// hex digit at all (an all-hyphen string like `"--------"` satisfies the
+/// character-class and length checks but is not a session id shape).
 fn valid_session_id(id: &str) -> bool {
     let len = id.len();
-    (8..=64).contains(&len) && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+    (8..=64).contains(&len)
+        && !id.starts_with('-')
+        && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+        && id.chars().any(|c| c.is_ascii_hexdigit())
 }
 
 /// Clamp `facts` to at most 4096 bytes, cutting on the nearest earlier char
@@ -4687,6 +4694,17 @@ mod tests {
         // flag once it lands in argv right after --resume.
         assert!(!valid_session_id("--resume"));
         assert!(!valid_session_id("-x"));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_all_hyphen_and_leading_hyphen_values() {
+        // Character-class + length alone would admit these; they need the
+        // "starts with '-'" and "has at least one hex digit" checks too.
+        assert!(!valid_session_id("--------"));
+        assert!(!valid_session_id(&"-".repeat(64)));
+        assert!(!valid_session_id("-abc123ef"));
+        // A real uuid still passes.
+        assert!(valid_session_id("550e8400-e29b-41d4-a716-446655440000"));
     }
 
     #[test]

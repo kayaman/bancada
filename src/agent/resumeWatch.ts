@@ -14,10 +14,14 @@
 //               (resume failed, exited before saying anything).
 //   CONFIRMED — init arrived (or the timeout backstop fired first, so a
 //               genuinely live session is never left invisible forever):
-//               the buffer flushes through `onDeliver` in original order,
-//               the init event (if any) is delivered last, and the watch
-//               goes inert — `offerEvent` returns false from then on so the
-//               caller's ordinary event-handling path takes back over.
+//               `onConfirmed` fires exactly once (even when the buffer was
+//               empty and no init ever arrived — the only signal for that
+//               case, since `onDeliver` is not called at all when there is
+//               nothing to flush), then the buffer flushes through
+//               `onDeliver` in original order, the init event (if any) is
+//               delivered last, and the watch goes inert — `offerEvent`
+//               returns false from then on so the caller's ordinary
+//               event-handling path takes back over.
 //   FAILED    — `closed` with the watched pid arrived before init: the
 //               buffer is dropped (nothing in it ever painted, so nothing
 //               needs undoing) and `onFailed` fires once, letting the
@@ -55,8 +59,15 @@ export function createResumeWatch(opts: {
   timeoutMs?: number;
   onDeliver: (ev: unknown) => void;
   onFailed: () => void;
+  /** Fires exactly once, on the WATCHING -> CONFIRMED transition, before any
+   *  buffered events are flushed through `onDeliver` — including when the
+   *  buffer is empty and the timeout backstop fired with no init ever seen,
+   *  the one case `onDeliver` itself can never signal. Never fires on the
+   *  FAILED path. Optional: callers that don't need a CONFIRMED signal
+   *  independent of `onDeliver` can omit it. */
+  onConfirmed?: () => void;
 }): ResumeWatch {
-  const { pid, onDeliver, onFailed } = opts;
+  const { pid, onDeliver, onFailed, onConfirmed } = opts;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   let watching = true;
@@ -74,11 +85,14 @@ export function createResumeWatch(opts: {
     }
   }
 
-  /** WATCHING -> CONFIRMED: flush the buffer in order, then (if given) the
-   *  init event itself, then go inert. */
+  /** WATCHING -> CONFIRMED: signal `onConfirmed` (fires even on an empty
+   *  buffer — the timeout-backstop-with-nothing-buffered case, which
+   *  `onDeliver` alone cannot signal), then flush the buffer in order, then
+   *  (if given) the init event itself, then go inert. */
   function confirm(initEvent: unknown): void {
     stopTimer();
     watching = false;
+    onConfirmed?.();
     const flushed = buffer;
     buffer = [];
     for (const ev of flushed) onDeliver(ev);

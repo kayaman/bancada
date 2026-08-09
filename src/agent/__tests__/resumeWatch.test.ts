@@ -71,13 +71,30 @@ describe("createResumeWatch: CONFIRMED transition (init)", () => {
     vi.advanceTimersByTime(30000);
     expect(onDeliver).not.toHaveBeenCalled();
   });
+
+  it("calls onConfirmed once on the init transition, alongside the flush", () => {
+    const onDeliver = vi.fn();
+    const onConfirmed = vi.fn();
+    const watch = createResumeWatch({
+      pid: 100,
+      onDeliver,
+      onFailed: vi.fn(),
+      onConfirmed,
+    });
+    watch.offerEvent({ type: "stream_event" });
+    watch.offerEvent(initEvent);
+
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(onDeliver).toHaveBeenCalledTimes(2); // buffered event + init event
+  });
 });
 
 describe("createResumeWatch: FAILED transition (closed before init)", () => {
   it("a closed with the matching pid drops the buffer and calls onFailed once", () => {
     const onDeliver = vi.fn();
     const onFailed = vi.fn();
-    const watch = createResumeWatch({ pid: 100, onDeliver, onFailed });
+    const onConfirmed = vi.fn();
+    const watch = createResumeWatch({ pid: 100, onDeliver, onFailed, onConfirmed });
 
     watch.offerEvent({ type: "stream_event" });
     watch.offerEvent({ type: "assistant" });
@@ -86,6 +103,7 @@ describe("createResumeWatch: FAILED transition (closed before init)", () => {
     expect(consumed).toBe(true);
     expect(onFailed).toHaveBeenCalledTimes(1);
     expect(onDeliver).not.toHaveBeenCalled(); // buffer dropped, not flushed
+    expect(onConfirmed).not.toHaveBeenCalled(); // FAILED, not CONFIRMED
   });
 
   it("a closed with a DIFFERENT pid is not consumed and does not fail the watch", () => {
@@ -146,6 +164,24 @@ describe("createResumeWatch: timeout backstop", () => {
 
     // and pass-through afterwards
     expect(watch.offerEvent({ type: "assistant" })).toBe(false);
+  });
+
+  it("calls onConfirmed on the timeout backstop even with an EMPTY buffer — the case " +
+    "onDeliver alone cannot signal, since it is never invoked when there is nothing " +
+    "buffered and no init event", () => {
+    const onDeliver = vi.fn();
+    const onConfirmed = vi.fn();
+    createResumeWatch({
+      pid: 100,
+      onDeliver,
+      onFailed: vi.fn(),
+      onConfirmed,
+    });
+
+    vi.advanceTimersByTime(20000);
+
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(onDeliver).not.toHaveBeenCalled(); // nothing buffered, no init — nothing to flush
   });
 
   it("respects a custom timeoutMs", () => {
