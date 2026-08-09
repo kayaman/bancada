@@ -141,6 +141,7 @@ use bancada_core::cli::ArduinoCli;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
+use bancada_core::serialring::SerialRing;
 use bancada_core::sketch::{PathStyle, SketchProject, SketchYaml};
 use bancada_core::types::{DetectedPort, IndexedLibrary, InstalledLibrary, RunResult};
 use base64::Engine as _;
@@ -163,9 +164,44 @@ enum SerialOwner {
     Scope(ScopeSession),
 }
 
+/// The flash/monitor target the UI currently has selected, mirrored into
+/// Rust by `set_selected_target` so the agent's MCP tools can use it without
+/// asking the frontend. Only port + baud: profile/fqbn stay session-frozen
+/// in `McpToolCtx` — the agent must flash what its `verify` built, not what
+/// the user switched to mid-session.
+#[derive(Clone)]
+struct SelectedTarget {
+    port: String,
+    baud: u32,
+}
+
+/// The event-emitter shape shared by the monitor reader threads and the MCP
+/// listener: production wraps `AppHandle::emit`, tests pass a collector.
+/// `Arc` because the serial reader threads it spawns must own a clone.
+type EmitFn = dyn Fn(&str, serde_json::Value) + Send + Sync;
+
 struct AppState {
     cli: ArduinoCli,
-    serial: Mutex<Option<SerialOwner>>,
+    /// The serial-port owner slot. `Arc` so the agent's MCP listener thread
+    /// can hold a clone (it must never lock `agent`, but may take this one).
+    ///
+    /// Lock contract: `serial` is a **leaf lock**, held only across
+    /// bounded-short operations — child spawn, port open, pipe write,
+    /// evict — never across a compile/upload or a wait loop. It may be taken
+    /// by Tauri commands, `RunEvent::Exit`, and the MCP listener thread;
+    /// never by the monitor/scope/MQTT reader threads, which are killed or
+    /// joined *under* it. Lock order: `build_gate` (try-only) → `serial` →
+    /// nothing.
+    serial: Arc<Mutex<Option<SerialOwner>>>,
+    /// Rolling monitor scrollback for the agent's `serial_read` tool. Fed by
+    /// every monitor's reader threads for the process lifetime; sequence
+    /// numbers survive monitor restarts. Reader threads may lock the ring
+    /// (nothing joins a thread while holding it); never taken together with
+    /// `serial`.
+    serial_ring: Arc<Mutex<SerialRing>>,
+    /// UI-selected port/baud, kept fresh by the frontend on every selection
+    /// change. `None` until a port is selected.
+    selected_target: Arc<Mutex<Option<SelectedTarget>>>,
     /// MQTT broker session — a sibling of `serial`, never coupled to it.
     mqtt: Mutex<Option<MqttSession>>,
     /// Embedded `claude` session — another sibling slot, one at a time.
@@ -1093,6 +1129,62 @@ async fn upload_sketch(
 
 // ---------- serial monitor ----------
 
+/// Spawn a fresh monitor child and its two reader threads.
+///
+/// Shared by the user's `start_monitor` command and the agent's
+/// `serial_read` auto-start. Every line goes both to the `serial://line`
+/// event (for the Monitor tab) and into the ring buffer (for the agent);
+/// the stdout thread emits `serial://closed` at EOF exactly as before. The
+/// reader threads own only the emitter Arc and the ring Arc — never the
+/// serial-owner mutex (they are killed under it; see `AppState::serial`).
+fn spawn_monitor(
+    cli: &ArduinoCli,
+    port: &str,
+    baudrate: u32,
+    emit: Arc<EmitFn>,
+    ring: Arc<Mutex<SerialRing>>,
+) -> Result<Child, String> {
+    let mut child = cli.monitor(port, baudrate).map_err(err_str)?;
+    let stdout = child.stdout.take().ok_or("monitor stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("monitor stderr unavailable")?;
+
+    let emit_out = emit.clone();
+    let ring_out = ring.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            ring_out
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(bancada_core::types::OutputStream::Stdout, &line);
+            emit_out(
+                "serial://line",
+                serde_json::json!({ "stream": "stdout", "line": line }),
+            );
+        }
+        emit_out("serial://closed", serde_json::json!({}));
+    });
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            ring.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(bancada_core::types::OutputStream::Stderr, &line);
+            emit(
+                "serial://line",
+                serde_json::json!({ "stream": "stderr", "line": line }),
+            );
+        }
+    });
+
+    Ok(child)
+}
+
+/// Wrap an `AppHandle` as the shared emitter shape.
+fn app_emitter(app: AppHandle) -> Arc<EmitFn> {
+    Arc::new(move |name, payload| {
+        let _ = app.emit(name, payload);
+    })
+}
+
 #[tauri::command]
 fn start_monitor(
     app: AppHandle,
@@ -1103,31 +1195,34 @@ fn start_monitor(
     let mut guard = state.serial.lock().unwrap();
     evict_owner(&mut guard);
 
-    let mut child = state.cli.monitor(&port, baudrate).map_err(err_str)?;
-    let stdout = child.stdout.take().ok_or("monitor stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("monitor stderr unavailable")?;
-
-    let app_out = app.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-            let _ = app_out.emit(
-                "serial://line",
-                serde_json::json!({ "stream": "stdout", "line": line }),
-            );
-        }
-        let _ = app_out.emit("serial://closed", serde_json::json!({}));
-    });
-    let app_err = app.clone();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            let _ = app_err.emit(
-                "serial://line",
-                serde_json::json!({ "stream": "stderr", "line": line }),
-            );
-        }
-    });
+    let child = spawn_monitor(
+        &state.cli,
+        &port,
+        baudrate,
+        app_emitter(app),
+        state.serial_ring.clone(),
+    )?;
 
     *guard = Some(SerialOwner::Monitor(child));
+    Ok(())
+}
+
+/// Mirror the UI's selected flash/monitor target into Rust state so the
+/// agent's MCP tools can use it. `port: None` clears the selection.
+#[tauri::command]
+fn set_selected_target(
+    state: State<'_, AppState>,
+    port: Option<String>,
+    baudrate: u32,
+) -> Result<(), String> {
+    let mut guard = state
+        .selected_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = port.map(|port| SelectedTarget {
+        port,
+        baud: baudrate,
+    });
     Ok(())
 }
 
@@ -3191,7 +3286,9 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppState {
                 cli: ArduinoCli::default(),
-                serial: Mutex::new(None),
+                serial: Arc::new(Mutex::new(None)),
+                serial_ring: Arc::new(Mutex::new(SerialRing::default())),
+                selected_target: Arc::new(Mutex::new(None)),
                 mqtt: Mutex::new(None),
                 agent: Mutex::new(None),
                 build_gate: Arc::new(Mutex::new(())),
@@ -3273,6 +3370,7 @@ pub fn run() {
             compile_sketch,
             upload_sketch,
             start_monitor,
+            set_selected_target,
             stop_monitor,
             monitor_send,
             scope_probe,
