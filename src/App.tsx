@@ -775,6 +775,7 @@ export default function App() {
       // has to actually do it.
       agentConflictsRef.current.delete(openFile);
       setConflicts([...agentConflictsRef.current]);
+      setArmedTab(null);
       notify(`Saved ${openFile}`);
     } catch (e) {
       notify(String(e), true);
@@ -820,6 +821,7 @@ export default function App() {
     // source of truth for the synchronous guards below (it is written from
     // the agent event listener, which has no access to state).
     setConflicts([...conflicted]);
+    setArmedTab(null);
     if (skipped.length > 0) {
       notify(conflictMessage(skipped), true);
     }
