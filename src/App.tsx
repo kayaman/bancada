@@ -1207,6 +1207,7 @@ export default function App() {
 
       {profileForm && sketchDir && (
         <ProfileInit
+          key={profileForm}
           mode={profileForm}
           sketchDir={sketchDir}
           detectedFqbn={detectedFqbn() ?? null}
