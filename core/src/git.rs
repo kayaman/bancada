@@ -334,6 +334,31 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
     })
 }
 
+/// Checkpoint everything under `dir`: `add -A -- .` scoped to the sketch,
+/// then commit. In a nested sketch this commits only the subtree's paths —
+/// the parent repository's other changes are not swept in.
+pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let status = run(&["-C", d, "status", "--porcelain", "--", "."])?;
+    if status.trim().is_empty() {
+        return Ok(CommitOutcome::NothingToCommit);
+    }
+    run(&["-C", d, "add", "-A", "--", "."])?;
+    run(&["-C", d, "commit", "--quiet", "-m", message, "--", "."])?;
+    Ok(CommitOutcome::Committed)
+}
+
+/// Outcome of a checkpoint commit. "Nothing to commit" is a state the UI
+/// reports quietly, not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitOutcome {
+    Committed,
+    NothingToCommit,
+}
+
 /// The git pill's whole world, computed in one place.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -718,5 +743,52 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         let out = "sketch.ino\nsecrets.h\nweb/.env\nnotes/secrets.h.example\n";
         assert_eq!(tracked_secrets(out), vec!["secrets.h", "web/.env"]);
         assert!(tracked_secrets("sketch.ino\n").is_empty());
+    }
+
+    // ----- commit -----
+
+    #[test]
+    fn commit_checkpoints_everything_in_the_sketch() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Chk");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+        std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
+
+        assert_eq!(commit(&dir, "checkpoint: b.h").unwrap(), CommitOutcome::Committed);
+        let d = dir.to_str().unwrap();
+        let log = run(&["-C", d, "log", "--oneline"]).unwrap();
+        assert!(log.contains("checkpoint: b.h"), "log {log:?}");
+        let status = run(&["-C", d, "status", "--porcelain"]).unwrap();
+        assert!(status.trim().is_empty(), "tree should be clean: {status:?}");
+    }
+
+    #[test]
+    fn commit_on_a_clean_tree_reports_nothing_to_commit() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Clean");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+        assert_eq!(commit(&dir, "no-op").unwrap(), CommitOutcome::NothingToCommit);
+    }
+
+    /// A nested sketch's commit takes the sketch subtree only — the parent
+    /// repository's other dirt must survive untouched.
+    #[test]
+    fn commit_in_a_nested_sketch_stays_inside_the_subtree() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        init_repo(&root).unwrap();
+        let sketch = root.join("nested");
+        std::fs::create_dir_all(&sketch).unwrap();
+        std::fs::write(sketch.join("n.ino"), "void loop() {}\n").unwrap();
+        std::fs::write(root.join("unrelated.txt"), "leave me be\n").unwrap();
+
+        assert_eq!(commit(&sketch, "checkpoint: n.ino").unwrap(), CommitOutcome::Committed);
+        let status = run(&["-C", root.to_str().unwrap(), "status", "--porcelain"]).unwrap();
+        assert!(status.contains("unrelated.txt"), "must stay dirty: {status:?}");
+        assert!(!status.contains("n.ino"), "must be committed: {status:?}");
     }
 }
