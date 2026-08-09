@@ -492,6 +492,109 @@ pub enum RepoState {
     },
 }
 
+// ---------- gh (GitHub CLI) ----------
+
+/// Is the GitHub CLI on PATH? Its absence only hides the create-repo button.
+pub fn gh_available() -> bool {
+    std::process::Command::new("gh")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// `gh repo create <name> --private --source <dir> --push` — private by
+/// default; `--push` last so nothing partial happens on auth/name errors.
+pub fn create_remote_args(name: &str, dir: &str) -> Vec<String> {
+    ["repo", "create", name, "--private", "--source", dir, "--push"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Create a private GitHub repo for `dir` and push. Streams gh's output.
+pub fn create_remote(dir: &Path, name: &str, mut on_line: impl FnMut(OutputLine)) -> Result<()> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Other("repository name is empty".into()));
+    }
+    let args = create_remote_args(name, d);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut child = std::process::Command::new("gh")
+        .args(&arg_refs)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::ToolMissing("gh".into())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+    // Same interleave shape as run_streaming, inlined for the gh binary.
+    use std::io::BufRead;
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
+    let tx_err = tx.clone();
+    let t_out = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            let _ = tx.send(OutputLine { stream: OutputStream::Stdout, line });
+        }
+    });
+    let t_err = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            let _ = tx_err.send(OutputLine { stream: OutputStream::Stderr, line });
+        }
+    });
+    let mut tail = Vec::new();
+    for line in rx {
+        if line.stream == OutputStream::Stderr {
+            tail.push(line.line.clone());
+        }
+        on_line(line);
+    }
+    let _ = t_out.join();
+    let _ = t_err.join();
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(Error::ToolFailed {
+            tool: "gh repo create".into(),
+            status: status.code().unwrap_or(-1),
+            // gh explains auth problems on stderr ("run: gh auth login").
+            stderr: tail.join("\n"),
+        });
+    }
+    Ok(())
+}
+
+/// Wire an existing remote repository as origin and push the current branch.
+pub fn set_remote(dir: &Path, url: &str, mut on_line: impl FnMut(OutputLine)) -> Result<()> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(Error::Other("remote URL is empty".into()));
+    }
+    run(&["-C", d, "remote", "add", "origin", url])?;
+    if !run_streaming(&["-C", d, "push", "-u", "origin", "HEAD"], &mut on_line)? {
+        // Leave no half-configured origin behind a failed first push.
+        let _ = run(&["-C", d, "remote", "remove", "origin"]);
+        return Err(Error::Other(
+            "first push failed — origin was not kept; check the URL and access".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,5 +1107,45 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         std::fs::write(dir.join("l.ino"), "void setup() {}\n").unwrap();
         init_repo(&dir).unwrap();
         assert_eq!(sync(&dir, |_| {}).unwrap(), SyncOutcome::NoRemote);
+    }
+
+    // ----- gh remote -----
+
+    #[test]
+    fn create_remote_args_are_private_source_push() {
+        assert_eq!(
+            create_remote_args("teste-uno-veia", "/home/u/Projects/teste-uno-veia"),
+            ["repo", "create", "teste-uno-veia", "--private",
+             "--source", "/home/u/Projects/teste-uno-veia", "--push"]
+        );
+    }
+
+    #[test]
+    fn set_remote_rejects_an_obviously_bad_url() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("R");
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo(&dir).unwrap();
+        let err = set_remote(&dir, "   ", |_| {}).unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn set_remote_records_origin_before_attempting_the_push() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let origin = base.join("srv.git");
+        run(&["init", "--bare", "--quiet", origin.to_str().unwrap()]).unwrap();
+        let dir = base.join("local");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+
+        set_remote(&dir, origin.to_str().unwrap(), |_| {}).unwrap();
+        let url = run(&["-C", dir.to_str().unwrap(), "remote", "get-url", "origin"]).unwrap();
+        assert_eq!(url.trim(), origin.to_str().unwrap());
+        // And the push -u actually landed the baseline.
+        let refs = run(&["-C", origin.to_str().unwrap(), "for-each-ref"]).unwrap();
+        assert!(!refs.trim().is_empty(), "remote should have the branch: {refs:?}");
     }
 }
