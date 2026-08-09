@@ -3052,6 +3052,37 @@ fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&st
     out
 }
 
+/// Is `id` shaped like something `claude --resume` could plausibly accept,
+/// and never anything that could be mistaken for a flag or shell
+/// metacharacter once it lands in argv? Every character must be an ASCII hex
+/// digit or `-`, and the whole string must be 8–64 characters — wide enough
+/// to admit a bare UUID (with or without hyphens) and the CLI's other
+/// observed session-id shapes, while still rejecting a leading `--resume`
+/// (contains letters outside a-f and starts with `-` twice, but more
+/// importantly contains `r`/`s`/`u`/`m`/`e`), embedded whitespace, or
+/// anything non-ASCII.
+fn valid_session_id(id: &str) -> bool {
+    let len = id.len();
+    (8..=64).contains(&len) && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+}
+
+/// Clamp `facts` to at most 4096 bytes, cutting on the nearest earlier char
+/// boundary so the result is always valid UTF-8 (a hard byte-index truncate
+/// can split a multi-byte character). Distilled chat facts are free-form
+/// text the agent wrote, so nothing about their content can be assumed to
+/// align on a byte boundary at exactly the cap.
+fn clamp_facts(facts: &str) -> &str {
+    const MAX_BYTES: usize = 4096;
+    if facts.len() <= MAX_BYTES {
+        return facts;
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !facts.is_char_boundary(end) {
+        end -= 1;
+    }
+    &facts[..end]
+}
+
 /// Tear a session down: cancel any in-flight verify, close the writer
 /// channel, stop the listener, then kill and reap the child so no zombie is
 /// left behind.
@@ -3261,6 +3292,8 @@ fn agent_start(
     profile: Option<String>,
     fqbn: Option<String>,
     uploads_armed: bool,
+    resume_session_id: Option<String>,
+    context_facts: Option<String>,
 ) -> Result<u32, String> {
     let mut guard = lock_agent(&state);
     if let Some(existing) = guard.as_ref() {
@@ -3268,6 +3301,17 @@ fn agent_start(
             "an agent session is already running for {}",
             existing.sketch_dir
         ));
+    }
+
+    // Reject a malformed id before anything is bound or spawned: this is the
+    // one piece of "continue an AI session" plumbing that reaches argv
+    // (agent::agent_args puts it straight after --resume), so a value that
+    // could ever be mistaken for a flag or shell metacharacter must not get
+    // this far. See `valid_session_id`.
+    if let Some(id) = resume_session_id.as_deref() {
+        if !valid_session_id(id) {
+            return Err(format!("{id:?} is not a valid session id"));
+        }
     }
 
     // Before anything is bound or spawned: if the confinement hook is
@@ -3306,10 +3350,18 @@ fn agent_start(
         }
     };
 
+    let mut prompt_extra = system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref());
+    if let Some(facts) = context_facts.as_deref() {
+        let facts = clamp_facts(facts);
+        if !facts.is_empty() {
+            prompt_extra = format!("{prompt_extra}\n\n{facts}");
+        }
+    }
     let cfg = AgentCfg {
         mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
         settings_path: settings_path.to_string_lossy().into_owned(),
-        system_prompt_extra: system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref()),
+        system_prompt_extra: prompt_extra,
+        resume_session_id,
     };
     let cleanup = |server: &Arc<tiny_http::Server>| {
         server.unblock(); // never leave the listener thread parked
@@ -4619,6 +4671,68 @@ mod tests {
         assert!(!bare.contains("FQBN"), "{bare}");
     }
 
+    // ---------- continue an AI session: valid_session_id / clamp_facts ----------
+
+    #[test]
+    fn valid_session_id_accepts_uuid_shapes() {
+        assert!(valid_session_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(valid_session_id("abc123de"));
+        assert!(valid_session_id("ABCDEF12"));
+        assert!(valid_session_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_a_flag_shaped_value() {
+        // The load-bearing case: a value that could be mistaken for another
+        // flag once it lands in argv right after --resume.
+        assert!(!valid_session_id("--resume"));
+        assert!(!valid_session_id("-x"));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_spaces_empty_and_out_of_range_lengths() {
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("short"));
+        assert!(!valid_session_id("abc 1234"));
+        assert!(!valid_session_id(&"a".repeat(7)));
+        assert!(!valid_session_id(&"a".repeat(65)));
+        assert!(!valid_session_id(&"a".repeat(70)));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_unicode() {
+        assert!(!valid_session_id("abcdefgh\u{1F600}"));
+        assert!(!valid_session_id("café1234"));
+    }
+
+    #[test]
+    fn clamp_facts_leaves_short_input_untouched() {
+        assert_eq!(clamp_facts("hello"), "hello");
+        assert_eq!(clamp_facts(""), "");
+    }
+
+    #[test]
+    fn clamp_facts_truncates_to_at_most_4096_bytes() {
+        let long = "a".repeat(5000);
+        let clamped = clamp_facts(&long);
+        assert_eq!(clamped.len(), 4096);
+    }
+
+    #[test]
+    fn clamp_facts_cuts_on_a_char_boundary_not_mid_character() {
+        // A multi-byte char (3 bytes in UTF-8) placed so the naive 4096-byte
+        // cut would land inside it.
+        let mut s = "a".repeat(4095);
+        s.push('€'); // 3-byte char straddling the 4096 boundary
+        s.push_str(&"b".repeat(100));
+        let clamped = clamp_facts(&s);
+        assert!(clamped.len() <= 4096);
+        // Must be valid UTF-8 — this would panic on a mid-char split.
+        assert!(std::str::from_utf8(clamped.as_bytes()).is_ok());
+        // The incomplete '€' must have been dropped, not left dangling.
+        assert!(!clamped.contains('€'));
+    }
+
     // F4: a stale `agent://closed` for a superseded session must not kill a
     // newer one that `agent_start` has since stored.
     #[test]
@@ -5177,6 +5291,7 @@ mod tests {
                 Some("test"),
                 None,
             ),
+            resume_session_id: None,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))
@@ -5282,6 +5397,7 @@ mod tests {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(&sketch_dir, None, None),
+            resume_session_id: None,
         };
 
         let mut child = std::process::Command::new("claude")
@@ -5464,6 +5580,7 @@ mod tests {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(&sketch_dir, Some(&profile), None),
+            resume_session_id: None,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))
