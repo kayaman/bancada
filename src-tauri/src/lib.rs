@@ -354,9 +354,40 @@ fn load_sketch_yaml(sketch_dir: String) -> Result<SketchYaml, String> {
 }
 
 #[tauri::command]
-fn init_profile(sketch_dir: String, profile: String, fqbn: String) -> Result<SketchYaml, String> {
-    let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
-    proj.init_profile(&profile, &fqbn).map_err(err_str)
+async fn init_profile(
+    state: State<'_, AppState>,
+    sketch_dir: String,
+    profile: String,
+    fqbn: String,
+) -> Result<SketchYaml, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
+        let yaml = proj.init_profile(&profile, &fqbn).map_err(err_str)?;
+        // Boards whose core hard-requires a companion library (UNO Q →
+        // Arduino_RouterBridge) get it pinned now: a hermetic profile build
+        // never sees globally installed libraries, so without the pin every
+        // compile of this fresh profile fails. Loud on failure — returning a
+        // profile that cannot build, silently, is how this bug shipped.
+        for lib in bancada_core::project::required_profile_libs(&fqbn) {
+            cli.profile_lib_add(Path::new(&sketch_dir), &profile, lib)
+                .map_err(|e| {
+                    format!(
+                        "profile \"{profile}\" was created, but this board needs the \
+                         {lib} library and pinning it failed: {e}. Add it in the \
+                         Library manager before building."
+                    )
+                })?;
+        }
+        if bancada_core::project::required_profile_libs(&fqbn).is_empty() {
+            Ok(yaml)
+        } else {
+            // Reload: profile lib add rewrote sketch.yaml behind the first read.
+            proj.load_yaml().map_err(err_str)
+        }
+    })
+    .await
+    .map_err(err_str)?
 }
 
 #[tauri::command]
@@ -742,8 +773,17 @@ async fn create_project(
 
         // Non-fatal: the project exists and builds without these, so report the
         // failures rather than abandoning a directory the user can already see.
+        // (For the board-required libs below "builds without" is not true — but
+        // the failed spec surfaces in the same channel, naming what to add.)
         let mut library_errors = Vec::new();
-        for spec in &libraries {
+        let required = bancada_core::project::required_profile_libs(&fqbn);
+        let requested: Vec<&str> = required
+            .iter()
+            .copied()
+            .filter(|r| !libraries.iter().any(|l| l.trim() == *r))
+            .chain(libraries.iter().map(String::as_str))
+            .collect();
+        for spec in requested {
             let spec = spec.trim();
             if spec.is_empty() {
                 continue;

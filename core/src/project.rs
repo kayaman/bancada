@@ -112,6 +112,21 @@ pub fn validate_project_name(raw: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+/// Registry libraries a board's profile cannot build without.
+///
+/// Profile builds are hermetic — they see only the libraries pinned in
+/// sketch.yaml, never the globally installed ones — so a core that hard-requires
+/// a companion library makes every fresh profile fail to compile until that
+/// library is pinned. The UNO Q core is the known case: its bundled stub header
+/// `#error`s out of `Arduino.h` itself unless Arduino_RouterBridge is present.
+pub fn required_profile_libs(fqbn: &str) -> &'static [&'static str] {
+    if fqbn.trim().starts_with("arduino:zephyr:") {
+        &["Arduino_RouterBridge"]
+    } else {
+        &[]
+    }
+}
+
 /// A profile name derived from an FQBN: the board segment, with any board
 /// options dropped.
 ///
@@ -255,6 +270,26 @@ mod tests {
     fn rejects_other_illegal_characters() {
         for bad in ["Caf\u{e9}", "a+b", "hi!", "q(1)"] {
             assert!(validate_project_name(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn unoq_profiles_require_the_router_bridge_library() {
+        // Any arduino:zephyr board (the UNO Q family), with or without options.
+        assert_eq!(
+            required_profile_libs("arduino:zephyr:unoq"),
+            ["Arduino_RouterBridge"]
+        );
+        assert_eq!(
+            required_profile_libs(" arduino:zephyr:unoq:opt=1 "),
+            ["Arduino_RouterBridge"]
+        );
+    }
+
+    #[test]
+    fn other_boards_require_no_profile_libs() {
+        for fqbn in ["arduino:avr:uno", "esp32:esp32:esp32s3", "", "zephyr"] {
+            assert!(required_profile_libs(fqbn).is_empty(), "{fqbn}");
         }
     }
 
