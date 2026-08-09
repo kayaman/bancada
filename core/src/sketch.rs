@@ -202,6 +202,9 @@ impl SketchProject {
         platform_entry: &str,
     ) -> Result<SketchYaml> {
         let name = profile_name.trim();
+        if name.is_empty() {
+            return Err(Error::Other("a profile needs a name".into()));
+        }
         let fqbn = fqbn.trim();
         if fqbn.is_empty() {
             return Err(Error::Other("a profile needs a board (FQBN)".into()));
@@ -919,5 +922,11 @@ default_profile: unoq
         proj.add_profile("uno", "arduino:avr:uno", None, None).unwrap();
         assert!(proj.retarget_profile("mega", "arduino:avr:nano", "arduino:avr (1.8.8)").is_err());
         assert!(proj.retarget_profile("uno", "  ", "arduino:avr (1.8.8)").is_err());
+        // Blank profile name must also be rejected with the same error as add_profile uses
+        let err = proj
+            .retarget_profile("  ", "arduino:avr:nano", "arduino:avr (1.8.8)")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a name"), "got: {err}");
     }
 }
