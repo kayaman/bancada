@@ -117,24 +117,32 @@ export default function App() {
   const [cloningProject, setCloningProject] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
+  // Live mirror of sketchDir for the App-level agent event listeners, which
+  // are registered once (empty-dep effect) and would otherwise close over a
+  // stale `null`.
+  const sketchDirRef = useRef<string | null>(null);
+  sketchDirRef.current = sketchDir;
+
   // The toolbar pill's whole world; null while no sketch is open.
   const [gitState, setGitState] = useState<api.RepoState | null>(null);
   const [ghOk, setGhOk] = useState(false);
   const gitStateRefreshRef = useRef<(dir: string) => void>(() => {});
 
   const refreshGitState = useCallback((dir: string) => {
-    // Fire-and-forget like fleetSync: a hint, not load-bearing.
+    // Fire-and-forget like fleetSync: a hint, not load-bearing. Guarded
+    // against staleness on both paths — a slow response for a project the
+    // user has since switched away from must not clobber the new one's
+    // state, whether it resolves or rejects.
     api
       .gitState(dir)
-      .then(setGitState)
-      .catch(() => setGitState(null));
+      .then((s) => {
+        if (dir === sketchDirRef.current) setGitState(s);
+      })
+      .catch(() => {
+        if (dir === sketchDirRef.current) setGitState(null);
+      });
   }, []);
   gitStateRefreshRef.current = refreshGitState;
-  // Live mirror of sketchDir for the App-level agent event listeners, which
-  // are registered once (empty-dep effect) and would otherwise close over a
-  // stale `null`.
-  const sketchDirRef = useRef<string | null>(null);
-  sketchDirRef.current = sketchDir;
 
   // editor — unsaved edits live in the buffer map keyed by rel_path; disk is
   // the source of truth for clean files.
@@ -504,6 +512,11 @@ export default function App() {
       setSketchDir(dir);
       setFiles(fs);
       setSketchYaml(yaml);
+      // Reset synchronously before kicking off the async refresh: otherwise
+      // the pill would render the previous project's state — bound to the
+      // new project's handlers — for however long git_state takes to answer.
+      // The pill briefly disappearing is honest; a stale one lying is not.
+      setGitState(null);
       refreshGitState(dir);
       const profiles = Object.keys(yaml.profiles ?? {});
       const prof = yaml.default_profile ?? profiles[0] ?? null;
