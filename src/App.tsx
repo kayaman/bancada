@@ -27,7 +27,9 @@ import { arrivals, bridgeArrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
 import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
 import { AgentStore } from "./agent/agentStore";
-import { ChatRecorder, chatFileName } from "./agent/chatLog";
+import { ChatRecorder, chatFileName, applyChatOps } from "./agent/chatLog";
+import { distillFacts } from "./agent/continueChat";
+import { createResumeWatch, type ResumeWatch } from "./agent/resumeWatch";
 import EditorTabs from "./components/EditorTabs";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
@@ -102,6 +104,17 @@ const relativeToSketchDir = (filePath: string, dir: string): string => {
   const prefix = dir.endsWith("/") ? dir : `${dir}/`;
   return filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath;
 };
+
+/** Set by `continueChat`, consumed by `sendToAgent`'s idle branch: either a
+ *  native `--resume <sessionId>` attempt, or (no recorded session_id) a
+ *  facts-only fresh spawn from the start. Cleared once consumed (a
+ *  confirmed resume, or a fallback respawn) or by `teardownAgentSession`, so
+ *  a later plain message can never accidentally resume a stale session. */
+interface ContinuationStash {
+  file: string;
+  sessionId?: string;
+  facts: string;
+}
 
 export default function App() {
   // project
@@ -237,6 +250,12 @@ export default function App() {
   /** An agent flash is in flight — suppresses the monitor auto-start effect
    *  (a monitor grabbing the port mid-flash kills the flash). */
   const agentFlashingRef = useRef(false);
+  /** "Continue this chat" bookkeeping — see `ContinuationStash` and
+   *  `sendToAgent`/`fallbackRespawn`/`teardownAgentSession` below. */
+  const continuationRef = useRef<ContinuationStash | null>(null);
+  /** Armed only while a native `--resume` attempt's outcome is unknown; see
+   *  src/agent/resumeWatch.ts. */
+  const resumeWatchRef = useRef<ResumeWatch | null>(null);
   const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
@@ -368,18 +387,19 @@ export default function App() {
       // the unseen dot on the Assistant tab must light up even before the
       // panel has ever been mounted (spec: agentStore is not panel-owned).
       api.onAgentEvent((ev) => {
-        agentStore.push(ev);
-        // Deltas are transient duplicates of the authoritative assistant
-        // event that follows them — recording them would write the same
-        // text twice and fire one IPC append per streamed fragment. Replay
-        // of completed turns is unchanged without them; only an
-        // interrupted turn's partial text is lost from history.
-        if (ev.type !== "stream_event") chatRecorder.record({ op: "push", ev });
-        if (bottomTabRef.current !== "agent")
-          setUnseen((u) => ({ ...u, agent: true }));
-        handleAgentSideEffects(ev);
+        // A native `--resume` attempt's outcome is unknown until it proves
+        // itself — the watch buffers everything until then and replays it
+        // through `deliverAgentEvent` (its `onDeliver`), so a consumed event
+        // must not also be routed through the ordinary path below.
+        if (resumeWatchRef.current?.offerEvent(ev)) return;
+        deliverAgentEvent(ev);
       }),
       api.onAgentClosed((p) => {
+        // Same reasoning as above: a `closed` for the pid a resume watch is
+        // still waiting on is that attempt failing (the child exited before
+        // ever proving itself alive), not this session ending — the watch's
+        // `onFailed` (`fallbackRespawn`) takes over from here.
+        if (resumeWatchRef.current?.offerClosed(p)) return;
         // `p.pid` names the child that exited. The store ignores a close for
         // a session it is no longer showing (FE-C1): `newAgentSession()`
         // stops without awaiting, so session A's stdout EOF can land after
@@ -1213,11 +1233,34 @@ export default function App() {
     }
   };
 
+  /** Ingest one `agent://event`: push into the store, shadow it to the chat
+   *  recorder, flag the tab unseen, run the side-effect handler. Factored
+   *  out of the App-level listener so a `ResumeWatch`'s buffered/flushed
+   *  events go through the exact same path a live event would. */
+  const deliverAgentEvent = (ev: AgentEvent) => {
+    agentStore.push(ev);
+    // Deltas are transient duplicates of the authoritative assistant
+    // event that follows them — recording them would write the same
+    // text twice and fire one IPC append per streamed fragment. Replay
+    // of completed turns is unchanged without them; only an
+    // interrupted turn's partial text is lost from history.
+    if (ev.type !== "stream_event") chatRecorder.record({ op: "push", ev });
+    if (bottomTabRef.current !== "agent")
+      setUnseen((u) => ({ ...u, agent: true }));
+    handleAgentSideEffects(ev);
+  };
+
   /** Save-then-send, auto-starting the session on the first message with the
-   *  same target Verify uses. Refuses while a dirty-conflict is unresolved.
-   *  The auto-start (target resolution + `agentStart`) happens *before*
-   *  `userSent` — failing to resolve a target or spawn the child must not
-   *  leave a phantom "sent" bubble with nothing behind it. */
+   *  same target Verify uses — or, when `continueChat` just stashed a saved
+   *  chat, resuming it instead of starting blank: `agentStart` gets the
+   *  stash's `sessionId` (native `--resume`) or, when the chat never
+   *  recorded one, its `facts` straight away (no resume attempted). A
+   *  native attempt is watched: its outcome is unknowable until the child
+   *  either proves itself (`system/init`, via `deliverAgentEvent`) or dies
+   *  first (`fallbackRespawn`). Refuses while a dirty-conflict is
+   *  unresolved. The auto-start (target resolution + `agentStart`) happens
+   *  *before* `userSent` — failing to resolve a target or spawn the child
+   *  must not leave a phantom "sent" bubble with nothing behind it. */
   const sendToAgent = async (text: string) => {
     if (agentConflictsRef.current.size > 0) {
       notify(
@@ -1236,7 +1279,8 @@ export default function App() {
     if (agentConflictsRef.current.size > 0) return; // saveAll already notified
     // Arm the recorder before the session can produce its first op. Writes
     // nothing until the first record, so a send that fails below leaves no
-    // empty chat file behind.
+    // empty chat file behind. `continueChat` already armed it via `resume`
+    // (appending to the SAME file) — `active` is true either way.
     if (!chatRecorder.active) {
       const now = new Date();
       chatRecorder.start(
@@ -1248,17 +1292,49 @@ export default function App() {
     if (agentStore.snapshot().status === "idle") {
       const target = resolveTarget();
       if (!target) return; // resolveTarget already notified
+      const stash = continuationRef.current;
       try {
         // The pid identifies this session for every host event that can
         // outlive it (FE-C1) — record it before any of them can arrive.
+        // A continuation session always starts unarmed regardless of the
+        // toggle's current value — same dangerous-by-default invariant as
+        // "New session", deliberately not inherited from a chat's past.
         const pid = await api.agentStart(
           sketchDir,
           target.profile,
           target.fqbn,
-          uploadsArmedRef.current,
+          stash ? false : uploadsArmedRef.current,
+          stash?.sessionId,
+          stash?.sessionId ? undefined : stash?.facts,
         );
         agentStore.sessionStarted(pid);
         chatRecorder.record({ op: "sessionStarted", pid });
+        if (stash?.sessionId) {
+          // Native resume attempted: hold events back until the child
+          // proves itself or dies trying.
+          let confirmed = false;
+          resumeWatchRef.current = createResumeWatch({
+            pid,
+            onDeliver: (ev) => {
+              // The first delivered event — whether via `system/init` or the
+              // watch's own timeout backstop — means this attempt is live.
+              // The stash has done its job.
+              if (!confirmed) {
+                confirmed = true;
+                continuationRef.current = null;
+              }
+              deliverAgentEvent(ev as AgentEvent);
+            },
+            onFailed: () => {
+              resumeWatchRef.current = null;
+              void fallbackRespawn(pid, stash, text);
+            },
+          });
+        } else if (stash) {
+          // No session_id was ever recorded for this chat — a facts-only
+          // spawn from the start, no resume attempted. Consumed immediately.
+          continuationRef.current = null;
+        }
       } catch (e) {
         notify(String(e), true);
         return;
@@ -1270,6 +1346,49 @@ export default function App() {
       await api.agentSend(text);
     } catch (e) {
       notify(String(e), true);
+    }
+  };
+
+  /** A native `--resume` attempt died before proving itself (its pid's
+   *  `closed` arrived with no `system/init` ever seen) — reap it and start a
+   *  fresh session carrying the stash's distilled facts instead, then resend
+   *  the message that triggered the attempt (its `userSent` op and store
+   *  bubble already exist from `sendToAgent` — only the wire send is redone,
+   *  never duplicated).
+   *
+   *  Guarded by stash identity: if `continuationRef` no longer points at
+   *  this exact stash object — `teardownAgentSession` ran (double-continue,
+   *  project switch, New session) or a newer `continueChat` replaced it —
+   *  this attempt is stale and must not touch a store/recorder that now
+   *  belong to whatever superseded it. */
+  const fallbackRespawn = async (
+    oldPid: number,
+    stash: ContinuationStash,
+    pendingText: string,
+  ) => {
+    if (continuationRef.current !== stash) return; // superseded — drop it
+    continuationRef.current = null; // consumed: this is the fallback spawn
+    await api.agentStop(oldPid).catch(() => {});
+    if (!sketchDir) return; // sketch closed mid-flight — nothing to respawn into
+    const target = resolveTarget();
+    if (!target) return; // resolveTarget already notified
+    try {
+      const pid2 = await api.agentStart(
+        sketchDir,
+        target.profile,
+        target.fqbn,
+        false,
+        undefined,
+        stash.facts,
+      );
+      agentStore.sessionStarted(pid2);
+      chatRecorder.record({ op: "sessionStarted", pid: pid2 });
+      await api.agentSend(pendingText);
+    } catch (e) {
+      notify(String(e), true);
+      agentStore.closed("continuation fallback failed");
+      chatRecorder.record({ op: "closed", reason: "continuation fallback failed" });
+      chatRecorder.stop();
     }
   };
 
@@ -1310,10 +1429,45 @@ export default function App() {
     // Arming is per-session and dangerous-by-default: a new session starts
     // locked no matter what the last one was allowed to do.
     setUploadsArmed(false);
+    // A pending resume watch must not deliver or fail into whatever comes
+    // next, and a stale continuation stash must never be picked up by a
+    // later plain message — see `ContinuationStash` and `fallbackRespawn`.
+    resumeWatchRef.current?.cancel();
+    resumeWatchRef.current = null;
+    continuationRef.current = null;
   };
 
   /** Stop the session and drop the transcript back to a clean slate. */
   const newAgentSession = () => teardownAgentSession("new session");
+
+  /** "Continue this chat" (History → ▶): re-entry gate, then tear down any
+   *  live session (killing it, and — critically — cancelling any pending
+   *  resume watch and dropping any prior continuation stash so a stale
+   *  fallback can never respawn over this one; `uploadsArmed` lands back at
+   *  false, same as any fresh session). Replays the saved chat's ops into
+   *  the LIVE singleton store via `prepareContinuation()` (never `clear()`
+   *  — the whole point is to keep the transcript, sessionId, usage and raw
+   *  log), stashes what `sendToAgent`'s idle branch needs to actually
+   *  resume, and arms the recorder to append to the SAME file rather than
+   *  start a new one. */
+  const continueChat = async (file: string) => {
+    if (!sketchDir) return; // re-entry gate — no project, nothing to continue into
+    teardownAgentSession("continued another chat");
+    try {
+      const lines = await api.chatLoad(sketchDir, file);
+      applyChatOps(agentStore, lines);
+      agentStore.prepareContinuation();
+      const snap = agentStore.snapshot();
+      continuationRef.current = {
+        file,
+        sessionId: snap.sessionId,
+        facts: distillFacts(snap),
+      };
+      chatRecorder.resume(file, (f, l) => api.chatAppend(sketchDir, f, l));
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
 
   // ---------- render ----------
 
@@ -1742,6 +1896,7 @@ export default function App() {
             onSend={sendToAgent}
             onInterrupt={interruptAgent}
             onNewSession={newAgentSession}
+            onContinueChat={continueChat}
             openBottomTab={openBottomTab}
             gitWarning={gitWarning}
             uploadsArmed={uploadsArmed}

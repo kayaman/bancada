@@ -48,6 +48,10 @@ interface AgentPanelProps {
   onInterrupt: () => void;
   /** Stop the session and clear the transcript. */
   onNewSession: () => void;
+  /** "Continue this chat": resume the saved chat `file` — native
+   *  `--resume` when it recorded a session_id, a facts-only fresh session
+   *  otherwise. */
+  onContinueChat: (file: string) => void;
   openBottomTab: (tab: BottomTab) => void;
   /** True when the sketch dir has no `.git` — edits auto-apply with no undo. */
   gitWarning: boolean;
@@ -66,6 +70,7 @@ export default function AgentPanel({
   onSend,
   onInterrupt,
   onNewSession,
+  onContinueChat,
   openBottomTab,
   gitWarning,
   uploadsArmed,
@@ -116,11 +121,15 @@ export default function AgentPanel({
   const [histList, setHistList] = useState<ChatEntry[] | null>(null);
   const [histStore, setHistStore] = useState<AgentStore | null>(null);
   const [histTotals, setHistTotals] = useState<ProjectTotals | null>(null);
+  /** The file behind `histStore` — needed only so the back-bar's "Continue
+   *  this chat" button knows which chat to hand to `onContinueChat`. */
+  const [histFile, setHistFile] = useState<string | null>(null);
 
   const openHistory = () => {
     if (!sketchDir) return;
     setViewTurn(null);
     setHistStore(null);
+    setHistFile(null);
     api
       .chatList(sketchDir)
       .then(setHistList)
@@ -137,7 +146,10 @@ export default function AgentPanel({
     if (!sketchDir) return;
     api
       .chatLoad(sketchDir, file)
-      .then((lines) => setHistStore(replayChat(lines)))
+      .then((lines) => {
+        setHistStore(replayChat(lines));
+        setHistFile(file);
+      })
       .catch(() => {});
   };
 
@@ -154,8 +166,21 @@ export default function AgentPanel({
 
   const closeHistory = () => {
     setViewTurn(null);
-    if (histStore) setHistStore(null); // replay → back to the list
-    else setHistList(null); // list → back to the live chat
+    if (histStore) {
+      setHistStore(null); // replay → back to the list
+      setHistFile(null);
+    } else setHistList(null); // list → back to the live chat
+  };
+
+  /** Shared by the History row ▶ and the replay back-bar's ▶: panel-local
+   *  history/replay/turn views must not linger into the continued chat. */
+  const continueChat = (file: string) => {
+    setViewTurn(null);
+    setHistList(null);
+    setHistStore(null);
+    setHistTotals(null);
+    setHistFile(null);
+    onContinueChat(file);
   };
 
   // ---------- autoscroll (Console.tsx pattern: stick to bottom unless the
@@ -253,6 +278,7 @@ export default function AgentPanel({
               entries={histList}
               onOpen={openChat}
               onDelete={deleteChat}
+              onContinue={continueChat}
             />
           </>
         ) : (
@@ -347,6 +373,7 @@ export default function AgentPanel({
             setHistList(null);
             setHistStore(null);
             setHistTotals(null);
+            setHistFile(null);
             onNewSession();
           }}
         >
@@ -359,6 +386,15 @@ export default function AgentPanel({
           <button className="btn small" onClick={closeHistory}>
             ← {histStore ? "Back to history" : "Back to current chat"}
           </button>
+          {histStore && histFile && (
+            <button
+              className="btn small primary"
+              onClick={() => continueChat(histFile)}
+              title="Resume this chat with the assistant"
+            >
+              ▶ Continue this chat
+            </button>
+          )}
           <span className="agent-back-hint">
             {histStore
               ? "Read-only replay of a saved chat."
@@ -729,10 +765,12 @@ function HistListView({
   entries,
   onOpen,
   onDelete,
+  onContinue,
 }: {
   entries: ChatEntry[];
   onOpen: (file: string) => void;
   onDelete: (file: string) => void;
+  onContinue: (file: string) => void;
 }) {
   if (entries.length === 0) {
     return (
@@ -748,6 +786,13 @@ function HistListView({
             <span className="agent-hist-date">
               {e.file.replace(/\.ndjson$/, "").replace("T", " ")}
             </span>
+          </button>
+          <button
+            className="btn small icon"
+            onClick={() => onContinue(e.file)}
+            title="Continue this chat with the assistant"
+          >
+            ▶
           </button>
           <button
             className="btn small danger icon"
