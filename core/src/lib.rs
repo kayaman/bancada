@@ -27,6 +27,7 @@ pub mod scope;
 pub mod settings;
 pub mod sketch;
 pub mod types;
+pub mod usage;
 
 use thiserror::Error;
 
