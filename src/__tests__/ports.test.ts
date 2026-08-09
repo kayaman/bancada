@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextSelectedPort, portOptions, visibleBoard } from "../ports";
+import { flashTargetMismatch, nextSelectedPort, portOptions, visibleBoard } from "../ports";
 import type { DetectedPort, MatchingBoard } from "../api";
 
 const port = (address: string, protocol = "serial"): DetectedPort => ({
@@ -123,5 +123,33 @@ describe("portOptions", () => {
   it("adds nothing extra when the selection is attached", () => {
     const opts = portOptions([withBoards("/dev/ttyACM0", [])], "/dev/ttyACM0");
     expect(opts).toHaveLength(1);
+  });
+});
+
+describe("flashTargetMismatch", () => {
+  it("flags a profile aimed at a different board than the port reports", () => {
+    // The 2026-08-09 bench incident: sketch.yaml still targeted the UNO Q
+    // while a classic Uno sat on the selected port.
+    expect(
+      flashTargetMismatch("arduino:zephyr:unoq", "arduino:avr:uno"),
+    ).toBe(true);
+  });
+
+  it("accepts a matching board even when the profile pins options", () => {
+    expect(
+      flashTargetMismatch(
+        "esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M",
+        "esp32:esp32:esp32s3",
+      ),
+    ).toBe(false);
+  });
+
+  it("stays quiet when the port reports no identity (bridge)", () => {
+    expect(flashTargetMismatch("arduino:avr:uno", undefined)).toBe(false);
+    expect(flashTargetMismatch("arduino:avr:uno", "")).toBe(false);
+  });
+
+  it("stays quiet when the profile has no fqbn", () => {
+    expect(flashTargetMismatch(undefined, "arduino:avr:uno")).toBe(false);
   });
 });

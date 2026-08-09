@@ -11,6 +11,25 @@ export function visibleBoard(p: DetectedPort): MatchingBoard | null {
   return p.matching_boards.find((b) => !b.is_hidden) ?? null;
 }
 
+/**
+ * True when a profile would flash a different board than the one detected on
+ * the selected port — the profile silently wins over the port, so this is the
+ * only place the disagreement can be surfaced. Compares the vendor:arch:board
+ * base (a profile may pin board options; `board list` never reports them), and
+ * stays quiet when either side is unknown: a bare USB bridge reports no
+ * identity, and that must not turn every upload into a warning.
+ */
+export function flashTargetMismatch(
+  profileFqbn: string | undefined,
+  detectedFqbn: string | undefined,
+): boolean {
+  const base = (f: string | undefined) =>
+    (f ?? "").trim().split(":").slice(0, 3).join(":");
+  const p = base(profileFqbn);
+  const d = base(detectedFqbn);
+  return p !== "" && d !== "" && p !== d;
+}
+
 export interface PortOption {
   address: string;
   label: string;

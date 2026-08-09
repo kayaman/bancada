@@ -6,7 +6,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
-import { nextSelectedPort, visibleBoard } from "./ports";
+import { flashTargetMismatch, nextSelectedPort, visibleBoard } from "./ports";
 import { checkNewEntry, checkNewFile } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
 import {
@@ -814,7 +814,21 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify(`Building and flashing to ${selectedPort}…`);
+    // The profile silently outranks the detected board, so a disagreement is
+    // announced on the status line for the whole build — a separate notify
+    // would be overwritten by the next one before anyone could read it.
+    const profileFqbn = target.profile
+      ? sketchYaml?.profiles?.[target.profile]?.fqbn
+      : undefined;
+    const detected = detectedFqbn();
+    if (flashTargetMismatch(profileFqbn, detected)) {
+      notify(
+        `⚠ ${selectedPort} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
+        true,
+      );
+    } else {
+      notify(`Building and flashing to ${selectedPort}…`);
+    }
     try {
       // Compiles as part of the flash — a sketch that fails to build stops
       // here with its compiler error and never reaches the board.
