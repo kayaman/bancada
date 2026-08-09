@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import type { DetectedPort, SketchYaml } from "../api";
+import type { DetectedPort, RepoState, SketchYaml } from "../api";
 import { portOptions } from "../ports";
 import BrandMark from "./BrandMark";
+import GitPill from "./GitPill";
 import RecentsMenu from "./RecentsMenu";
 
 interface Props {
@@ -12,6 +13,8 @@ interface Props {
   ports: DetectedPort[];
   selectedPort: string | null;
   busy: boolean;
+  gitState: RepoState | null;
+  ghAvailable: boolean;
   onOpenSketch: () => void;
   onOpenRecent: (dir: string) => void;
   onNewProject: () => void;
@@ -24,6 +27,11 @@ interface Props {
   onRefreshPorts: () => void;
   onVerify: () => void;
   onUpload: () => void;
+  onGitCommit: (message: string) => void;
+  onGitSync: () => void;
+  onGitInit: () => void;
+  onGitCreateRemote: (name: string) => void;
+  onGitSetRemote: (url: string) => void;
 }
 
 export default function Toolbar(props: Props) {
@@ -154,6 +162,20 @@ export default function Toolbar(props: Props) {
             ⟳
           </button>
         </div>
+
+        {props.sketchDir && (
+          <GitPill
+            state={props.gitState}
+            busy={props.busy}
+            ghAvailable={props.ghAvailable}
+            defaultRepoName={props.sketchDir.split("/").filter(Boolean).pop() ?? ""}
+            onCommit={props.onGitCommit}
+            onSync={props.onGitSync}
+            onInit={props.onGitInit}
+            onCreateRemote={props.onGitCreateRemote}
+            onSetRemote={props.onGitSetRemote}
+          />
+        )}
       </div>
 
       <div className="spacer" />

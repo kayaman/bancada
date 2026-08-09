@@ -2505,3 +2505,52 @@ body {
   font-family: var(--font-mono);
   font-size: 11px;
 }
+
+/* ---------- toolbar git pill ---------- */
+
+.git-pill {
+  font-size: 10px;
+  font-family: var(--font-ui);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 1px 8px;
+  height: 20px;
+  color: var(--text-dim);
+  background: none;
+  cursor: pointer;
+  flex: none;
+  white-space: nowrap;
+}
+
+.git-pill.attention {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.git-pill:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Rows inside the pill's popover: input + button as one unit. */
+.git-pop-row {
+  display: flex;
+  gap: 4px;
+  padding: 5px 12px;
+}
+
+.git-pop-row .input {
+  width: 200px;
+}
+
+.git-pop-warning {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.git-pop-note {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
