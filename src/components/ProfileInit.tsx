@@ -8,7 +8,12 @@ import {
   type BoardOption,
   type SketchYaml,
 } from "../api";
-import { initialFqbn as computeInitialFqbn, profileNameForFqbn, submitPlan } from "../profileInit";
+import {
+  effectiveRetargetFqbn,
+  initialFqbn as computeInitialFqbn,
+  profileNameForFqbn,
+  submitPlan,
+} from "../profileInit";
 
 export type ProfileFormMode = "bootstrap" | "add" | "retarget";
 
@@ -80,8 +85,9 @@ export default function ProfileInit({
     setBusy(true);
     try {
       if (plan.kind === "retarget") {
-        const yaml = await retargetProfile(sketchDir, plan.profile, plan.fqbn);
-        notify(`✓ Profile “${plan.profile}” now builds for ${plan.fqbn}`);
+        const targetFqbn = effectiveRetargetFqbn(plan.fqbn, currentFqbn);
+        const yaml = await retargetProfile(sketchDir, plan.profile, targetFqbn);
+        notify(`✓ Profile “${plan.profile}” now builds for ${targetFqbn}`);
         onDone(yaml, plan.profile);
       } else {
         const yaml = await initProfile(sketchDir, plan.profile, plan.fqbn, plan.copyLibsFrom);

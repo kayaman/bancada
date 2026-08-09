@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { initialFqbn, profileNameForFqbn, submitPlan } from "../profileInit";
+import {
+  effectiveRetargetFqbn,
+  initialFqbn,
+  profileNameForFqbn,
+  submitPlan,
+} from "../profileInit";
 
 // Mirrors core's profile_name_for_fqbn (core/src/project.rs) — same inputs,
 // same outputs, so the suggested name matches what the backend would derive.
@@ -91,5 +96,37 @@ describe("initialFqbn", () => {
   it("falls back to the empty string when nothing is available", () => {
     expect(initialFqbn("retarget", null, null)).toBe("");
     expect(initialFqbn("bootstrap", null, null)).toBe("");
+  });
+});
+
+describe("effectiveRetargetFqbn", () => {
+  it("keeps the current fqbn verbatim when the picked board has the same base", () => {
+    expect(
+      effectiveRetargetFqbn("esp32:esp32:esp32c6", "esp32:esp32:esp32c6:CDCOnBoot=cdc"),
+    ).toBe("esp32:esp32:esp32c6:CDCOnBoot=cdc");
+  });
+
+  it("uses the picked fqbn when it's a genuinely different board", () => {
+    expect(
+      effectiveRetargetFqbn("arduino:avr:uno", "esp32:esp32:esp32c6:CDCOnBoot=cdc"),
+    ).toBe("arduino:avr:uno");
+  });
+
+  it("uses the picked fqbn when there's no current fqbn", () => {
+    expect(effectiveRetargetFqbn("esp32:esp32:esp32c6", null)).toBe("esp32:esp32:esp32c6");
+    expect(effectiveRetargetFqbn("esp32:esp32:esp32c6", "")).toBe("esp32:esp32:esp32c6");
+    expect(effectiveRetargetFqbn("esp32:esp32:esp32c6", "   ")).toBe("esp32:esp32:esp32c6");
+  });
+
+  it("returns the current fqbn (trivially unchanged) when neither carries options", () => {
+    expect(effectiveRetargetFqbn("esp32:esp32:esp32c6", "esp32:esp32:esp32c6")).toBe(
+      "esp32:esp32:esp32c6",
+    );
+  });
+
+  it("handles surrounding whitespace on the picked value when comparing bases", () => {
+    expect(
+      effectiveRetargetFqbn("  esp32:esp32:esp32c6  ", "esp32:esp32:esp32c6:CDCOnBoot=cdc"),
+    ).toBe("esp32:esp32:esp32c6:CDCOnBoot=cdc");
   });
 });
