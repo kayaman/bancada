@@ -357,7 +357,52 @@ body {
 
 .editor-tabs .tab {
   flex: none;
+  display: inline-flex;
+  align-items: center;
   font-family: var(--font-mono);
+}
+
+/* Two-step "close again to discard" confirmation — same danger language
+   as BoardsManager/FleetManager's confirm-remove buttons. */
+.editor-tabs .tab.danger {
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.editor-tabs .tab.danger:hover {
+  background: rgba(248, 113, 113, 0.14);
+}
+
+/* Per-tab close affordance; hidden until hover/focus/active so the strip
+   isn't cluttered with ✕s when many files are open. */
+.tab-close {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 3px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.6;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--transition),
+    background var(--transition),
+    color var(--transition);
+}
+
+.tab:hover .tab-close,
+.tab:focus-visible .tab-close,
+.tab.active .tab-close,
+.tab.danger .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .editor-tabs-empty,

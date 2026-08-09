@@ -1,41 +1,113 @@
-import type { SketchFile } from "../api";
-import { fileTabs, tabLabel } from "../editorTabs";
-import NewFileInput from "./NewFileInput";
+import { useCallback, useState } from "react";
+import { tabLabel } from "../editorTabs";
+import Menu from "./Menu";
 
 interface Props {
-  files: SketchFile[];
-  openFile: string | null;
-  dirtyFiles: Set<string>;
-  onOpen: (relPath: string) => void;
-  /** Raw name from the ＋ input; return true when handled. */
-  onCreate?: (raw: string) => boolean;
+  /** Open tabs (rel_paths) in open order. */
+  tabs: string[];
+  active: string | null;
+  /** rel_paths with unsaved buffer edits — shown with the repo's existing dirty marker style. */
+  dirty: ReadonlySet<string>;
+  /** Tab awaiting "close again to discard" confirmation (unsaved close was requested once). */
+  armed: string | null;
+  onSelect: (rel: string) => void;
+  onClose: (rel: string) => void;
+  onCloseOthers: (rel: string) => void;
+  onCloseAll: () => void;
 }
 
-/** One tab per project file, always visible above the editor — the sidebar's
- *  file tree may be hidden behind another panel, this strip never is. */
-export default function EditorTabs({ files, openFile, dirtyFiles, onOpen, onCreate }: Props) {
-  const tabs = fileTabs(files);
+/** One tab per open file, in open order — the sidebar's file tree may be
+ *  hidden behind another panel, this strip never is. Unlike the old
+ *  every-file-is-a-tab strip, tabs here track an explicit open set the
+ *  caller owns; this component only renders and dispatches intent. */
+export default function EditorTabs({
+  tabs,
+  active,
+  dirty,
+  armed,
+  onSelect,
+  onClose,
+  onCloseOthers,
+  onCloseAll,
+}: Props) {
+  const [menu, setMenu] = useState<{ rel: string; x: number; y: number } | null>(null);
+
+  // Stable, as Menu's dismissal effect asks of its onClose.
+  const closeMenu = useCallback(() => setMenu(null), []);
+
   return (
     <div className="panel-tabs editor-tabs">
-      {tabs.map((f) => {
-        const active = f.rel_path === openFile;
+      {tabs.map((rel) => {
+        const isActive = rel === active;
+        const isArmed = rel === armed;
+        const classes = ["tab"];
+        if (isActive) classes.push("active");
+        if (isArmed) classes.push("danger");
         return (
-          <button
-            key={f.rel_path}
-            className={active ? "tab active" : "tab"}
-            title={f.rel_path}
-            onClick={() => onOpen(f.rel_path)}
+          <div
+            key={rel}
+            className={classes.join(" ")}
+            title={isArmed ? "unsaved — close again to discard" : rel}
+            role="tab"
+            aria-selected={isActive}
+            tabIndex={0}
+            onClick={() => onSelect(rel)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(rel);
+              }
+            }}
+            onAuxClick={(e) => {
+              if (e.button === 1) onClose(rel);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu({ rel, x: e.clientX, y: e.clientY });
+            }}
           >
-            {tabLabel(f.rel_path)}
-            {dirtyFiles.has(f.rel_path) && <span className="tab-dot">●</span>}
-          </button>
+            <span className="tab-label">{tabLabel(rel)}</span>
+            {dirty.has(rel) && <span className="tab-dot">●</span>}
+            <button
+              type="button"
+              className="tab-close"
+              title={`Close ${tabLabel(rel)}`}
+              aria-label={`Close ${tabLabel(rel)}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onClose(rel);
+              }}
+            >
+              ✕
+            </button>
+          </div>
         );
       })}
-      {onCreate && <NewFileInput title="New file in this sketch" onSubmit={onCreate} />}
       {tabs.length === 0 && <span className="editor-tabs-empty">no file open</span>}
       <div className="spacer" />
-      {openFile && dirtyFiles.has(openFile) && (
-        <span className="editor-tabs-hint">unsaved (Ctrl+S)</span>
+      {menu && (
+        <Menu x={menu.x} y={menu.y} onClose={closeMenu}>
+          <button
+            className="ctx-item"
+            role="menuitem"
+            onClick={() => {
+              closeMenu();
+              onCloseOthers(menu.rel);
+            }}
+          >
+            Close others
+          </button>
+          <button
+            className="ctx-item"
+            role="menuitem"
+            onClick={() => {
+              closeMenu();
+              onCloseAll();
+            }}
+          >
+            Close all
+          </button>
+        </Menu>
       )}
     </div>
   );
