@@ -129,6 +129,21 @@ impl SketchProject {
     /// The sketch's first profile also becomes `default_profile`, so gaining
     /// a profile gives Verify/Flash a working default immediately.
     pub fn init_profile(&self, profile_name: &str, fqbn: &str) -> Result<SketchYaml> {
+        self.add_profile(profile_name, fqbn, None, None)
+    }
+
+    /// Create `profile_name` for `fqbn`, optionally pinning a platform and
+    /// copying another profile's `libraries:` list verbatim — registry pins,
+    /// `dependency:` entries and `dir:` locals alike. Copying is what makes
+    /// "flash the same project on a second board" build immediately: a
+    /// profile build only sees its own pinned libraries.
+    pub fn add_profile(
+        &self,
+        profile_name: &str,
+        fqbn: &str,
+        platform_entry: Option<&str>,
+        copy_libs_from: Option<&str>,
+    ) -> Result<SketchYaml> {
         let name = profile_name.trim();
         if name.is_empty() {
             return Err(Error::Other("a profile needs a name".into()));
@@ -141,10 +156,31 @@ impl SketchProject {
         if y.profiles.contains_key(name) {
             return Err(Error::Other(format!("profile `{name}` already exists")));
         }
+        let libraries = match copy_libs_from {
+            Some(src) => y
+                .profiles
+                .get(src.trim())
+                .ok_or_else(|| {
+                    Error::Other(format!("profile `{}` not found to copy libraries from", src.trim()))
+                })?
+                .libraries
+                .clone(),
+            None => Vec::new(),
+        };
+        let platforms = platform_entry
+            .map(|p| {
+                vec![PlatformDep {
+                    platform: p.to_string(),
+                    platform_index_url: None,
+                }]
+            })
+            .unwrap_or_default();
         y.profiles.insert(
             name.to_string(),
             Profile {
                 fqbn: fqbn.to_string(),
+                platforms,
+                libraries,
                 ..Default::default()
             },
         );
@@ -708,6 +744,67 @@ profiles:
         let proj = SketchProject::open(tmp.path()).unwrap();
         assert!(proj.init_profile("  ", "esp32:esp32:esp32").is_err());
         assert!(proj.init_profile("weather", "  ").is_err());
+    }
+
+    #[test]
+    fn add_profile_copies_libraries_from_the_source_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.init_profile("uno", "arduino:avr:uno").unwrap();
+        // One of each LibraryDep shape the copy must preserve.
+        let mut y = proj.load_yaml().unwrap();
+        y.profiles.get_mut("uno").unwrap().libraries = vec![
+            LibraryDep::Registry("ArduinoJson (7.4.2)".into()),
+            LibraryDep::Dependency { dependency: "MsgPack (0.4.2)".into() },
+            LibraryDep::Local { dir: "../libs/Foo".into() },
+        ];
+        proj.save_yaml(&y).unwrap();
+
+        let out = proj
+            .add_profile("nano", "arduino:avr:nano", Some("arduino:avr (1.8.8)"), Some("uno"))
+            .unwrap();
+        let nano = &out.profiles["nano"];
+        assert_eq!(nano.fqbn, "arduino:avr:nano");
+        assert_eq!(nano.libraries, out.profiles["uno"].libraries);
+        assert_eq!(nano.platforms.len(), 1);
+        assert_eq!(nano.platforms[0].platform, "arduino:avr (1.8.8)");
+        // The addition is persisted, not just returned.
+        assert_eq!(proj.load_yaml().unwrap().profiles["nano"].fqbn, "arduino:avr:nano");
+    }
+
+    #[test]
+    fn add_profile_does_not_touch_the_default_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.init_profile("uno", "arduino:avr:uno").unwrap();
+        let out = proj
+            .add_profile("nano", "arduino:avr:nano", None, Some("uno"))
+            .unwrap();
+        assert_eq!(out.default_profile.as_deref(), Some("uno"));
+    }
+
+    #[test]
+    fn add_profile_rejects_an_unknown_copy_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        proj.init_profile("uno", "arduino:avr:uno").unwrap();
+        let err = proj
+            .add_profile("nano", "arduino:avr:nano", None, Some("mega"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mega"), "got: {err}");
+    }
+
+    #[test]
+    fn add_profile_without_a_source_starts_with_no_libraries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+        let out = proj
+            .add_profile("uno", "arduino:avr:uno", Some("arduino:avr (1.8.8)"), None)
+            .unwrap();
+        assert!(out.profiles["uno"].libraries.is_empty());
+        // First profile still becomes the default (bootstrap behavior).
+        assert_eq!(out.default_profile.as_deref(), Some("uno"));
     }
 
     #[test]
