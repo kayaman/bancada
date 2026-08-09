@@ -303,24 +303,9 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
 
     let status = run(&["-C", dir_s, "status", "--porcelain=v2", "--branch", "--", "."])?;
-    let mut parsed = parse_status_v2(&status);
+    let parsed = parse_status_v2(&status);
 
     if root != dir {
-        // For nested repos, get actual files by querying ls-files with --others flag
-
-        // Get all other (untracked) files
-        let others = run(&["-C", dir_s, "ls-files", "--others", "--exclude-standard", "--", "."])?;
-
-        // Parse the output into dirty entries
-        let dirty_from_others: Vec<ChangedPath> = others.lines()
-            .map(|line| ChangedPath {
-                path: line.to_string(),
-                status: "??".to_string(),
-            })
-            .collect();
-
-        parsed.dirty = dirty_from_others;
-
         return Ok(RepoState::Nested {
             root: root.to_string_lossy().into_owned(),
             dirty: parsed.dirty,
@@ -544,14 +529,31 @@ mod tests {
         init_repo(&root).unwrap();
         let sketch = root.join("inner");
         std::fs::create_dir_all(&sketch).unwrap();
+
+        // Add a tracked file inside the sketch directory
+        std::fs::write(sketch.join("tracked.ino"), "void setup() {}\n").unwrap();
+        run(&["-C", sketch.to_str().unwrap(), "add", "tracked.ino"]).unwrap();
+        run(&["-C", sketch.to_str().unwrap(), "commit", "-m", "add tracked file"]).unwrap();
+
+        // Modify the tracked file
+        std::fs::write(sketch.join("tracked.ino"), "void setup() { }\n").unwrap();
+
+        // Add an untracked file
         std::fs::write(sketch.join("inner.ino"), "void loop() {}\n").unwrap();
+
+        // Add a file outside the sketch (should not appear in dirty)
         std::fs::write(root.join("outside.txt"), "not the sketch's business\n").unwrap();
 
         match repo_state(&sketch).unwrap() {
             RepoState::Nested { root: r, dirty } => {
                 assert_eq!(r, root.to_string_lossy());
                 let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
-                assert_eq!(paths, ["inner.ino"], "outside.txt must not leak in");
+                // Both modified tracked file and untracked file should be included
+                // Order may vary, so sort for comparison
+                let mut paths_sorted = paths.clone();
+                paths_sorted.sort();
+                let expected = vec!["inner.ino", "tracked.ino"];
+                assert_eq!(paths_sorted, expected, "outside.txt must not leak in; tracked and untracked files in sketch must both be present");
             }
             other => panic!("expected Nested, got {other:?}"),
         }
