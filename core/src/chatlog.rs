@@ -198,6 +198,83 @@ pub fn project_totals(chats_root: &Path, key: &str) -> ProjectTotals {
     t
 }
 
+/// One saved chat with its own usage summed — the history list enriched
+/// into the usage dashboard's session rows.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionEntry {
+    pub file: String,
+    pub title: String,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u64,
+}
+
+/// `list_chats` and per-file totals in one streaming pass per file.
+///
+/// Newest first; unreadable files are skipped and malformed lines add
+/// nothing, same tolerance as `list_chats`/`project_totals`. The title scan
+/// keeps `TITLE_SCAN_LINES` semantics, but the whole file is read anyway
+/// for the sums, so there is no extra head-only optimisation to preserve.
+pub fn list_chats_with_usage(chats_root: &Path, key: &str) -> Vec<SessionEntry> {
+    let mut files = chat_file_names(chats_root, key);
+    files.sort_unstable_by(|a, b| b.cmp(a));
+    files
+        .into_iter()
+        .filter_map(|file| {
+            let f = std::fs::File::open(chats_root.join(key).join(&file)).ok()?;
+            let mut e = SessionEntry {
+                title: String::new(),
+                file,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                turns: 0,
+            };
+            use std::io::BufRead;
+            for (idx, line) in std::io::BufReader::new(f)
+                .lines()
+                .map_while(|l| l.ok())
+                .enumerate()
+            {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if e.title.is_empty()
+                    && idx < TITLE_SCAN_LINES
+                    && v.get("op").and_then(|o| o.as_str()) == Some("userSent")
+                {
+                    if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
+                        e.title = t.chars().take(80).collect();
+                    }
+                }
+                if v.get("op").and_then(|o| o.as_str()) != Some("push") {
+                    continue;
+                }
+                let Some(ev) = v.get("ev") else { continue };
+                if ev.get("type").and_then(|t| t.as_str()) != Some("result") {
+                    continue;
+                }
+                e.cost_usd += ev
+                    .get("total_cost_usd")
+                    .and_then(|c| c.as_f64())
+                    .unwrap_or(0.0);
+                e.turns += ev.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0);
+                if let Some(u) = ev.get("usage") {
+                    e.input_tokens +=
+                        u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    e.output_tokens +=
+                        u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                }
+            }
+            if e.title.is_empty() {
+                e.title = e.file.trim_end_matches(".ndjson").to_string();
+            }
+            Some(e)
+        })
+        .collect()
+}
+
 /// The `*.ndjson` basenames under one sketch's chat directory, unsorted.
 /// A missing directory is simply an empty history, never an error.
 fn chat_file_names(chats_root: &Path, key: &str) -> Vec<String> {
@@ -472,5 +549,51 @@ mod tests {
         assert_eq!(list[1].file, "2026-08-02T00-00-00.ndjson");
         // Pruning a sketch that never chatted must not panic.
         prune(tmp.path(), "ghost", 2);
+    }
+
+    #[test]
+    fn list_with_usage_sums_per_file_and_keeps_titles_and_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = result_line(0.01, 100, 10, 2);
+        let r2 = result_line(0.02, 200, 20, 3);
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-04T10-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/s","startedAt":"t"}"#,
+                r#"{"op":"userSent","text":"one"}"#,
+                &r1,
+                &r2,
+            ],
+        );
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-05T09-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/s","startedAt":"t"}"#,
+                "{not json",
+                r#"{"op":"push","ev":{"type":"assistant"}}"#,
+            ],
+        );
+        let list = list_chats_with_usage(tmp.path(), "k");
+        assert_eq!(list.len(), 2);
+        // Newest first, like list_chats.
+        assert_eq!(list[0].file, "2026-08-05T09-00-00.ndjson");
+        assert_eq!(list[0].title, "2026-08-05T09-00-00", "no userSent → stem");
+        assert!((list[0].cost_usd).abs() < 1e-9, "corrupt/non-result lines add nothing");
+        assert_eq!(list[1].file, "2026-08-04T10-00-00.ndjson");
+        assert_eq!(list[1].title, "one");
+        assert!((list[1].cost_usd - 0.03).abs() < 1e-9);
+        assert_eq!(list[1].input_tokens, 300);
+        assert_eq!(list[1].output_tokens, 30);
+        assert_eq!(list[1].turns, 5);
+    }
+
+    #[test]
+    fn list_with_usage_of_missing_sketch_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_chats_with_usage(tmp.path(), "ghost").is_empty());
     }
 }
