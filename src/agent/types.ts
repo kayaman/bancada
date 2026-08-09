@@ -157,6 +157,22 @@ export interface AgentVerifyDoneEvent {
   [key: string]: unknown;
 }
 
+/** Synthetic — brackets an MCP `upload` tool call (agent-initiated flash).
+ *  Same pid contract as the verify pair. */
+export interface AgentUploadStartedEvent {
+  type: "upload_started";
+  port?: string;
+  pid?: number;
+  [key: string]: unknown;
+}
+
+export interface AgentUploadDoneEvent {
+  type: "upload_done";
+  success: boolean;
+  pid?: number;
+  [key: string]: unknown;
+}
+
 /** Synthetic — the host refused something and stopped the session.
  *
  * Emitted by src-tauri's stdout reader when the safety backstop fires: an
@@ -190,6 +206,8 @@ export type AgentEvent =
   | AgentStderrEvent
   | AgentVerifyStartedEvent
   | AgentVerifyDoneEvent
+  | AgentUploadStartedEvent
+  | AgentUploadDoneEvent
   | AgentSecurityAlarmEvent;
 
 /** Result of `agent_probe` — whether a usable `claude` CLI is on PATH. */

@@ -51,6 +51,10 @@ interface AgentPanelProps {
   openBottomTab: (tab: BottomTab) => void;
   /** True when the sketch dir has no `.git` — edits auto-apply with no undo. */
   gitWarning: boolean;
+  /** The "Allow uploads" arm switch: while off, the agent's `upload` MCP
+   *  tool is refused by the backend. Per-session; off by default. */
+  uploadsArmed: boolean;
+  onToggleUploadsArmed: (armed: boolean) => void;
 }
 
 const POLL_MS = 100;
@@ -64,6 +68,8 @@ export default function AgentPanel({
   onNewSession,
   openBottomTab,
   gitWarning,
+  uploadsArmed,
+  onToggleUploadsArmed,
 }: AgentPanelProps) {
   // ---------- repaint on store changes (only while shown) ----------
 
@@ -281,7 +287,7 @@ export default function AgentPanel({
       <div className="agent-footer">
         <span className="agent-status">
           {activityLabel({ ...snap, now: Date.now() }) ??
-            statusLabel(snap.status, snap.verifyRunning)}
+            statusLabel(snap.status, snap.verifyRunning, snap.uploadRunning)}
         </span>
         {(snap.sessionUsage.costUsd > 0 ||
           snap.sessionUsage.inputTokens > 0) && (
@@ -305,6 +311,19 @@ export default function AgentPanel({
           </span>
         )}
         <div className="spacer" />
+        <button
+          className={
+            uploadsArmed ? "btn small agent-arm-toggle armed" : "btn small agent-arm-toggle"
+          }
+          onClick={() => onToggleUploadsArmed(!uploadsArmed)}
+          title={
+            uploadsArmed
+              ? "The assistant may flash the selected board without asking. Click to disarm."
+              : "While off, the assistant's upload tool is refused. Click to allow flashing the selected board."
+          }
+        >
+          {uploadsArmed ? "🔓 Uploads armed" : "🔒 Allow uploads"}
+        </button>
         {snap.status === "running" && (
           <button className="btn small" onClick={onInterrupt}>
             Stop
@@ -521,6 +540,90 @@ function ToolCard({
         <button className="btn small" onClick={() => openBottomTab("build")}>
           Open Console ↗
         </button>
+      </div>
+    );
+  }
+
+  if (isUploadTool(msg.name)) {
+    if (msg.status === "running") {
+      return (
+        <div className="agent-tool agent-tool-verify">
+          <span className="agent-spinner" aria-hidden="true">
+            ⟳
+          </span>{" "}
+          Flashing the board…
+        </div>
+      );
+    }
+    if (msg.status === "error") {
+      // Like verify, isError is "could not run": unarmed, no port selected,
+      // scope holding the port, build gate busy, arduino-cli missing. A
+      // FAILED flash comes back isError:false with success: false below.
+      return (
+        <div className="agent-tool agent-tool-verify">
+          <div className="agent-tool-head">
+            <span className="agent-tool-icon fail">✗</span>
+            <span>Upload could not run</span>
+          </div>
+          {msg.result && (
+            <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
+          )}
+        </div>
+      );
+    }
+    // Same "success: <bool>\nexit_code: <n>\n\n<summary>" contract as verify.
+    const { success, exitCode, summary } = parseVerifyResult(msg.result ?? "");
+    const ok = success === true;
+    return (
+      <div className="agent-tool agent-tool-verify">
+        <div className="agent-tool-head">
+          <span className={ok ? "agent-tool-icon ok" : "agent-tool-icon fail"}>
+            {success === undefined ? "•" : ok ? "✓" : "✗"}
+          </span>
+          <span>
+            {success === undefined
+              ? "Upload finished"
+              : ok
+                ? "Flashed"
+                : "Flash failed"}
+            {exitCode !== undefined ? ` (exit ${exitCode})` : ""}
+          </span>
+        </div>
+        {summary && <div className="agent-tool-summary">{truncate(summary, 400)}</div>}
+        <button className="btn small" onClick={() => openBottomTab("build")}>
+          Open Console ↗
+        </button>
+      </div>
+    );
+  }
+
+  if (isSerialReadTool(msg.name) || isSerialSendTool(msg.name)) {
+    const reading = isSerialReadTool(msg.name);
+    const sent = stringField(msg.input, "data");
+    return (
+      <div className="agent-tool agent-tool-serial">
+        <div className="agent-tool-head">
+          <span
+            className={
+              msg.status === "error" ? "agent-tool-icon fail" : "agent-tool-icon"
+            }
+          >
+            {msg.status === "running" ? "⟳" : msg.status === "error" ? "✗" : "▸"}
+          </span>
+          <span>{reading ? "Serial read" : `Serial send: ${sent ?? ""}`}</span>
+          <button
+            className="btn small agent-tool-serial-open"
+            onClick={() => openBottomTab("serial")}
+          >
+            Monitor ↗
+          </button>
+        </div>
+        {reading && msg.status !== "running" && msg.result && (
+          <pre className="agent-tool-serial-body">{truncate(msg.result, 1500)}</pre>
+        )}
+        {!reading && msg.status === "error" && msg.result && (
+          <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
+        )}
       </div>
     );
   }
@@ -776,7 +879,12 @@ export function TurnSummaryView({
 
 // ---------- small helpers ----------
 
-function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
+function statusLabel(
+  status: AgentStatus,
+  verifyRunning: boolean,
+  uploadRunning: boolean,
+): string {
+  if (uploadRunning) return "Flashing…";
   if (verifyRunning) return "Verifying…";
   switch (status) {
     case "idle":
@@ -801,6 +909,19 @@ function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
  *  name the MCP `tools/list` response itself advertises. */
 function isVerifyTool(name: string): boolean {
   return name === "verify" || name.endsWith("__verify");
+}
+
+/** Same naming contract as `isVerifyTool`, for the 0.12.0 hardware tools. */
+function isUploadTool(name: string): boolean {
+  return name === "upload" || name.endsWith("__upload");
+}
+
+function isSerialReadTool(name: string): boolean {
+  return name === "serial_read" || name.endsWith("__serial_read");
+}
+
+function isSerialSendTool(name: string): boolean {
+  return name === "serial_send" || name.endsWith("__serial_send");
 }
 
 function stringField(input: unknown, key: string): string | undefined {

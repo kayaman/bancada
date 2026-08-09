@@ -309,19 +309,42 @@ describe("events", () => {
 });
 
 describe("agent commands", () => {
-  it("agentStart nulls omitted profile/fqbn", async () => {
+  it("agentStart nulls omitted profile/fqbn and defaults uploads to unarmed", async () => {
     await api.agentStart("/s");
     expect(called()).toEqual([
       "agent_start",
-      { sketchDir: "/s", profile: null, fqbn: null },
+      { sketchDir: "/s", profile: null, fqbn: null, uploadsArmed: false },
     ]);
   });
 
-  it("agentStart forwards a given profile and fqbn", async () => {
-    await api.agentStart("/s", "esp32s3", "esp32:esp32:esp32s3");
+  it("agentStart forwards a given profile, fqbn and arm state", async () => {
+    await api.agentStart("/s", "esp32s3", "esp32:esp32:esp32s3", true);
     expect(called()).toEqual([
       "agent_start",
-      { sketchDir: "/s", profile: "esp32s3", fqbn: "esp32:esp32:esp32s3" },
+      {
+        sketchDir: "/s",
+        profile: "esp32s3",
+        fqbn: "esp32:esp32:esp32s3",
+        uploadsArmed: true,
+      },
+    ]);
+  });
+
+  it("agentSetUploadsArmed forwards the switch", async () => {
+    await api.agentSetUploadsArmed(true);
+    expect(called()).toEqual(["agent_set_uploads_armed", { armed: true }]);
+  });
+
+  it("setSelectedTarget forwards port and baud, and nulls a cleared port", async () => {
+    await api.setSelectedTarget("/dev/ttyACM0", 115200);
+    expect(called()).toEqual([
+      "set_selected_target",
+      { port: "/dev/ttyACM0", baudrate: 115200 },
+    ]);
+    await api.setSelectedTarget(null, 9600);
+    expect(called()).toEqual([
+      "set_selected_target",
+      { port: null, baudrate: 9600 },
     ]);
   });
 

@@ -86,6 +86,8 @@ export class AgentStore {
   private lastResultVal?: AgentResult;
   private sessionIdVal?: string;
   private verifyRunningFlag = false;
+  /** An agent-initiated flash is in flight (upload_started → upload_done). */
+  private uploadRunningFlag = false;
   private closedReasonVal?: string;
   private alarmVal?: AgentAlarm;
   /** Text deltas are streaming and no tool has started since — "✍ writing". */
@@ -168,6 +170,8 @@ export class AgentStore {
     if (
       (ev.type === "verify_started" ||
         ev.type === "verify_done" ||
+        ev.type === "upload_started" ||
+        ev.type === "upload_done" ||
         ev.type === "security_alarm") &&
       !this.isOurs(typeof ev.pid === "number" ? ev.pid : undefined)
     ) {
@@ -202,6 +206,14 @@ export class AgentStore {
         break;
       case "verify_done":
         this.verifyRunningFlag = false;
+        this.ver++;
+        break;
+      case "upload_started":
+        this.uploadRunningFlag = true;
+        this.ver++;
+        break;
+      case "upload_done":
+        this.uploadRunningFlag = false;
         this.ver++;
         break;
       case "security_alarm":
@@ -289,6 +301,7 @@ export class AgentStore {
     this.lastResultVal = undefined;
     this.sessionIdVal = undefined;
     this.verifyRunningFlag = false;
+    this.uploadRunningFlag = false;
     this.closedReasonVal = undefined;
     this.alarmVal = undefined;
     this.pidVal = undefined;
@@ -309,6 +322,7 @@ export class AgentStore {
     lastResult?: AgentResult;
     sessionId?: string;
     verifyRunning: boolean;
+    uploadRunning: boolean;
     closedReason?: string;
     alarm?: AgentAlarm;
     pid?: number;
@@ -324,6 +338,7 @@ export class AgentStore {
       lastResult: this.lastResultVal,
       sessionId: this.sessionIdVal,
       verifyRunning: this.verifyRunningFlag,
+      uploadRunning: this.uploadRunningFlag,
       closedReason: this.closedReasonVal,
       alarm: this.alarmVal,
       pid: this.pidVal,

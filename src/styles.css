@@ -1640,6 +1640,29 @@ body {
   color: var(--warn);
 }
 
+/* The "Allow uploads" arm switch: unmistakably different when armed — the
+   agent can flash the board without asking while this is lit. */
+.agent-arm-toggle.armed {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.agent-tool-serial-body {
+  margin: 4px 0 0;
+  padding: 4px 6px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid var(--border);
+}
+
+.agent-tool-serial-open {
+  margin-left: auto;
+}
+
 .agent-input-row {
   display: flex;
   align-items: flex-end;

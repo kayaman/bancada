@@ -262,6 +262,33 @@ describe("AgentStore: verify_started / verify_done", () => {
   });
 });
 
+describe("AgentStore: upload_started / upload_done", () => {
+  it("toggles uploadRunning", () => {
+    const s = new AgentStore();
+    expect(s.snapshot().uploadRunning).toBe(false);
+    s.push({ type: "upload_started", port: "/dev/ttyACM0" });
+    expect(s.snapshot().uploadRunning).toBe(true);
+    s.push({ type: "upload_done", success: true });
+    expect(s.snapshot().uploadRunning).toBe(false);
+  });
+
+  it("ignores upload events stamped with another session's pid", () => {
+    const s = new AgentStore();
+    s.sessionStarted(2002);
+    s.push({ type: "upload_started", pid: 1001 }); // stale session A listener
+    expect(s.snapshot().uploadRunning).toBe(false);
+    s.push({ type: "upload_started", pid: 2002 });
+    expect(s.snapshot().uploadRunning).toBe(true);
+  });
+
+  it("clear() drops a stuck uploadRunning", () => {
+    const s = new AgentStore();
+    s.push({ type: "upload_started" });
+    s.clear();
+    expect(s.snapshot().uploadRunning).toBe(false);
+  });
+});
+
 describe("AgentStore: closed mid-turn", () => {
   it("marks the session ended without discarding the partial assistant text", () => {
     const s = new AgentStore();

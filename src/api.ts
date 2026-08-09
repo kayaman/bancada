@@ -718,12 +718,26 @@ export const agentProbe = () => invoke<AgentProbe>("agent_probe");
  * `agentStore.sessionStarted` — otherwise a stale event from a session the
  * user already stopped repaints the new one's panel.
  */
-export const agentStart = (sketchDir: string, profile?: string, fqbn?: string) =>
+export const agentStart = (
+  sketchDir: string,
+  profile?: string,
+  fqbn?: string,
+  uploadsArmed = false,
+) =>
   invoke<number>("agent_start", {
     sketchDir,
     profile: profile ?? null,
     fqbn: fqbn ?? null,
+    uploadsArmed,
   });
+/** Flip the live session's "Allow uploads" switch (no-op without a session —
+ *  the pre-session state rides `agentStart`'s `uploadsArmed`). */
+export const agentSetUploadsArmed = (armed: boolean) =>
+  invoke<void>("agent_set_uploads_armed", { armed });
+/** Mirror the UI's selected port/baud into Rust so the agent's upload and
+ *  serial tools target what the user is looking at. `null` clears it. */
+export const setSelectedTarget = (port: string | null, baudrate: number) =>
+  invoke<void>("set_selected_target", { port, baudrate });
 /** Sends one user text message on the agent's stdin. */
 export const agentSend = (text: string) => invoke<void>("agent_send", { text });
 /** Best-effort control-protocol interrupt; the host kills the child if it doesn't land. */
@@ -749,6 +763,12 @@ export const onSerialLine = (
   listen<OutputLine>("serial://line", (e) => cb(e.payload));
 export const onSerialClosed = (cb: () => void): Promise<UnlistenFn> =>
   listen("serial://closed", () => cb());
+/** Fires when the backend starts the monitor itself (the agent's
+ *  `serial_read` auto-start) so the frontend's monitor state stays honest. */
+export const onSerialStarted = (
+  cb: (p: { port: string; baud: number }) => void,
+): Promise<UnlistenFn> =>
+  listen<{ port: string; baud: number }>("serial://started", (e) => cb(e.payload));
 /** Fires when the set of serial ports on the machine changes (hotplug). */
 export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen("ports://changed", () => cb());
