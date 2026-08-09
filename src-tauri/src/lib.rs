@@ -1519,7 +1519,9 @@ fn chat_append(
     // Load (or first-time seed) the usage record BEFORE the append, so a
     // backfill can never count the file/line this call is about to add and
     // then count it again below.
-    let usage = load_usage(&app).ok();
+    let usage = load_usage(&app)
+        .map_err(|e| eprintln!("usage record not loaded: {e}"))
+        .ok();
     let created =
         bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
     // A new chat is the moment to bound the directory. Prune is silent and
