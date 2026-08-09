@@ -412,6 +412,61 @@ pub enum SyncOutcome {
     NotRoot,
 }
 
+/// fetch → rebase → push, refusing anything that could lose work.
+///
+/// Dirty trees are refused rather than autostashed: in a checkpoint model,
+/// "commit first" is one honest click, and it keeps rebase away from
+/// uncommitted changes. A conflicted rebase is aborted on the spot — local
+/// commits intact, tree clean — because a half-finished rebase in a GUI with
+/// no conflict UI is the one trap this feature must never set.
+pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutcome> {
+    let state = repo_state(dir)?;
+    let (branch, detached, dirty, remote, has_upstream) = match state {
+        RepoState::NoGit | RepoState::Nested { .. } => return Ok(SyncOutcome::NotRoot),
+        RepoState::Root { branch, detached, dirty, remote, has_upstream, .. } => {
+            (branch, detached, dirty, remote, has_upstream)
+        }
+    };
+    if remote.is_none() {
+        return Ok(SyncOutcome::NoRemote);
+    }
+    if detached {
+        return Err(Error::Other(
+            "HEAD is detached — check out a branch before syncing".into(),
+        ));
+    }
+    if !dirty.is_empty() {
+        return Ok(SyncOutcome::DirtyTree);
+    }
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+
+    if !run_streaming(&["-C", d, "fetch", "origin"], &mut on_line)? {
+        return Err(Error::Other("git fetch failed — see the Build console".into()));
+    }
+
+    // Rebase only onto a branch the remote actually has: a fresh remote (or
+    // first push of a new branch) has nothing to rebase onto.
+    let target = format!("origin/{branch}");
+    let remote_has_branch = run(&["-C", d, "rev-parse", "--verify", "--quiet", &target]).is_ok();
+    if remote_has_branch && !run_streaming(&["-C", d, "rebase", &target], &mut on_line)? {
+        // Best-effort abort; the repo must never be left mid-rebase.
+        let _ = run(&["-C", d, "rebase", "--abort"]);
+        return Ok(SyncOutcome::Diverged);
+    }
+
+    let pushed = if has_upstream {
+        run_streaming(&["-C", d, "push"], &mut on_line)?
+    } else {
+        run_streaming(&["-C", d, "push", "-u", "origin", "HEAD"], &mut on_line)?
+    };
+    if !pushed {
+        return Err(Error::Other("git push failed — see the Build console".into()));
+    }
+    Ok(SyncOutcome::Synced)
+}
+
 /// The git pill's whole world, computed in one place.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -826,61 +881,6 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         init_repo(&dir).unwrap();
         assert_eq!(commit(&dir, "no-op").unwrap(), CommitOutcome::NothingToCommit);
     }
-
-/// fetch → rebase → push, refusing anything that could lose work.
-///
-/// Dirty trees are refused rather than autostashed: in a checkpoint model,
-/// "commit first" is one honest click, and it keeps rebase away from
-/// uncommitted changes. A conflicted rebase is aborted on the spot — local
-/// commits intact, tree clean — because a half-finished rebase in a GUI with
-/// no conflict UI is the one trap this feature must never set.
-pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutcome> {
-    let state = repo_state(dir)?;
-    let (branch, detached, dirty, remote, has_upstream) = match state {
-        RepoState::NoGit | RepoState::Nested { .. } => return Ok(SyncOutcome::NotRoot),
-        RepoState::Root { branch, detached, dirty, remote, has_upstream, .. } => {
-            (branch, detached, dirty, remote, has_upstream)
-        }
-    };
-    if remote.is_none() {
-        return Ok(SyncOutcome::NoRemote);
-    }
-    if detached {
-        return Err(Error::Other(
-            "HEAD is detached — check out a branch before syncing".into(),
-        ));
-    }
-    if !dirty.is_empty() {
-        return Ok(SyncOutcome::DirtyTree);
-    }
-    let d = dir
-        .to_str()
-        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
-
-    if !run_streaming(&["-C", d, "fetch", "origin"], &mut on_line)? {
-        return Err(Error::Other("git fetch failed — see the Build console".into()));
-    }
-
-    // Rebase only onto a branch the remote actually has: a fresh remote (or
-    // first push of a new branch) has nothing to rebase onto.
-    let target = format!("origin/{branch}");
-    let remote_has_branch = run(&["-C", d, "rev-parse", "--verify", "--quiet", &target]).is_ok();
-    if remote_has_branch && !run_streaming(&["-C", d, "rebase", &target], &mut on_line)? {
-        // Best-effort abort; the repo must never be left mid-rebase.
-        let _ = run(&["-C", d, "rebase", "--abort"]);
-        return Ok(SyncOutcome::Diverged);
-    }
-
-    let pushed = if has_upstream {
-        run_streaming(&["-C", d, "push"], &mut on_line)?
-    } else {
-        run_streaming(&["-C", d, "push", "-u", "origin", "HEAD"], &mut on_line)?
-    };
-    if !pushed {
-        return Err(Error::Other("git push failed — see the Build console".into()));
-    }
-    Ok(SyncOutcome::Synced)
-}
 
     /// A nested sketch's commit takes the sketch subtree only — the parent
     /// repository's other dirt must survive untouched.
