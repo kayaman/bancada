@@ -30,7 +30,7 @@ import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 import CloneProject from "./components/CloneProject";
-import ProfileInit from "./components/ProfileInit";
+import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
 import AgentPanel from "./components/AgentPanel";
@@ -107,8 +107,8 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   /** When true the editor area shows the Clone Project form instead. */
   const [cloningProject, setCloningProject] = useState(false);
-  /** When true a one-row profile-bootstrap form shows under the toolbar. */
-  const [creatingProfile, setCreatingProfile] = useState(false);
+  /** When set, the one-row profile form shows under the toolbar. */
+  const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
   // Computed once per opened project (spec Risk R4): the Assistant panel
   // warns when there's no undo path for its auto-applied edits.
   const [gitWarning, setGitWarning] = useState(false);
@@ -491,7 +491,7 @@ export default function App() {
       setContent("");
       // Opening a sketch dismisses any open form — a leftover New Project or
       // Clone form would otherwise keep covering the editor.
-      setCreatingProfile(false);
+      setProfileForm(null);
       setCreatingProject(false);
       setCloningProject(false);
       const name = dir.split("/").pop();
@@ -1175,16 +1175,26 @@ export default function App() {
         onNewProject={() => {
           setCreatingProject(true);
           setCloningProject(false);
-          setCreatingProfile(false);
+          setProfileForm(null);
         }}
         onCloneProject={() => {
           setCloningProject(true);
           setCreatingProject(false);
-          setCreatingProfile(false);
+          setProfileForm(null);
         }}
         onCreateProfile={() => {
-          setCreatingProfile(true);
+          setProfileForm("bootstrap");
           // The three editor-area forms are mutually exclusive.
+          setCreatingProject(false);
+          setCloningProject(false);
+        }}
+        onAddProfile={() => {
+          setProfileForm("add");
+          setCreatingProject(false);
+          setCloningProject(false);
+        }}
+        onRetargetProfile={() => {
+          setProfileForm("retarget");
           setCreatingProject(false);
           setCloningProject(false);
         }}
@@ -1195,16 +1205,20 @@ export default function App() {
         onUpload={upload}
       />
 
-      {creatingProfile && sketchDir && (
+      {profileForm && sketchDir && (
         <ProfileInit
+          mode={profileForm}
           sketchDir={sketchDir}
           detectedFqbn={detectedFqbn() ?? null}
-          onCreated={(yaml, prof) => {
+          currentProfile={profile}
+          currentFqbn={profile ? (sketchYaml?.profiles?.[profile]?.fqbn ?? null) : null}
+          onDone={(yaml, prof) => {
             setSketchYaml(yaml);
-            setProfile(prof);
-            setCreatingProfile(false);
+            setProfileForm(null);
+            // Select the touched profile; applies its pinned port if any.
+            selectProfile(prof);
           }}
-          onCancel={() => setCreatingProfile(false)}
+          onCancel={() => setProfileForm(null)}
           notify={notify}
         />
       )}

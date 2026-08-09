@@ -3,33 +3,52 @@ import BoardPicker from "./BoardPicker";
 import {
   initProfile,
   listAllBoards,
+  retargetProfile,
   type BoardOption,
   type SketchYaml,
 } from "../api";
 import { profileNameForFqbn } from "../profileInit";
 
+export type ProfileFormMode = "bootstrap" | "add" | "retarget";
+
 interface Props {
+  mode: ProfileFormMode;
   sketchDir: string;
-  /** FQBN detected on the selected port, preselected when known. */
+  /** FQBN detected on the selected port, preselected for new profiles. */
   detectedFqbn: string | null;
-  onCreated: (yaml: SketchYaml, profile: string) => void;
+  /** Selected profile: retarget's target, add's library-copy source. */
+  currentProfile: string | null;
+  /** That profile's FQBN (retarget's picker preselect). */
+  currentFqbn: string | null;
+  onDone: (yaml: SketchYaml, profile: string) => void;
   onCancel: () => void;
   notify: (msg: string, isError?: boolean) => void;
 }
 
-/** One-row form under the toolbar: pick a board, name the profile, create
- *  sketch.yaml. Shown only while the sketch has no profiles. */
+const LABEL: Record<ProfileFormMode, string> = {
+  bootstrap: "New sketch.yaml profile:",
+  add: "Add profile for another board:",
+  retarget: "Change this profile's board:",
+};
+
+/** One-row form under the toolbar: bootstrap the first profile, add one for
+ *  another board (libraries copied from the current profile), or point the
+ *  current profile at a different board in place. */
 export default function ProfileInit({
+  mode,
   sketchDir,
   detectedFqbn,
-  onCreated,
+  currentProfile,
+  currentFqbn,
+  onDone,
   onCancel,
   notify,
 }: Props) {
+  const initialFqbn = (mode === "retarget" ? currentFqbn : detectedFqbn) ?? "";
   const [boards, setBoards] = useState<BoardOption[]>([]);
-  const [fqbn, setFqbn] = useState(detectedFqbn ?? "");
+  const [fqbn, setFqbn] = useState(initialFqbn);
   const [name, setName] = useState(
-    detectedFqbn ? profileNameForFqbn(detectedFqbn) : "",
+    mode !== "retarget" && initialFqbn ? profileNameForFqbn(initialFqbn) : "",
   );
   const [nameTouched, setNameTouched] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -43,15 +62,28 @@ export default function ProfileInit({
 
   const pick = (f: string) => {
     setFqbn(f);
-    if (!nameTouched) setName(f ? profileNameForFqbn(f) : "");
+    if (mode !== "retarget" && !nameTouched)
+      setName(f ? profileNameForFqbn(f) : "");
   };
 
-  const create = async () => {
+  const submit = async () => {
     setBusy(true);
     try {
-      const yaml = await initProfile(sketchDir, name.trim(), fqbn);
-      notify(`✓ Profile “${name.trim()}” written to sketch.yaml`);
-      onCreated(yaml, name.trim());
+      if (mode === "retarget") {
+        if (!currentProfile) return; // button is disabled without a profile
+        const yaml = await retargetProfile(sketchDir, currentProfile, fqbn);
+        notify(`✓ Profile “${currentProfile}” now builds for ${fqbn}`);
+        onDone(yaml, currentProfile);
+      } else {
+        const yaml = await initProfile(
+          sketchDir,
+          name.trim(),
+          fqbn,
+          mode === "add" ? (currentProfile ?? undefined) : undefined,
+        );
+        notify(`✓ Profile “${name.trim()}” written to sketch.yaml`);
+        onDone(yaml, name.trim());
+      }
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -59,30 +91,33 @@ export default function ProfileInit({
     }
   };
 
+  const ready = mode === "retarget" ? !!fqbn : !!fqbn && !!name.trim();
   return (
     <div className="profile-init">
-      <span className="profile-init-label">New sketch.yaml profile:</span>
+      <span className="profile-init-label">{LABEL[mode]}</span>
       <BoardPicker
         boards={boards}
         value={fqbn}
         onChange={pick}
         title="Board for this profile"
       />
-      <input
-        className="input"
-        value={name}
-        placeholder="profile name"
-        onChange={(e) => {
-          setName(e.target.value);
-          setNameTouched(true);
-        }}
-      />
-      <button
-        className="btn primary"
-        disabled={busy || !fqbn || !name.trim()}
-        onClick={create}
-      >
-        Create
+      {mode === "retarget" ? (
+        <span className="profile-init-label" title="Profile being retargeted">
+          {currentProfile}
+        </span>
+      ) : (
+        <input
+          className="input"
+          value={name}
+          placeholder="profile name"
+          onChange={(e) => {
+            setName(e.target.value);
+            setNameTouched(true);
+          }}
+        />
+      )}
+      <button className="btn primary" disabled={busy || !ready} onClick={submit}>
+        {mode === "retarget" ? "Change board" : "Create"}
       </button>
       <button className="btn" disabled={busy} onClick={onCancel}>
         Cancel

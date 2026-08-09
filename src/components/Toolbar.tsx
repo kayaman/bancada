@@ -17,6 +17,8 @@ interface Props {
   onNewProject: () => void;
   onCloneProject: () => void;
   onCreateProfile: () => void;
+  onAddProfile: () => void;
+  onRetargetProfile: () => void;
   onSelectProfile: (p: string) => void;
   onSelectPort: (p: string) => void;
   onRefreshPorts: () => void;
@@ -85,23 +87,48 @@ export default function Toolbar(props: Props) {
             ＋ Create profile…
           </button>
         ) : (
-          <select
-            className="select"
-            value={props.profile ?? ""}
-            onChange={(e) => props.onSelectProfile(e.target.value)}
-            disabled={profiles.length === 0}
-            title="Build profile (sketch.yaml)"
-          >
-            {profiles.length === 0 && <option value="">no sketch.yaml profile</option>}
-            {profiles.map((p) => {
-              const board = props.sketchYaml?.profiles?.[p]?.fqbn.split(":")[2];
-              return (
-                <option key={p} value={p}>
-                  {board ? `${p} — ${board}` : p}
-                </option>
-              );
-            })}
-          </select>
+          <div className="toolbar-pair">
+            <select
+              className="select"
+              value={props.profile ?? ""}
+              onChange={(e) => props.onSelectProfile(e.target.value)}
+              disabled={profiles.length === 0}
+              title="Build profile (sketch.yaml)"
+            >
+              {profiles.length === 0 && (
+                <option value="">no sketch.yaml profile</option>
+              )}
+              {profiles.map((p) => {
+                const board = props.sketchYaml?.profiles?.[p]?.fqbn.split(":")[2];
+                return (
+                  <option key={p} value={p}>
+                    {board ? `${p} — ${board}` : p}
+                  </option>
+                );
+              })}
+            </select>
+            {props.sketchDir && (
+              <>
+                <button
+                  className="btn icon"
+                  onClick={props.onAddProfile}
+                  title="Add a profile for another board (libraries copied)"
+                  aria-label="Add profile"
+                >
+                  ＋
+                </button>
+                <button
+                  className="btn icon"
+                  onClick={props.onRetargetProfile}
+                  disabled={profiles.length === 0 || !props.profile}
+                  title="Change this profile's board"
+                  aria-label="Change profile board"
+                >
+                  ✎
+                </button>
+              </>
+            )}
+          </div>
         )}
 
         <div className="toolbar-pair">
