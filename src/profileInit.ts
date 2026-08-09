@@ -51,3 +51,23 @@ export function initialFqbn(
 ): string {
   return (mode === "retarget" ? currentFqbn : detectedFqbn) ?? "";
 }
+
+/** First three `:`-segments of an fqbn (vendor:arch:board), trimmed — the
+ *  part that identifies the board itself, ignoring any trailing options. */
+function baseBoard(fqbn: string): string {
+  return fqbn
+    .trim()
+    .split(":")
+    .slice(0, 3)
+    .map((s) => s.trim())
+    .join(":");
+}
+
+/** The fqbn a retarget should submit: re-picking the same base board keeps
+ *  the current fqbn verbatim (board options ride on it and the picker's list
+ *  values never carry options); a different board uses the picked value. */
+export function effectiveRetargetFqbn(picked: string, currentFqbn: string | null): string {
+  const current = currentFqbn?.trim();
+  if (!current) return picked;
+  return baseBoard(picked) === baseBoard(current) ? current : picked;
+}
