@@ -20,6 +20,54 @@ use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Entries every repository's `.gitignore` must carry: build output, vendored
+/// libraries, and the credential files that must never reach a commit.
+pub const GITIGNORE_REQUIRED: &[&str] = &[
+    "build/",
+    ".bancada/",
+    ".env",
+    "secrets.h",
+    "arduino_secrets.h",
+];
+
+/// Append the [`GITIGNORE_REQUIRED`] entries `existing` lacks, using the same
+/// trimmed-line comparison as git's ignore logic: `build`, `build/`,
+/// `/build` and `/build/` all count as the entry being present. Existing
+/// content is preserved, gaining a trailing newline when it is missing one.
+pub fn merged_gitignore(existing: &str) -> String {
+    let has = |content: &str, entry: &str| {
+        let base = entry.trim_end_matches('/');
+        content.lines().any(|l| {
+            let t = l.trim();
+            t == base
+                || t == format!("{base}/")
+                || t == format!("/{base}")
+                || t == format!("/{base}/")
+        })
+    };
+    let mut out = existing.to_string();
+    for entry in GITIGNORE_REQUIRED {
+        if !has(&out, entry) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(entry);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Write (or extend) `dir/.gitignore` so every [`GITIGNORE_REQUIRED`] entry is
+/// present. Reads what exists and appends only what is missing — a
+/// hand-maintained ignore file is preserved, not replaced.
+pub fn write_gitignore(dir: &Path) -> Result<()> {
+    let p = dir.join(".gitignore");
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    std::fs::write(&p, merged_gitignore(&existing))?;
+    Ok(())
+}
+
 /// Runs git and returns stdout, mapping a missing binary to `ToolMissing`.
 pub(crate) fn run(args: &[&str]) -> Result<String> {
     let out = Command::new("git").args(args).output().map_err(|e| {
@@ -68,13 +116,15 @@ pub fn is_under_git(dir: &Path) -> bool {
 /// The commit is made with `-c` overrides so a machine with no `user.name`
 /// configured still gets a baseline instead of an error, and with
 /// `--no-verify`/`core.hooksPath=` so a global hooks directory cannot run
-/// during project creation.
+/// during project creation. The credential `.gitignore` is written before
+/// `add --all`, ensuring that no secrets can reach the baseline commit.
 pub fn init_repo(dir: &Path) -> Result<()> {
     let path = dir
         .to_str()
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
 
     run(&["init", "--quiet", path])?;
+    write_gitignore(dir)?;
     run(&["-C", path, "add", "--all"])?;
     run(&[
         "-C",
@@ -255,5 +305,68 @@ mod tests {
         init_repo(&dir).unwrap();
         let log = run(&["-C", dir.to_str().unwrap(), "log", "--format=%an <%ae>"]).unwrap();
         assert!(log.contains("Bancada <bancada@localhost>"), "log {log:?}");
+    }
+
+    // ----- gitignore merging -----
+
+    #[test]
+    fn merged_gitignore_adds_all_required_entries_to_empty_file() {
+        let result = merged_gitignore("");
+        assert_eq!(
+            result,
+            "build/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+        );
+    }
+
+    #[test]
+    fn merged_gitignore_preserves_existing_content_and_adds_missing_entries() {
+        let existing = "custom.txt\n";
+        let result = merged_gitignore(existing);
+        assert_eq!(
+            result,
+            "custom.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+        );
+    }
+
+    #[test]
+    fn merged_gitignore_fixes_missing_trailing_newline() {
+        let existing = "custom.txt";
+        let result = merged_gitignore(existing);
+        assert_eq!(
+            result,
+            "custom.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+        );
+    }
+
+    #[test]
+    fn merged_gitignore_variant_spellings_are_not_duplicated() {
+        let existing = "build\n.env\n";
+        let result = merged_gitignore(existing);
+        assert_eq!(result, "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n");
+        let build_lines = result
+            .lines()
+            .filter(|l| matches!(l.trim(), "build" | "build/" | "/build" | "/build/"))
+            .count();
+        assert_eq!(build_lines, 1, "{result}");
+    }
+
+    /// The credential rules must exist before any commit can happen — a
+    /// baseline that includes secrets.h is worse than no baseline.
+    #[test]
+    fn init_repo_writes_credential_gitignore_and_keeps_secrets_out() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("WithSecrets");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.ino"), "void setup() {}\n").unwrap();
+        std::fs::write(dir.join("secrets.h"), "#define WIFI_PASS \"hunter2\"\n").unwrap();
+
+        init_repo(&dir).unwrap();
+
+        let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(gi.contains("secrets.h"), ".gitignore was {gi:?}");
+        let tracked = run(&["-C", dir.to_str().unwrap(), "ls-files"]).unwrap();
+        assert!(tracked.contains("x.ino"));
+        assert!(!tracked.contains("secrets.h"), "tracked {tracked:?}");
+        assert!(tracked.contains(".gitignore"));
     }
 }
