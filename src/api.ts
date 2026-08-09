@@ -241,6 +241,11 @@ export interface CreatedProject {
   profile: string;
   /** Libraries that could not be added; the project is still usable. */
   library_errors: string[];
+  /** Whether the project ended up under git — created inside an existing work
+   * tree, or initialised as its own repository. */
+  under_git: boolean;
+  /** Why `git init` did not happen, when it was attempted and failed. */
+  git_error: string | null;
 }
 
 export interface ScopeCaps {

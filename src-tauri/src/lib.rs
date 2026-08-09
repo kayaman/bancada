@@ -302,12 +302,15 @@ fn list_sketch_files(sketch_dir: String) -> Result<Vec<bancada_core::sketch::Ske
 
 /// Whether the sketch dir is under git — the Assistant panel warns when it
 /// isn't, since auto-applied agent edits have no undo path without it (spec
-/// Risk R4). A plain `.git` dir check, not a `git` invocation: cheap, and
-/// good enough for the warning's purpose (a worktree/submodule's `.git` file
-/// still counts as "under git").
+/// Risk R4).
+///
+/// Answered by walking the ancestors, not by looking only in the sketch
+/// directory: a sketch normally lives *inside* a repository rather than being
+/// one, so the narrower check warned about files that were tracked all along.
+/// See `bancada_core::git::is_under_git` for the trade-offs.
 #[tauri::command]
 fn sketch_has_git(sketch_dir: String) -> bool {
-    Path::new(&sketch_dir).join(".git").exists()
+    bancada_core::git::is_under_git(Path::new(&sketch_dir))
 }
 
 #[tauri::command]
@@ -801,6 +804,12 @@ struct CreatedProject {
     profile: String,
     /// Libraries that could not be added; the project is still usable.
     library_errors: Vec<String>,
+    /// Whether the new project ended up under git — either because it was
+    /// created inside an existing work tree, or because it was initialised.
+    under_git: bool,
+    /// Why `git init` did not happen, when it was attempted and failed.
+    /// Non-fatal: the sketch exists and builds either way.
+    git_error: Option<String>,
 }
 
 /// Create a sketch, give it a profile for `fqbn`, and pin the requested
@@ -881,11 +890,27 @@ async fn create_project(
             }
         }
 
+        // Put the project under git so the Assistant's auto-applied edits have
+        // something to undo against. Skipped when the parent is already a work
+        // tree — initialising there would nest a second repository inside one
+        // the user already keeps. Non-fatal for the same reason the library
+        // failures are: the sketch exists and builds without it.
+        let mut git_error = None;
+        let under_git = match bancada_core::git::ensure_under_git(&dir) {
+            Ok(_) => true,
+            Err(e) => {
+                git_error = Some(e.to_string());
+                false
+            }
+        };
+
         Ok(CreatedProject {
             dir: dir.to_string_lossy().into_owned(),
             name,
             profile,
             library_errors,
+            under_git,
+            git_error,
         })
     })
     .await
@@ -3541,6 +3566,37 @@ mod tests {
 
     fn gate() -> Arc<Mutex<()>> {
         Arc::new(Mutex::new(()))
+    }
+
+    // ---------- git detection ----------
+
+    /// The reported bug: a project created inside `~/Projects` — which is
+    /// itself a checkout — showed "not under git" in the Assistant panel, so
+    /// the panel warned there was no undo path for files git was tracking all
+    /// along. The command must answer for the sketch's ancestry, not just for
+    /// a `.git` sitting in the sketch directory.
+    #[test]
+    fn sketch_has_git_sees_a_repo_above_the_sketch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        bancada_core::git::init_repo(&root).unwrap();
+
+        let sketch = root.join("notundergit");
+        std::fs::create_dir_all(&sketch).unwrap();
+
+        assert!(
+            !sketch.join(".git").exists(),
+            "premise: the sketch has no .git of its own — what the old check looked for"
+        );
+        assert!(sketch_has_git(sketch.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn sketch_has_git_is_false_outside_any_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("loose");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!sketch_has_git(dir.to_string_lossy().into_owned()));
     }
 
     // ---------- JSON-RPC over HTTP ----------
