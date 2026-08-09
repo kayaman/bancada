@@ -355,6 +355,19 @@ describe("agent commands", () => {
   });
 });
 
+describe("usage dashboard", () => {
+  it("usageOverview takes no arguments", async () => {
+    await api.usageOverview();
+    expect(called()[0]).toBe("usage_overview");
+    expect(called()[1]).toBeUndefined();
+  });
+
+  it("chatListUsage passes sketchDir", async () => {
+    await api.chatListUsage("/s");
+    expect(called()).toEqual(["chat_list_usage", { sketchDir: "/s" }]);
+  });
+});
+
 // Contract sweep for the remaining plain wrappers: every test pins the
 // command name and exact camelCase key set (see the file-top comment for
 // why that mismatch class is worth a cheap test each).

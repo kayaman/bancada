@@ -596,6 +596,33 @@ export interface ProjectTotals {
 export const chatTotals = (sketchDir: string) =>
   invoke<ProjectTotals>("chat_totals", { sketchDir });
 
+// ---------- usage dashboard ----------
+
+/** Cumulative Assistant usage for one project — survives chat pruning. */
+export interface ProjectUsage {
+  sketch_dir: string;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  turns: number;
+  sessions: number;
+  last_chat: string | null;
+}
+
+/** One saved chat with its own usage summed. */
+export interface SessionEntry {
+  file: string;
+  title: string;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  turns: number;
+}
+
+export const usageOverview = () => invoke<ProjectUsage[]>("usage_overview");
+export const chatListUsage = (sketchDir: string) =>
+  invoke<SessionEntry[]>("chat_list_usage", { sketchDir });
+
 // ---------- scope ----------
 
 export const scopeProbe = (port: string) =>
