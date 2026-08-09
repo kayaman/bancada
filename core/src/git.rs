@@ -17,6 +17,7 @@
 //!   thing the Assistant panel's warning is about.
 
 use crate::{Error, Result};
+use crate::types::{OutputLine, OutputStream};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,6 +87,46 @@ pub(crate) fn run(args: &[&str]) -> Result<String> {
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run git streaming stdout+stderr lines into `on_line`; returns exit success.
+/// Sync's fetch/rebase/push go through this so the Build console shows
+/// progress the way compiles do.
+pub fn run_streaming(args: &[&str], mut on_line: impl FnMut(OutputLine)) -> Result<bool> {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new("git")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::ToolMissing("git".into())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
+    let tx_err = tx.clone();
+    let t_out = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+            let _ = tx.send(OutputLine { stream: OutputStream::Stdout, line });
+        }
+    });
+    let t_err = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+            let _ = tx_err.send(OutputLine { stream: OutputStream::Stderr, line });
+        }
+    });
+    for line in rx {
+        on_line(line);
+    }
+    let _ = t_out.join();
+    let _ = t_err.join();
+    Ok(child.wait()?.success())
 }
 
 /// Whether `dir` — or any directory above it — is a git work tree.
@@ -357,6 +398,18 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
 pub enum CommitOutcome {
     Committed,
     NothingToCommit,
+}
+
+/// What a sync attempt came to. Everything except `Synced` is a state the
+/// UI explains; none of them is a Rust-level error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncOutcome {
+    Synced,
+    DirtyTree,
+    Diverged,
+    NoRemote,
+    NotRoot,
 }
 
 /// The git pill's whole world, computed in one place.
@@ -774,6 +827,61 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         assert_eq!(commit(&dir, "no-op").unwrap(), CommitOutcome::NothingToCommit);
     }
 
+/// fetch → rebase → push, refusing anything that could lose work.
+///
+/// Dirty trees are refused rather than autostashed: in a checkpoint model,
+/// "commit first" is one honest click, and it keeps rebase away from
+/// uncommitted changes. A conflicted rebase is aborted on the spot — local
+/// commits intact, tree clean — because a half-finished rebase in a GUI with
+/// no conflict UI is the one trap this feature must never set.
+pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutcome> {
+    let state = repo_state(dir)?;
+    let (branch, detached, dirty, remote, has_upstream) = match state {
+        RepoState::NoGit | RepoState::Nested { .. } => return Ok(SyncOutcome::NotRoot),
+        RepoState::Root { branch, detached, dirty, remote, has_upstream, .. } => {
+            (branch, detached, dirty, remote, has_upstream)
+        }
+    };
+    if remote.is_none() {
+        return Ok(SyncOutcome::NoRemote);
+    }
+    if detached {
+        return Err(Error::Other(
+            "HEAD is detached — check out a branch before syncing".into(),
+        ));
+    }
+    if !dirty.is_empty() {
+        return Ok(SyncOutcome::DirtyTree);
+    }
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+
+    if !run_streaming(&["-C", d, "fetch", "origin"], &mut on_line)? {
+        return Err(Error::Other("git fetch failed — see the Build console".into()));
+    }
+
+    // Rebase only onto a branch the remote actually has: a fresh remote (or
+    // first push of a new branch) has nothing to rebase onto.
+    let target = format!("origin/{branch}");
+    let remote_has_branch = run(&["-C", d, "rev-parse", "--verify", "--quiet", &target]).is_ok();
+    if remote_has_branch && !run_streaming(&["-C", d, "rebase", &target], &mut on_line)? {
+        // Best-effort abort; the repo must never be left mid-rebase.
+        let _ = run(&["-C", d, "rebase", "--abort"]);
+        return Ok(SyncOutcome::Diverged);
+    }
+
+    let pushed = if has_upstream {
+        run_streaming(&["-C", d, "push"], &mut on_line)?
+    } else {
+        run_streaming(&["-C", d, "push", "-u", "origin", "HEAD"], &mut on_line)?
+    };
+    if !pushed {
+        return Err(Error::Other("git push failed — see the Build console".into()));
+    }
+    Ok(SyncOutcome::Synced)
+}
+
     /// A nested sketch's commit takes the sketch subtree only — the parent
     /// repository's other dirt must survive untouched.
     #[test]
@@ -790,5 +898,111 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         let status = run(&["-C", root.to_str().unwrap(), "status", "--porcelain"]).unwrap();
         assert!(status.contains("unrelated.txt"), "must stay dirty: {status:?}");
         assert!(!status.contains("n.ino"), "must be committed: {status:?}");
+    }
+
+    // ----- sync -----
+
+    fn commit_file(dir: &Path, name: &str, content: &str, msg: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+        let d = dir.to_str().unwrap();
+        run(&["-C", d, "add", "-A"]).unwrap();
+        run(&["-C", d, "commit", "--quiet", "-m", msg]).unwrap();
+    }
+
+    /// Two clones of one file:// remote — the two-machine bench story. The
+    /// remote is seeded with a baseline before `b` clones, because every real
+    /// bancada project has one (init_repo guarantees it): an unborn-HEAD clone
+    /// is a test-harness artifact, not a state sync needs to handle.
+    fn make_pair(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        let base = tmp.path().canonicalize().unwrap();
+        let origin = base.join("origin.git");
+        run(&["init", "--bare", "--quiet", origin.to_str().unwrap()]).unwrap();
+        // Bare repos default to whatever HEAD says; pin the branch name.
+        run(&["-C", origin.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/main"]).unwrap();
+        let a = base.join("a");
+        run(&["clone", "--quiet", origin.to_str().unwrap(), a.to_str().unwrap()]).unwrap();
+        run(&["-C", a.to_str().unwrap(), "checkout", "--quiet", "-B", "main"]).unwrap();
+        run(&["-C", a.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
+        run(&["-C", a.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
+        commit_file(&a, "seed.ino", "void setup() {}\n", "seed");
+        run(&["-C", a.to_str().unwrap(), "push", "--quiet", "-u", "origin", "main"]).unwrap();
+        let b = base.join("b");
+        run(&["clone", "--quiet", origin.to_str().unwrap(), b.to_str().unwrap()]).unwrap();
+        run(&["-C", b.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
+        run(&["-C", b.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
+        (a, b)
+    }
+
+    #[test]
+    fn sync_pushes_local_commits_and_pulls_remote_ones() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = make_pair(&tmp);
+        commit_file(&a, "one.ino", "void setup() {}\n", "one");
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+
+        // b gains a's commit via its own sync; then b commits and a re-syncs.
+        assert_eq!(sync(&b, |_| {}).unwrap(), SyncOutcome::Synced);
+        assert!(b.join("one.ino").exists());
+        commit_file(&b, "two.ino", "void loop() {}\n", "two");
+        assert_eq!(sync(&b, |_| {}).unwrap(), SyncOutcome::Synced);
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+        assert!(a.join("two.ino").exists());
+    }
+
+    #[test]
+    fn sync_rebases_non_conflicting_divergence() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = make_pair(&tmp);
+        commit_file(&a, "from_a.h", "// a\n", "a's");
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+        commit_file(&b, "from_b.h", "// b\n", "b's"); // b is now diverged
+        assert_eq!(sync(&b, |_| {}).unwrap(), SyncOutcome::Synced);
+        assert!(b.join("from_a.h").exists());
+    }
+
+    /// The one trap sync must never set: a conflict leaves NO rebase in
+    /// progress — aborted, local commits intact, tree clean.
+    #[test]
+    fn sync_conflict_aborts_the_rebase_and_reports_diverged() {
+        let tmp = TempDir::new().unwrap();
+        let (a, b) = make_pair(&tmp);
+        commit_file(&a, "same.ino", "original\n", "base");
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+        assert_eq!(sync(&b, |_| {}).unwrap(), SyncOutcome::Synced);
+
+        commit_file(&a, "same.ino", "a's version\n", "a's");
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+        commit_file(&b, "same.ino", "b's version\n", "b's");
+
+        assert_eq!(sync(&b, |_| {}).unwrap(), SyncOutcome::Diverged);
+        let d = b.to_str().unwrap();
+        assert!(
+            !b.join(".git").join("rebase-merge").exists()
+                && !b.join(".git").join("rebase-apply").exists(),
+            "no rebase may be left in progress"
+        );
+        let status = run(&["-C", d, "status", "--porcelain"]).unwrap();
+        assert!(status.trim().is_empty(), "tree must be clean: {status:?}");
+        let log = run(&["-C", d, "log", "--oneline"]).unwrap();
+        assert!(log.contains("b's"), "local commit must survive: {log:?}");
+    }
+
+    #[test]
+    fn sync_refuses_a_dirty_tree() {
+        let tmp = TempDir::new().unwrap();
+        let (a, _) = make_pair(&tmp);
+        commit_file(&a, "x.ino", "void setup() {}\n", "base");
+        std::fs::write(a.join("x.ino"), "changed but not committed\n").unwrap();
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::DirtyTree);
+    }
+
+    #[test]
+    fn sync_without_a_remote_reports_no_remote() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Lonely");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("l.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+        assert_eq!(sync(&dir, |_| {}).unwrap(), SyncOutcome::NoRemote);
     }
 }
