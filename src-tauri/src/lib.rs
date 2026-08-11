@@ -4206,6 +4206,163 @@ mod tests {
     use std::net::TcpStream;
     use std::sync::mpsc;
 
+    // ---------- device browser: end-to-end through the real loop ----------
+
+    /// A fake bench device: one tiny_http server answering everything with
+    /// a canned JSON body (echoing the request path in a header so the
+    /// forward can be proven), plus a 404 for one magic path.
+    fn fake_device() -> (Arc<tiny_http::Server>, u16, JoinHandle<()>) {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let port = match server.server_addr() {
+            tiny_http::ListenAddr::IP(a) => a.port(),
+            other => panic!("non-IP: {other:?}"),
+        };
+        let s = server.clone();
+        let join = std::thread::spawn(move || {
+            for req in s.incoming_requests() {
+                // Prove hop-by-hop stripping: a forwarded Connection header
+                // would appear here; record its absence in the reply body.
+                let saw_connection = req
+                    .headers()
+                    .iter()
+                    .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case("connection"));
+                let body = format!(
+                    "{{\"path\":\"{}\",\"saw_connection\":{saw_connection}}}",
+                    req.url()
+                );
+                let status = if req.url() == "/missing" { 404 } else { 200 };
+                let resp = tiny_http::Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                            .unwrap(),
+                    );
+                let _ = req.respond(resp);
+            }
+        });
+        (server, port, join)
+    }
+
+    fn collecting_channel() -> (Channel<InvokeResponseBody>, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let ch = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                if let Ok(v) = serde_json::from_str(&json) {
+                    sink.lock().unwrap().push(v);
+                }
+            }
+            Ok(())
+        });
+        (ch, seen)
+    }
+
+    fn http_get(port: u16, path: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let status: u16 = raw
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    /// Poll until `cond` or 2 s — the exchange event lands from a spawned
+    /// per-request thread, so a fixed sleep would be a race by design.
+    fn wait_for(cond: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !cond() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn device_proxy_forwards_strips_hop_by_hop_and_logs_the_exchange() {
+        let (device, device_port, device_join) = fake_device();
+        let proxy = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let proxy_port = match proxy.server_addr() {
+            tiny_http::ListenAddr::IP(a) => a.port(),
+            other => panic!("non-IP: {other:?}"),
+        };
+        let target = Arc::new(Mutex::new(devproxy::Target {
+            host: "127.0.0.1".into(),
+            port: device_port,
+        }));
+        let (ch, seen) = collecting_channel();
+        let loop_server = proxy.clone();
+        let proxy_join = std::thread::spawn(move || dev_proxy_loop(loop_server, target, ch));
+
+        // Forwarded byte-identical, and the device never saw our
+        // hop-by-hop Connection header.
+        let (status, body) = http_get(proxy_port, "/data.json");
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"path\":\"/data.json\",\"saw_connection\":false}");
+
+        // A device-side 404 is forwarded as a response, not a proxy error.
+        let (status, _) = http_get(proxy_port, "/missing");
+        assert_eq!(status, 404);
+
+        wait_for(|| seen.lock().unwrap().len() >= 2);
+        let events = seen.lock().unwrap().clone();
+        let first = events
+            .iter()
+            .find(|e| e["path"] == "/data.json")
+            .expect("exchange event for /data.json");
+        assert_eq!(first["type"], "exchange");
+        assert_eq!(first["method"], "GET");
+        assert_eq!(first["status"], 200);
+        assert_eq!(first["content_type"], "application/json");
+        assert_eq!(first["binary"], false);
+        assert!(first["preview"].as_str().unwrap().contains("saw_connection"));
+
+        device.unblock();
+        let _ = device_join.join();
+        proxy.unblock();
+        let _ = proxy_join.join();
+    }
+
+    #[test]
+    fn device_proxy_reports_an_unreachable_target_as_502_plus_error_event() {
+        // A port that was just bound and dropped is very unlikely to be
+        // listening — good enough for "unreachable".
+        let dead_port = {
+            let s = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            s.local_addr().unwrap().port()
+        };
+        let proxy = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let proxy_port = match proxy.server_addr() {
+            tiny_http::ListenAddr::IP(a) => a.port(),
+            other => panic!("non-IP: {other:?}"),
+        };
+        let target = Arc::new(Mutex::new(devproxy::Target {
+            host: "127.0.0.1".into(),
+            port: dead_port,
+        }));
+        let (ch, seen) = collecting_channel();
+        let loop_server = proxy.clone();
+        let proxy_join = std::thread::spawn(move || dev_proxy_loop(loop_server, target, ch));
+
+        let (status, body) = http_get(proxy_port, "/anything");
+        assert_eq!(status, 502);
+        assert!(body.contains("unreachable"), "got: {body}");
+
+        wait_for(|| !seen.lock().unwrap().is_empty());
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events[0]["type"], "error");
+        assert_eq!(events[0]["path"], "/anything");
+
+        proxy.unblock();
+        let _ = proxy_join.join();
+    }
+
     // ---------- device-browser event envelope ----------
 
     #[test]
