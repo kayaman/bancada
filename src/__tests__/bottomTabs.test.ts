@@ -36,8 +36,12 @@ describe("bottomTabs mapping consistency", () => {
   it("expected grouping (D1)", () => {
     expect(GROUP_TABS.console).toEqual(["build"]);
     expect(GROUP_TABS.debug).toEqual(["serial", "scope"]);
-    expect(GROUP_TABS.obs).toEqual(["mqtt", "ws"]);
+    expect(GROUP_TABS.obs).toEqual(["mqtt", "ws", "web"]);
     expect(GROUP_TABS.assistant).toEqual(["agent"]);
+  });
+
+  it("web tab label is 'Web'", () => {
+    expect(TAB_LABEL.web).toBe("Web");
   });
 });
 

@@ -1,7 +1,7 @@
 // Bottom-panel two-level navigation: tabs grouped into Console / Debugging /
 // Observability / Assistant. Pure data + one predicate; no React.
 
-export type BottomTab = "build" | "serial" | "scope" | "mqtt" | "ws" | "agent";
+export type BottomTab = "build" | "serial" | "scope" | "mqtt" | "ws" | "web" | "agent";
 export type BottomGroup = "console" | "debug" | "obs" | "assistant";
 
 export const GROUP_OF: Record<BottomTab, BottomGroup> = {
@@ -10,13 +10,14 @@ export const GROUP_OF: Record<BottomTab, BottomGroup> = {
   scope: "debug",
   mqtt: "obs",
   ws: "obs",
+  web: "obs",
   agent: "assistant",
 };
 
 export const GROUP_TABS: Record<BottomGroup, BottomTab[]> = {
   console: ["build"],
   debug: ["serial", "scope"],
-  obs: ["mqtt", "ws"],
+  obs: ["mqtt", "ws", "web"],
   assistant: ["agent"],
 };
 
@@ -33,6 +34,7 @@ export const TAB_LABEL: Record<BottomTab, string> = {
   scope: "∿ Oscilloscope",
   mqtt: "MQTT",
   ws: "WebSocket",
+  web: "Web",
   agent: "Agent",
 };
 
