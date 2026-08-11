@@ -14,6 +14,7 @@ pub mod boards;
 pub mod chatlog;
 pub mod cli;
 pub mod clone;
+pub mod devproxy;
 pub mod esptool;
 pub mod files;
 pub mod fleet;
