@@ -29,7 +29,7 @@ import { activityLabel } from "../agent/activity";
 import { formatTokens } from "../agent/usage";
 import type { BottomTab } from "../bottomTabs";
 
-type TurnEnd = Extract<AgentMessage, { kind: "turn_end" }>;
+export type TurnEnd = Extract<AgentMessage, { kind: "turn_end" }>;
 
 /** Markdown as the assistant wrote it — GFM, raw HTML stays escaped. */
 function Md({ text }: { text: string }) {
@@ -48,9 +48,17 @@ interface AgentPanelProps {
   onInterrupt: () => void;
   /** Stop the session and clear the transcript. */
   onNewSession: () => void;
+  /** "Continue this chat": resume the saved chat `file` — native
+   *  `--resume` when it recorded a session_id, a facts-only fresh session
+   *  otherwise. */
+  onContinueChat: (file: string) => void;
   openBottomTab: (tab: BottomTab) => void;
   /** True when the sketch dir has no `.git` — edits auto-apply with no undo. */
   gitWarning: boolean;
+  /** The "Allow uploads" arm switch: while off, the agent's `upload` MCP
+   *  tool is refused by the backend. Per-session; off by default. */
+  uploadsArmed: boolean;
+  onToggleUploadsArmed: (armed: boolean) => void;
 }
 
 const POLL_MS = 100;
@@ -62,8 +70,11 @@ export default function AgentPanel({
   onSend,
   onInterrupt,
   onNewSession,
+  onContinueChat,
   openBottomTab,
   gitWarning,
+  uploadsArmed,
+  onToggleUploadsArmed,
 }: AgentPanelProps) {
   // ---------- repaint on store changes (only while shown) ----------
 
@@ -110,11 +121,15 @@ export default function AgentPanel({
   const [histList, setHistList] = useState<ChatEntry[] | null>(null);
   const [histStore, setHistStore] = useState<AgentStore | null>(null);
   const [histTotals, setHistTotals] = useState<ProjectTotals | null>(null);
+  /** The file behind `histStore` — needed only so the back-bar's "Continue
+   *  this chat" button knows which chat to hand to `onContinueChat`. */
+  const [histFile, setHistFile] = useState<string | null>(null);
 
   const openHistory = () => {
     if (!sketchDir) return;
     setViewTurn(null);
     setHistStore(null);
+    setHistFile(null);
     api
       .chatList(sketchDir)
       .then(setHistList)
@@ -131,7 +146,10 @@ export default function AgentPanel({
     if (!sketchDir) return;
     api
       .chatLoad(sketchDir, file)
-      .then((lines) => setHistStore(replayChat(lines)))
+      .then((lines) => {
+        setHistStore(replayChat(lines));
+        setHistFile(file);
+      })
       .catch(() => {});
   };
 
@@ -148,8 +166,21 @@ export default function AgentPanel({
 
   const closeHistory = () => {
     setViewTurn(null);
-    if (histStore) setHistStore(null); // replay → back to the list
-    else setHistList(null); // list → back to the live chat
+    if (histStore) {
+      setHistStore(null); // replay → back to the list
+      setHistFile(null);
+    } else setHistList(null); // list → back to the live chat
+  };
+
+  /** Shared by the History row ▶ and the replay back-bar's ▶: panel-local
+   *  history/replay/turn views must not linger into the continued chat. */
+  const continueChat = (file: string) => {
+    setViewTurn(null);
+    setHistList(null);
+    setHistStore(null);
+    setHistTotals(null);
+    setHistFile(null);
+    onContinueChat(file);
   };
 
   // ---------- autoscroll (Console.tsx pattern: stick to bottom unless the
@@ -247,6 +278,7 @@ export default function AgentPanel({
               entries={histList}
               onOpen={openChat}
               onDelete={deleteChat}
+              onContinue={continueChat}
             />
           </>
         ) : (
@@ -281,7 +313,7 @@ export default function AgentPanel({
       <div className="agent-footer">
         <span className="agent-status">
           {activityLabel({ ...snap, now: Date.now() }) ??
-            statusLabel(snap.status, snap.verifyRunning)}
+            statusLabel(snap.status, snap.verifyRunning, snap.uploadRunning)}
         </span>
         {(snap.sessionUsage.costUsd > 0 ||
           snap.sessionUsage.inputTokens > 0) && (
@@ -305,6 +337,19 @@ export default function AgentPanel({
           </span>
         )}
         <div className="spacer" />
+        <button
+          className={
+            uploadsArmed ? "btn small agent-arm-toggle armed" : "btn small agent-arm-toggle"
+          }
+          onClick={() => onToggleUploadsArmed(!uploadsArmed)}
+          title={
+            uploadsArmed
+              ? "The assistant may flash the selected board without asking. Click to disarm."
+              : "While off, the assistant's upload tool is refused. Click to allow flashing the selected board."
+          }
+        >
+          {uploadsArmed ? "🔓 Uploads armed" : "🔒 Allow uploads"}
+        </button>
         {snap.status === "running" && (
           <button className="btn small" onClick={onInterrupt}>
             Stop
@@ -328,6 +373,7 @@ export default function AgentPanel({
             setHistList(null);
             setHistStore(null);
             setHistTotals(null);
+            setHistFile(null);
             onNewSession();
           }}
         >
@@ -340,6 +386,15 @@ export default function AgentPanel({
           <button className="btn small" onClick={closeHistory}>
             ← {histStore ? "Back to history" : "Back to current chat"}
           </button>
+          {histStore && histFile && (
+            <button
+              className="btn small primary"
+              onClick={() => continueChat(histFile)}
+              title="Resume this chat with the assistant"
+            >
+              ▶ Continue this chat
+            </button>
+          )}
           <span className="agent-back-hint">
             {histStore
               ? "Read-only replay of a saved chat."
@@ -525,6 +580,90 @@ function ToolCard({
     );
   }
 
+  if (isUploadTool(msg.name)) {
+    if (msg.status === "running") {
+      return (
+        <div className="agent-tool agent-tool-verify">
+          <span className="agent-spinner" aria-hidden="true">
+            ⟳
+          </span>{" "}
+          Flashing the board…
+        </div>
+      );
+    }
+    if (msg.status === "error") {
+      // Like verify, isError is "could not run": unarmed, no port selected,
+      // scope holding the port, build gate busy, arduino-cli missing. A
+      // FAILED flash comes back isError:false with success: false below.
+      return (
+        <div className="agent-tool agent-tool-verify">
+          <div className="agent-tool-head">
+            <span className="agent-tool-icon fail">✗</span>
+            <span>Upload could not run</span>
+          </div>
+          {msg.result && (
+            <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
+          )}
+        </div>
+      );
+    }
+    // Same "success: <bool>\nexit_code: <n>\n\n<summary>" contract as verify.
+    const { success, exitCode, summary } = parseVerifyResult(msg.result ?? "");
+    const ok = success === true;
+    return (
+      <div className="agent-tool agent-tool-verify">
+        <div className="agent-tool-head">
+          <span className={ok ? "agent-tool-icon ok" : "agent-tool-icon fail"}>
+            {success === undefined ? "•" : ok ? "✓" : "✗"}
+          </span>
+          <span>
+            {success === undefined
+              ? "Upload finished"
+              : ok
+                ? "Flashed"
+                : "Flash failed"}
+            {exitCode !== undefined ? ` (exit ${exitCode})` : ""}
+          </span>
+        </div>
+        {summary && <div className="agent-tool-summary">{truncate(summary, 400)}</div>}
+        <button className="btn small" onClick={() => openBottomTab("build")}>
+          Open Console ↗
+        </button>
+      </div>
+    );
+  }
+
+  if (isSerialReadTool(msg.name) || isSerialSendTool(msg.name)) {
+    const reading = isSerialReadTool(msg.name);
+    const sent = stringField(msg.input, "data");
+    return (
+      <div className="agent-tool agent-tool-serial">
+        <div className="agent-tool-head">
+          <span
+            className={
+              msg.status === "error" ? "agent-tool-icon fail" : "agent-tool-icon"
+            }
+          >
+            {msg.status === "running" ? "⟳" : msg.status === "error" ? "✗" : "▸"}
+          </span>
+          <span>{reading ? "Serial read" : `Serial send: ${sent ?? ""}`}</span>
+          <button
+            className="btn small agent-tool-serial-open"
+            onClick={() => openBottomTab("serial")}
+          >
+            Monitor ↗
+          </button>
+        </div>
+        {reading && msg.status !== "running" && msg.result && (
+          <pre className="agent-tool-serial-body">{truncate(msg.result, 1500)}</pre>
+        )}
+        {!reading && msg.status === "error" && msg.result && (
+          <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <details className="agent-tool agent-tool-generic">
       <summary>
@@ -592,7 +731,7 @@ function ProjectCard({
 
 /** A saved chat through the same components as a live one — including the
  *  session-end line and any alarm, or the replay wouldn't be faithful. */
-function ReplayView({
+export function ReplayView({
   store,
   openBottomTab,
   onOpenTurn,
@@ -626,10 +765,12 @@ function HistListView({
   entries,
   onOpen,
   onDelete,
+  onContinue,
 }: {
   entries: ChatEntry[];
   onOpen: (file: string) => void;
   onDelete: (file: string) => void;
+  onContinue: (file: string) => void;
 }) {
   if (entries.length === 0) {
     return (
@@ -645,6 +786,13 @@ function HistListView({
             <span className="agent-hist-date">
               {e.file.replace(/\.ndjson$/, "").replace("T", " ")}
             </span>
+          </button>
+          <button
+            className="btn small icon"
+            onClick={() => onContinue(e.file)}
+            title="Continue this chat with the assistant"
+          >
+            ▶
           </button>
           <button
             className="btn small danger icon"
@@ -701,7 +849,7 @@ function turnEndLabel(msg: TurnEnd): string {
 }
 
 /** The "info at the end" view: the turn's wrap-up, rendered richly. */
-function TurnSummaryView({
+export function TurnSummaryView({
   turn,
   onBack,
 }: {
@@ -776,7 +924,12 @@ function TurnSummaryView({
 
 // ---------- small helpers ----------
 
-function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
+function statusLabel(
+  status: AgentStatus,
+  verifyRunning: boolean,
+  uploadRunning: boolean,
+): string {
+  if (uploadRunning) return "Flashing…";
   if (verifyRunning) return "Verifying…";
   switch (status) {
     case "idle":
@@ -801,6 +954,19 @@ function statusLabel(status: AgentStatus, verifyRunning: boolean): string {
  *  name the MCP `tools/list` response itself advertises. */
 function isVerifyTool(name: string): boolean {
   return name === "verify" || name.endsWith("__verify");
+}
+
+/** Same naming contract as `isVerifyTool`, for the 0.12.0 hardware tools. */
+function isUploadTool(name: string): boolean {
+  return name === "upload" || name.endsWith("__upload");
+}
+
+function isSerialReadTool(name: string): boolean {
+  return name === "serial_read" || name.endsWith("__serial_read");
+}
+
+function isSerialSendTool(name: string): boolean {
+  return name === "serial_send" || name.endsWith("__serial_send");
 }
 
 function stringField(input: unknown, key: string): string | undefined {

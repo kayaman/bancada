@@ -11,6 +11,7 @@ const tool = (
 const base = {
   status: "running" as const,
   verifyRunning: false,
+  uploadRunning: false,
   streaming: false,
   turnActive: true,
   messages: [] as AgentMessage[],
@@ -28,6 +29,17 @@ describe("activityLabel", () => {
     expect(
       activityLabel({ ...base, turnActive: false, streaming: true }),
     ).toBeNull();
+  });
+
+  it("an in-flight upload outranks even verify", () => {
+    const a = activityLabel({
+      ...base,
+      turnActive: false,
+      uploadRunning: true,
+      verifyRunning: true,
+      streaming: true,
+    });
+    expect(a).toBe("📡 upload (flashing)…");
   });
 
   it("verify outranks everything, including the turnActive gate", () => {

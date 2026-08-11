@@ -166,18 +166,22 @@ scaffolded library, a fetched library and a newly created project actually
 - **AI Assistant** panel — a bottom-panel **Assistant** tab where a `claude`
   CLI session (spawned per project, scoped to the open sketch) reads/edits
   your sketch's files, runs Verify, reads the compiler errors, and iterates
-  until the build passes. Edits show up as diff cards and **auto-apply
-  immediately** — no per-edit approval step. Writes are confined to the
-  sketch directory as in-process CLI policy (not an OS sandbox); reads are
-  not confined. See [AI Assistant panel](#ai-assistant-panel) below
+  until the build passes — and, since 0.12.0, can **flash the board** (behind
+  a per-session "Allow uploads" switch), **watch and type to the serial
+  monitor**, and **search/fetch the web**. Edits show up as diff cards and
+  **auto-apply immediately** — no per-edit approval step. Writes are confined
+  to the sketch directory as in-process CLI policy (not an OS sandbox); reads
+  are not confined, and web access means what is read can leave the machine.
+  See [AI Assistant panel](#ai-assistant-panel) below
 
 ## AI Assistant panel
 
 A bottom-panel **Assistant** tab where you chat with a **Claude** agent that
 can read and edit the open sketch's files, run **Verify** through a
 bancada-provided tool, read the compiler errors, and iterate until the build
-passes. First slice of an AI-assisted-IDE direction — no upload/serial tools
-yet (roadmap).
+passes — then **flash the board**, watch the **serial monitor** for the boot
+output, and type commands to the running sketch. The full
+edit → verify → flash → watch-serial loop runs without leaving the panel.
 
 Bancada drives this the same way it drives its other engines: it spawns the
 **`claude` CLI** as a supervised child process (`--input-format stream-json
@@ -201,12 +205,37 @@ interrupts the current turn; **New session** ends the child process and
 clears the transcript.
 
 **What it can and can't do** — the embedded session's built-in tools are
-narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep` (via `--tools`, which
-genuinely removes tools from the CLI, unlike `--disallowedTools` alone),
-plus one MCP tool, `verify`, that runs the same compile path as the
-**Verify** button and never runs `-u` (upload) — it only compiles. It
-cannot run shell commands, fetch URLs, search the web, or touch
-upload/serial.
+narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
+(via `--tools`, which genuinely removes tools from the CLI, unlike
+`--disallowedTools` alone), plus four bancada MCP tools:
+
+- **`verify`** — the same compile path as the **Verify** button; compiles
+  only, never flashes.
+- **`upload`** — the same `compile -u` path as the **Upload** button,
+  gated by the **Allow uploads** switch (below). It takes **no port
+  argument**: it flashes the board selected in the UI, with the
+  profile/FQBN the session was started with — the agent cannot pick a
+  different target. It shares the build gate with your own Verify/Upload,
+  stops the monitor for the flash (like the manual flow), and does not
+  restart it — the agent's next `serial_read` does.
+- **`serial_read`** — reads monitor output the session hasn't seen yet
+  (bounded scrollback; a session never replays output from before it
+  started), auto-starting the monitor on the UI-selected port/baud when
+  the port is free. The Monitor tab stays in sync.
+- **`serial_send`** — types one line to the board through the running
+  monitor, exactly like the Monitor tab's send box.
+
+It still cannot run shell commands (`Bash` stays out of the tool set —
+capabilities are scoped by what the tools can express, not by prompt
+instructions), and it can never touch the oscilloscope's serial session.
+
+**Allow uploads (arm switch)** — flashing is the one physically-consequential
+action, so it starts **off** every session: the `upload` tool is refused with
+"ask the user" until you click **🔒 Allow uploads** in the panel footer
+(it turns **🔓 Uploads armed**). While armed, the agent flashes without
+per-flash prompts, so the autonomous fix → verify → flash → watch-boot loop
+stays unbroken; disarm at any time, and a **New session** always starts
+disarmed again.
 
 **Cost** — each completed turn's cost and cumulative turn count appear in
 the panel footer (`$0.0123 · 4 turns`), pulled straight from what the
@@ -233,7 +262,12 @@ if either drifted from what Bancada expects.
 This is **in-process policy enforced by the `claude` CLI's own permission
 engine — not an OS-level sandbox or container**. **Reads are not confined
 at all**: the agent can read anything your account can, including SSH keys
-and credential files; only writes are policed. The embedded session also
+and credential files; only writes are policed. As of 0.12.0 the session
+also has **web access** (`WebFetch`/`WebSearch`) — a deliberate egress
+trade-off worth stating plainly: combined with unconfined reads, data the
+agent reads on your machine *can leave it*. If that trade-off is wrong for
+your environment, don't chat with the Assistant on machines holding
+secrets you wouldn't paste into a browser. The embedded session also
 still loads your own Claude Code configuration (hooks, plugins, skills) —
 the flags that would suppress that also break login or disable the
 `verify` tool — so a hostile hook already present in your personal

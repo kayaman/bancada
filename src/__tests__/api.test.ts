@@ -309,19 +309,73 @@ describe("events", () => {
 });
 
 describe("agent commands", () => {
-  it("agentStart nulls omitted profile/fqbn", async () => {
+  it("agentStart nulls omitted profile/fqbn/resume/facts and defaults uploads to unarmed", async () => {
     await api.agentStart("/s");
     expect(called()).toEqual([
       "agent_start",
-      { sketchDir: "/s", profile: null, fqbn: null },
+      {
+        sketchDir: "/s",
+        profile: null,
+        fqbn: null,
+        uploadsArmed: false,
+        resumeSessionId: null,
+        contextFacts: null,
+      },
     ]);
   });
 
-  it("agentStart forwards a given profile and fqbn", async () => {
-    await api.agentStart("/s", "esp32s3", "esp32:esp32:esp32s3");
+  it("agentStart forwards a given profile, fqbn and arm state", async () => {
+    await api.agentStart("/s", "esp32s3", "esp32:esp32:esp32s3", true);
     expect(called()).toEqual([
       "agent_start",
-      { sketchDir: "/s", profile: "esp32s3", fqbn: "esp32:esp32:esp32s3" },
+      {
+        sketchDir: "/s",
+        profile: "esp32s3",
+        fqbn: "esp32:esp32:esp32s3",
+        uploadsArmed: true,
+        resumeSessionId: null,
+        contextFacts: null,
+      },
+    ]);
+  });
+
+  it("agentStart forwards a resume session id and context facts", async () => {
+    await api.agentStart(
+      "/s",
+      "esp32s3",
+      "esp32:esp32:esp32s3",
+      true,
+      "abc-123",
+      "Recent requests:\n- fix wifi",
+    );
+    expect(called()).toEqual([
+      "agent_start",
+      {
+        sketchDir: "/s",
+        profile: "esp32s3",
+        fqbn: "esp32:esp32:esp32s3",
+        uploadsArmed: true,
+        resumeSessionId: "abc-123",
+        contextFacts: "Recent requests:\n- fix wifi",
+      },
+    ]);
+  });
+
+  it("agentSetUploadsArmed forwards the switch", async () => {
+    await api.agentSetUploadsArmed(true);
+    expect(called()).toEqual(["agent_set_uploads_armed", { armed: true }]);
+  });
+
+  it("setSelectedTarget forwards port and baud, and nulls a cleared port", async () => {
+    await api.setSelectedTarget("/dev/ttyACM0", 115200);
+    expect(called()).toEqual([
+      "set_selected_target",
+      { port: "/dev/ttyACM0", baudrate: 115200 },
+    ]);
+    await api.setSelectedTarget(null, 9600);
+    expect(called()).toEqual([
+      "set_selected_target",
+      { port: null, baudrate: 9600 },
     ]);
   });
 
@@ -352,6 +406,19 @@ describe("agent commands", () => {
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("agent://event");
     await api.onAgentClosed(() => {});
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("agent://closed");
+  });
+});
+
+describe("usage dashboard", () => {
+  it("usageOverview takes no arguments", async () => {
+    await api.usageOverview();
+    expect(called()[0]).toBe("usage_overview");
+    expect(called()[1]).toBeUndefined();
+  });
+
+  it("chatListUsage passes sketchDir", async () => {
+    await api.chatListUsage("/s");
+    expect(called()).toEqual(["chat_list_usage", { sketchDir: "/s" }]);
   });
 });
 

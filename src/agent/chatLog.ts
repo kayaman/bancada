@@ -20,6 +20,9 @@
 import { AgentStore } from "./agentStore";
 import type { AgentEvent } from "./types";
 
+/** The injected sink a `ChatRecorder` forwards serialized lines to. */
+type SendFn = (file: string, line: string) => Promise<void>;
+
 /** One recorded store operation — exactly one NDJSON line. */
 export type ChatOp =
   | { op: "meta"; sketchDir: string; startedAt: string }
@@ -44,13 +47,14 @@ export function chatFileName(now: Date): string {
 }
 
 /**
- * Replay a chat's NDJSON lines into a fresh `AgentStore`, which the panel
- * renders read-only with the same MessageView components as a live chat.
+ * Apply a chat's NDJSON lines to a caller-provided `AgentStore` — the same
+ * op interpreter `replayChat` uses, factored out so "Continue this chat"
+ * can replay a saved history straight into the LIVE singleton store (via
+ * `prepareContinuation()`) instead of building a throwaway read-only one.
  * Corrupt JSON, non-object lines, and unknown ops are skipped — never
  * thrown on (`push` itself already ignores unknown event types).
  */
-export function replayChat(lines: string[]): AgentStore {
-  const store = new AgentStore();
+export function applyChatOps(store: AgentStore, lines: string[]): void {
   for (const line of lines) {
     let parsed: unknown;
     try {
@@ -81,6 +85,16 @@ export function replayChat(lines: string[]): AgentStore {
         break;
     }
   }
+}
+
+/**
+ * Replay a chat's NDJSON lines into a fresh `AgentStore`, which the panel
+ * renders read-only with the same MessageView components as a live chat.
+ * Thin wrapper over `applyChatOps` — see it for the op interpreter itself.
+ */
+export function replayChat(lines: string[]): AgentStore {
+  const store = new AgentStore();
+  applyChatOps(store, lines);
   return store;
 }
 
@@ -92,7 +106,7 @@ export function replayChat(lines: string[]): AgentStore {
  */
 export class ChatRecorder {
   private fileName?: string;
-  private send?: (file: string, line: string) => Promise<void>;
+  private send?: SendFn;
   /** The meta line, held back until the first op so empty sessions never write. */
   private pendingMeta?: ChatOp;
 
@@ -108,11 +122,25 @@ export class ChatRecorder {
   start(
     fileName: string,
     meta: { sketchDir: string; startedAt: string },
-    send: (file: string, line: string) => Promise<void>,
+    send: SendFn,
   ): void {
     this.fileName = fileName;
     this.send = send;
     this.pendingMeta = { op: "meta", ...meta };
+  }
+
+  /**
+   * Arm the recorder to append to an EXISTING chat file — "Continue this
+   * chat". Identical to `start` except `pendingMeta` is left unset: a
+   * second meta line partway through an ndjson would corrupt core's
+   * `title_from_head` (core/src/chatlog.rs), which assumes exactly one meta
+   * line at the top. The continued session's ops simply append to the same
+   * file as more lines.
+   */
+  resume(fileName: string, send: SendFn): void {
+    this.fileName = fileName;
+    this.send = send;
+    this.pendingMeta = undefined;
   }
 
   /**

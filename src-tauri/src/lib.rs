@@ -35,10 +35,13 @@
 //! session, driven over stdio stream-json, with four detached threads —
 //! stdin writer (fed by an mpsc channel, so the `agent` mutex is never held
 //! across a pipe write), stdout reader, stderr drain, and a loopback
-//! `tiny_http` MCP listener serving the `verify` tool. The listener gets
-//! owned clones at spawn time and never locks `agent`; shutdown breaks its
-//! blocking `recv()` with `Server::unblock()`, which no atomic flag could
-//! do. The child never restarts on its own (same philosophy as the MQTT
+//! `tiny_http` MCP listener serving the `verify`, `upload`, `serial_read`
+//! and `serial_send` tools. The listener gets owned clones at spawn time and
+//! never locks `agent` (it MAY lock the `serial` owner slot — it is never
+//! joined under it); shutdown breaks its blocking `recv()` with
+//! `Server::unblock()`, which no atomic flag could do (the unblock is
+//! sticky: a listener mid-handler finishes that handler, then its next
+//! `recv()` pops the marker). The child never restarts on its own (same philosophy as the MQTT
 //! thread) — the panel shows "Session ended"; the stdout reader tears its
 //! own session down at EOF, and the frontend's `agent_stop(pid)` on
 //! `agent://closed` is then a belt-and-braces no-op. `pid` guards a stale
@@ -99,7 +102,16 @@
 //! What is **not** a boundary: `--disallowedTools` (a permission-layer
 //! nudge — a session with it set still lists 25 built-in tools). What is:
 //! `--tools`, which genuinely narrows the built-in set to
-//! `Read,Edit,Write,Glob,Grep` while leaving the MCP `verify` tool intact.
+//! `Read,Edit,Write,Glob,Grep,WebFetch,WebSearch` while leaving the MCP
+//! tools intact. The web pair is a 0.12.0 addition and a deliberate
+//! *egress* trade-off (reads were never confined; web access lets what is
+//! read leave the machine) — recorded in the README's safety section.
+//! Hardware stays structurally scoped rather than policy-scoped: the MCP
+//! `upload` tool takes no port argument (it flashes the UI-selected port
+//! with the session-frozen profile/fqbn, through the same build gate as the
+//! Upload button) and is refused unless the panel's "Allow uploads" switch
+//! is on; `serial_read`/`serial_send` drive the app's own monitor under the
+//! same single-owner discipline, and none of them can touch the scope.
 //! Residual risk: a *pre-existing* hostile hook in the user's own config
 //! still runs — Bancada stops the agent from installing one, it cannot stop
 //! one that is already there. Reads are not confined at all. And none of
@@ -107,13 +119,13 @@
 //! drives (see the spec's risk R6).
 //!
 //! Build gate: `compile_sketch`, `upload_sketch` and the agent's MCP
-//! `verify` tool all drive the same arduino-cli build cache, so they share
-//! one `build_gate: Mutex<()>` in `AppState`. It is taken with `try_lock`,
-//! never blocking — a contended build fails fast with "build already in
-//! progress" instead of queueing behind a multi-minute platform build.
-//! Before the gate, the only mutual exclusion was the frontend's `busy`
-//! flag, which agent-initiated builds bypass entirely. Note the gate covers
-//! exactly those three *compile/upload* entry points — `install_core`,
+//! `verify` + `upload` tools all drive the same arduino-cli build cache, so
+//! they share one `build_gate: Mutex<()>` in `AppState`. It is taken with
+//! `try_lock`, never blocking — a contended build fails fast with "build
+//! already in progress" instead of queueing behind a multi-minute platform
+//! build. Before the gate, the only mutual exclusion was the frontend's
+//! `busy` flag, which agent-initiated builds bypass entirely. Note the gate
+//! covers exactly those *compile/upload* entry points — `install_core`,
 //! `uninstall_core`, `install_library` and the other arduino-cli commands
 //! run outside it, so it is not "every arduino-cli invocation in the
 //! process". Those neither read nor write the sketch build cache the gate
@@ -131,7 +143,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -1710,12 +1722,33 @@ fn chat_append(
 ) -> Result<(), String> {
     let root = chats_root(&app)?;
     let key = bancada_core::chatlog::sketch_key(&sketch_dir);
+    // Load (or first-time seed) the usage record BEFORE the append, so a
+    // backfill can never count the file/line this call is about to add and
+    // then count it again below.
+    let usage = load_usage(&app)
+        .map_err(|e| eprintln!("usage record not loaded: {e}"))
+        .ok();
     let created =
         bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
     // A new chat is the moment to bound the directory. Prune is silent and
-    // best-effort, so a failed cleanup can never cost the append.
+    // best-effort, so a failed cleanup can never cost the append. The usage
+    // record is why pruning is safe: totals were banked at append time.
     if created {
         bancada_core::chatlog::prune(&root, &key, 50);
+    }
+    // Usage bookkeeping must not turn a good append into an error
+    // (note_board_fqbn precedent) — errors are logged and swallowed.
+    if let Some((path, mut store)) = usage {
+        let mut changed = false;
+        if created {
+            changed |= store.note_new_chat(&key, &sketch_dir);
+        }
+        changed |= store.record_line(&key, &sketch_dir, &file, &line);
+        if changed {
+            if let Err(e) = store.save(&path) {
+                eprintln!("usage record not saved: {e}");
+            }
+        }
     }
     Ok(())
 }
@@ -1764,6 +1797,50 @@ fn chat_delete(app: AppHandle, sketch_dir: String, file: String) -> Result<(), S
         &file,
     )
     .map_err(err_str)
+}
+
+// ---------- assistant usage record ----------
+
+fn usage_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("usage.json"))
+        .map_err(err_str)
+}
+
+/// Load the usage record, seeding it from surviving chat files the first
+/// time. The seed is saved immediately so backfill can never run twice —
+/// running it again after new appends would double-count.
+fn load_usage(app: &AppHandle) -> Result<(PathBuf, bancada_core::usage::UsageStore), String> {
+    let path = usage_path(app)?;
+    if !path.exists() {
+        let store = bancada_core::usage::backfill(&chats_root(app)?);
+        store.save(&path).map_err(err_str)?;
+        return Ok((path, store));
+    }
+    bancada_core::usage::UsageStore::load(&path)
+        .map(|s| (path, s))
+        .map_err(err_str)
+}
+
+#[tauri::command]
+fn usage_overview(
+    app: AppHandle,
+) -> Result<Vec<bancada_core::usage::ProjectUsage>, String> {
+    let (_path, store) = load_usage(&app)?;
+    Ok(store.overview())
+}
+
+#[tauri::command]
+fn chat_list_usage(
+    app: AppHandle,
+    sketch_dir: String,
+) -> Result<Vec<bancada_core::chatlog::SessionEntry>, String> {
+    let root = chats_root(&app)?;
+    Ok(bancada_core::chatlog::list_chats_with_usage(
+        &root,
+        &bancada_core::chatlog::sketch_key(&sketch_dir),
+    ))
 }
 
 // ---------- board utilities ----------
@@ -2244,8 +2321,15 @@ struct AgentSession {
     /// on holding the build gate and emitting `verify_done` through the live
     /// `AppHandle` into whatever session the panel was showing by then. This
     /// flag is what `run_verify` checks before taking the gate and before
-    /// every emit (C1).
+    /// every emit (C1). The hardware tools (`upload`, `serial_read`,
+    /// `serial_send`) check the same flag.
     verify_cancel: Arc<AtomicBool>,
+    /// The panel's "Allow uploads" switch, shared with the listener's
+    /// `McpToolCtx` the same way `verify_cancel` is: `agent_set_uploads_armed`
+    /// flips it here; the `upload` handler reads it without ever locking
+    /// `state.agent`. Off at session start unless `agent_start` says
+    /// otherwise (the frontend carries the pre-session toggle state).
+    uploads_armed: Arc<AtomicBool>,
 }
 
 /// Lock the agent slot, recovering from a poisoned mutex.
@@ -2278,23 +2362,46 @@ const VERIFY_MAX_BYTES: usize = 50_000;
 /// must never lock `state.agent`, or a `verify` arriving while a command
 /// holds that mutex would deadlock the compile against the UI. The
 /// trade-off is that a session keeps the profile/fqbn it was started with
-/// even if the user switches boards mid-session.
-struct McpVerifyCtx {
+/// even if the user switches boards mid-session — including for `upload`,
+/// which must flash what this session's `verify` built. Only the *port* is
+/// read live (`selected_target`), because a port can genuinely change under
+/// a session (replug, bridge vs native USB) while the build target must not.
+///
+/// The listener may lock `serial` (it is never joined under it — the
+/// discipline that bans reader threads from that mutex does not apply here)
+/// but still never locks `state.agent`.
+struct McpToolCtx {
     token: String,
     cli: ArduinoCli,
     sketch_dir: String,
     profile: Option<String>,
     fqbn: Option<String>,
     build_gate: Arc<Mutex<()>>,
+    /// The serial-owner slot, for `upload` (evict the monitor) and
+    /// `serial_read`/`serial_send`. Leaf lock — see `AppState::serial`.
+    serial: Arc<Mutex<Option<SerialOwner>>>,
+    /// The monitor scrollback `serial_read` reads from.
+    serial_ring: Arc<Mutex<SerialRing>>,
+    /// Live UI port/baud selection, for `upload` and the monitor auto-start.
+    selected_target: Arc<Mutex<Option<SelectedTarget>>>,
+    /// The panel's "Allow uploads" switch. Shared with
+    /// `AgentSession::uploads_armed` the same way `cancelled` is shared —
+    /// the listener must never lock `state.agent` to read it.
+    uploads_armed: Arc<AtomicBool>,
+    /// This session's `serial_read` cursor into the ring. Initialized to
+    /// the ring's head at `agent_start` so a new session never replays
+    /// another session's backlog.
+    serial_cursor: AtomicU64,
     /// The session's child pid, stamped onto every synthetic event this
     /// listener emits so the frontend can discard one that outlived its
     /// session (C1) — the same identity guard `agent://closed` already had.
     session_pid: u32,
-    /// Shared with `AgentSession::verify_cancel`; see its doc.
+    /// Shared with `AgentSession::verify_cancel`; see its doc. Checked by
+    /// every tool handler, not just `verify`.
     cancelled: Arc<AtomicBool>,
 }
 
-impl McpVerifyCtx {
+impl McpToolCtx {
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
@@ -2598,12 +2705,13 @@ fn handle_agent_guard_argv() -> bool {
 /// listener testable without standing up a Tauri app.
 ///
 /// Returns when `unblock()` is called on the server (see [`AgentSession`]).
-fn mcp_listener_loop(
-    server: Arc<tiny_http::Server>,
-    ctx: McpVerifyCtx,
-    emit: impl Fn(&str, serde_json::Value),
-) {
-    let tools = vec![mcp::verify_tool_def()];
+fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<EmitFn>) {
+    let tools = vec![
+        mcp::verify_tool_def(),
+        mcp::upload_tool_def(),
+        mcp::serial_read_tool_def(),
+        mcp::serial_send_tool_def(),
+    ];
 
     for mut request in server.incoming_requests() {
         // The CLI's MCP client opens a `GET /mcp` server->client SSE stream
@@ -2667,13 +2775,17 @@ fn mcp_listener_loop(
             McpReply::Json(json) => {
                 let _ = request.respond(json_response(json));
             }
-            McpReply::CallTool { id, name, .. } => {
-                let (text, is_error) = if name == "verify" {
-                    run_verify(&ctx, &emit)
-                } else {
+            McpReply::CallTool { id, name, args } => {
+                let (text, is_error) = match name.as_str() {
+                    "verify" => run_verify(&ctx, &*emit),
+                    "upload" => run_upload(&ctx, &*emit),
+                    // serial_read gets the Arc itself: an auto-started
+                    // monitor's reader threads must own an emitter clone.
+                    "serial_read" => run_serial_read(&ctx, &emit, &args),
+                    "serial_send" => run_serial_send(&ctx, &args),
                     // Unreachable via `handle_request`, which rejects tools
                     // outside `tools` — belt and braces.
-                    (format!("unknown tool: {name}"), true)
+                    _ => (format!("unknown tool: {name}"), true),
                 };
                 let _ = request.respond(json_response(mcp::tool_result_json(&id, &text, is_error)));
             }
@@ -2708,7 +2820,7 @@ const VERIFY_CANCELLED: &str = "the agent session was stopped before this build 
 /// it one means changing a signature `compile_sketch`/`upload_sketch` share.
 /// The window that used to be unbounded (a whole cold platform build, with
 /// leaking events at the end) is now "one in-flight build, silent".
-fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (String, bool) {
+fn run_verify(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
     // Stamp every synthetic event with the session it belongs to, and drop
     // it entirely once that session is gone.
     let emit_agent = |mut payload: serde_json::Value| {
@@ -2787,6 +2899,224 @@ fn run_verify(ctx: &McpVerifyCtx, emit: &impl Fn(&str, serde_json::Value)) -> (S
     }
 }
 
+/// What the hardware tools report when their session was stopped first.
+const TOOL_CANCELLED: &str = "the agent session was stopped before this tool could run";
+/// `upload` refusal when the panel's switch is off. The wording is the
+/// agent-facing contract: it must ask the user, not retry.
+const UPLOAD_NOT_ARMED: &str = "uploads are not armed — ask the user to switch on \
+     'Allow uploads' in the Assistant panel, then call this tool again";
+/// `upload`/`serial_read` refusal when the UI has no port selected.
+const NO_SELECTED_TARGET: &str =
+    "no serial port is selected in the UI — ask the user to select the board's port";
+/// Any tool's refusal while the oscilloscope owns the port: the scope is a
+/// user-driven measurement session the agent must never evict.
+const SCOPE_OWNS_PORT: &str =
+    "the oscilloscope owns the serial port — ask the user to stop the scope first";
+/// Byte cap on one `serial_read` result (the ring's cursor resumes where a
+/// cut left off, so nothing is lost — the agent just calls again).
+const SERIAL_READ_MAX_BYTES: usize = 16_000;
+
+/// The `upload` tool: the same `compile -u` path as the toolbar's Upload
+/// button, against the UI-selected port, gated by the "Allow uploads"
+/// switch. Evicts a running monitor exactly like the manual flow (the
+/// `serial://closed` EOF event keeps the frontend's state honest) and does
+/// NOT restart it — the agent's next `serial_read` auto-start does that.
+///
+/// Lock discipline: `serial` is taken only around the eviction and dropped
+/// before the flash; holding it across a minutes-long upload would freeze
+/// every sync serial command in the app (see `AppState::serial`).
+fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
+    let emit_agent = |mut payload: serde_json::Value| {
+        if ctx.is_cancelled() {
+            return;
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("pid".to_string(), serde_json::json!(ctx.session_pid));
+        }
+        emit("agent://event", payload);
+    };
+
+    if ctx.is_cancelled() {
+        return (TOOL_CANCELLED.to_string(), true);
+    }
+    if !ctx.uploads_armed.load(Ordering::SeqCst) {
+        return (UPLOAD_NOT_ARMED.to_string(), true);
+    }
+    let target = ctx
+        .selected_target
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(target) = target else {
+        return (NO_SELECTED_TARGET.to_string(), true);
+    };
+
+    // Same gate as compile_sketch/upload_sketch/run_verify (R5).
+    let _gate = match try_build_gate(&ctx.build_gate) {
+        Ok(guard) => guard,
+        Err(busy) => return (busy, true),
+    };
+    if ctx.is_cancelled() {
+        return (TOOL_CANCELLED.to_string(), true);
+    }
+
+    {
+        let mut guard = ctx.serial.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(SerialOwner::Scope(_)) => return (SCOPE_OWNS_PORT.to_string(), true),
+            Some(SerialOwner::Monitor(_)) => evict_owner(&mut guard),
+            None => {}
+        }
+    } // dropped before the flash — `serial` never spans a long operation
+
+    emit_agent(serde_json::json!({ "type": "upload_started", "port": target.port }));
+
+    let mut collected: Vec<OutputLine> = Vec::new();
+    let run = ctx.cli.upload(
+        &ctx.sketch_dir,
+        ctx.profile.as_deref(),
+        ctx.fqbn.as_deref(),
+        &target.port,
+        |line| {
+            if !ctx.is_cancelled() {
+                if let Ok(value) = serde_json::to_value(&line) {
+                    emit("build://line", value);
+                }
+            }
+            collected.push(line);
+        },
+    );
+
+    match run {
+        Ok(result) => {
+            emit_agent(serde_json::json!({
+                "type": "upload_done", "success": result.success
+            }));
+            let summary =
+                agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
+            let text = format!(
+                "success: {}\nexit_code: {}\n\n{summary}",
+                result.success, result.exit_code
+            );
+            // Same contract as verify: `isError` means "could not run",
+            // never "the flash failed" — a failed flash is data to iterate on.
+            (text, false)
+        }
+        Err(e) => {
+            emit_agent(serde_json::json!({ "type": "upload_done", "success": false }));
+            (format!("upload could not run: {e}"), true)
+        }
+    }
+}
+
+/// The `serial_read` tool: hand the agent every monitor line it has not
+/// seen, auto-starting the monitor (UI-selected port/baud) when the port is
+/// free. The wait loop polls only the ring — never while holding `serial` —
+/// and re-checks the cancel flag every tick, so a stopped session lets the
+/// listener drain within one tick (the tiny_http unblock is sticky; see the
+/// module doc).
+fn run_serial_read(ctx: &McpToolCtx, emit: &Arc<EmitFn>, args: &serde_json::Value) -> (String, bool) {
+    let wait_s = args
+        .get("wait_s")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(10);
+
+    if ctx.is_cancelled() {
+        return (TOOL_CANCELLED.to_string(), true);
+    }
+
+    {
+        let mut guard = ctx.serial.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(SerialOwner::Scope(_)) => return (SCOPE_OWNS_PORT.to_string(), true),
+            Some(SerialOwner::Monitor(_)) => {}
+            None => {
+                let target = ctx
+                    .selected_target
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let Some(target) = target else {
+                    return (NO_SELECTED_TARGET.to_string(), true);
+                };
+                match spawn_monitor(
+                    &ctx.cli,
+                    &target.port,
+                    target.baud,
+                    emit.clone(),
+                    ctx.serial_ring.clone(),
+                ) {
+                    Ok(child) => {
+                        *guard = Some(SerialOwner::Monitor(child));
+                        // Tell the frontend its monitor state changed, so the
+                        // Monitor tab lights up and the auto-start effect
+                        // doesn't race a second start.
+                        emit(
+                            "serial://started",
+                            serde_json::json!({ "port": target.port, "baud": target.baud }),
+                        );
+                    }
+                    Err(e) => {
+                        return (format!("could not start the serial monitor: {e}"), true)
+                    }
+                }
+            }
+        }
+    } // `serial` dropped before the wait loop below
+
+    let deadline = Instant::now() + Duration::from_secs(wait_s);
+    let cursor = ctx.serial_cursor.load(Ordering::SeqCst);
+    let result = loop {
+        let res = ctx
+            .serial_ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .read_since(cursor, SERIAL_READ_MAX_BYTES);
+        if !res.text.is_empty() || ctx.is_cancelled() || Instant::now() >= deadline {
+            break res;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    ctx.serial_cursor.store(result.new_cursor, Ordering::SeqCst);
+
+    let mut text = String::new();
+    if result.dropped > 0 {
+        text.push_str(&format!("[{} lines dropped]\n", result.dropped));
+    }
+    if result.text.is_empty() {
+        text.push_str("(no new output)");
+    } else {
+        text.push_str(&result.text);
+    }
+    (text, false)
+}
+
+/// The `serial_send` tool: one line to the monitor child's stdin, newline
+/// appended — the exact `monitor_send` path the Monitor tab's send box uses.
+fn run_serial_send(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {
+    let Some(data) = args.get("data").and_then(|v| v.as_str()) else {
+        return (
+            "serial_send requires a string 'data' argument".to_string(),
+            true,
+        );
+    };
+    let mut guard = ctx.serial.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(SerialOwner::Monitor(child)) = guard.as_mut() else {
+        return (
+            "serial monitor is not running — call serial_read first to start it".to_string(),
+            true,
+        );
+    };
+    let Some(stdin) = child.stdin.as_mut() else {
+        return ("monitor stdin unavailable".to_string(), true);
+    };
+    if let Err(e) = writeln!(stdin, "{data}").and_then(|()| stdin.flush()) {
+        return (format!("could not write to the monitor: {e}"), true);
+    }
+    (format!("sent: {data}"), false)
+}
+
 fn json_response(json: String) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static header is valid");
@@ -2808,10 +3138,55 @@ fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&st
     }
     out.push_str(
         " To compile, use the mcp__bancada__verify tool — never shell out to \
-         arduino-cli, and never try to upload to the board. After every edit, \
-         run mcp__bancada__verify and iterate until the build passes.",
+         arduino-cli. After every edit, run mcp__bancada__verify and iterate \
+         until the build passes. To flash the board, use mcp__bancada__upload \
+         (it targets the board selected in the UI and requires the user's \
+         'Allow uploads' switch — if it reports uploads are not armed, ask \
+         the user to enable the switch instead of retrying). After a \
+         successful upload, call mcp__bancada__serial_read to restart the \
+         serial monitor and watch the boot output; mcp__bancada__serial_read \
+         also reads any new monitor output, and mcp__bancada__serial_send \
+         types a line to the board.",
     );
     out
+}
+
+/// Is `id` shaped like something `claude --resume` could plausibly accept,
+/// and never anything that could be mistaken for a flag or shell
+/// metacharacter once it lands in argv? Every character must be an ASCII hex
+/// digit or `-`, and the whole string must be 8–64 characters — wide enough
+/// to admit a bare UUID (with or without hyphens) and the CLI's other
+/// observed session-id shapes, while still rejecting a leading `--resume`
+/// (contains letters outside a-f and starts with `-` twice, but more
+/// importantly contains `r`/`s`/`u`/`m`/`e`), embedded whitespace, or
+/// anything non-ASCII. Also rejects anything starting with `-` (a bare
+/// `-x`-shaped value could still be mistaken for a flag by a shell even
+/// though the hex/length checks alone would admit it) and anything with no
+/// hex digit at all (an all-hyphen string like `"--------"` satisfies the
+/// character-class and length checks but is not a session id shape).
+fn valid_session_id(id: &str) -> bool {
+    let len = id.len();
+    (8..=64).contains(&len)
+        && !id.starts_with('-')
+        && id.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+        && id.chars().any(|c| c.is_ascii_hexdigit())
+}
+
+/// Clamp `facts` to at most 4096 bytes, cutting on the nearest earlier char
+/// boundary so the result is always valid UTF-8 (a hard byte-index truncate
+/// can split a multi-byte character). Distilled chat facts are free-form
+/// text the agent wrote, so nothing about their content can be assumed to
+/// align on a byte boundary at exactly the cap.
+fn clamp_facts(facts: &str) -> &str {
+    const MAX_BYTES: usize = 4096;
+    if facts.len() <= MAX_BYTES {
+        return facts;
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !facts.is_char_boundary(end) {
+        end -= 1;
+    }
+    &facts[..end]
 }
 
 /// Tear a session down: cancel any in-flight verify, close the writer
@@ -3022,6 +3397,9 @@ fn agent_start(
     sketch_dir: String,
     profile: Option<String>,
     fqbn: Option<String>,
+    uploads_armed: bool,
+    resume_session_id: Option<String>,
+    context_facts: Option<String>,
 ) -> Result<u32, String> {
     let mut guard = lock_agent(&state);
     if let Some(existing) = guard.as_ref() {
@@ -3029,6 +3407,17 @@ fn agent_start(
             "an agent session is already running for {}",
             existing.sketch_dir
         ));
+    }
+
+    // Reject a malformed id before anything is bound or spawned: this is the
+    // one piece of "continue an AI session" plumbing that reaches argv
+    // (agent::agent_args puts it straight after --resume), so a value that
+    // could ever be mistaken for a flag or shell metacharacter must not get
+    // this far. See `valid_session_id`.
+    if let Some(id) = resume_session_id.as_deref() {
+        if !valid_session_id(id) {
+            return Err(format!("{id:?} is not a valid session id"));
+        }
     }
 
     // Before anything is bound or spawned: if the confinement hook is
@@ -3067,10 +3456,18 @@ fn agent_start(
         }
     };
 
+    let mut prompt_extra = system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref());
+    if let Some(facts) = context_facts.as_deref() {
+        let facts = clamp_facts(facts);
+        if !facts.is_empty() {
+            prompt_extra = format!("{prompt_extra}\n\n{facts}");
+        }
+    }
     let cfg = AgentCfg {
         mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
         settings_path: settings_path.to_string_lossy().into_owned(),
-        system_prompt_extra: system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref()),
+        system_prompt_extra: prompt_extra,
+        resume_session_id,
     };
     let cleanup = |server: &Arc<tiny_http::Server>| {
         server.unblock(); // never leave the listener thread parked
@@ -3120,22 +3517,33 @@ fn agent_start(
 
     // ---------- thread 1 of 4: MCP listener (owned clones, never locks agent)
     let verify_cancel = Arc::new(AtomicBool::new(false));
-    let ctx = McpVerifyCtx {
+    let armed_flag = Arc::new(AtomicBool::new(uploads_armed));
+    let ring_head = state
+        .serial_ring
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .next_seq();
+    let ctx = McpToolCtx {
         token,
         cli: state.cli.clone(),
         sketch_dir: sketch_dir.clone(),
         profile,
         fqbn,
         build_gate: state.build_gate.clone(),
+        serial: state.serial.clone(),
+        serial_ring: state.serial_ring.clone(),
+        selected_target: state.selected_target.clone(),
+        uploads_armed: armed_flag.clone(),
+        // Start at the ring's head: this session reads only output that
+        // arrives after it started, never another session's backlog.
+        serial_cursor: AtomicU64::new(ring_head),
         session_pid: child_pid,
         cancelled: verify_cancel.clone(),
     };
     let listener_server = server.clone();
-    let listener_app = app.clone();
+    let listener_emit = app_emitter(app.clone());
     std::thread::spawn(move || {
-        mcp_listener_loop(listener_server, ctx, move |event, payload| {
-            let _ = listener_app.emit(event, payload);
-        });
+        mcp_listener_loop(listener_server, ctx, listener_emit);
     });
 
     // ---------- thread 2 of 4: stdin writer
@@ -3215,8 +3623,21 @@ fn agent_start(
         mcp_config_path,
         settings_path,
         verify_cancel,
+        uploads_armed: armed_flag,
     });
     Ok(child_pid)
+}
+
+/// Flip the live session's "Allow uploads" switch. A call with no session
+/// running is a no-op: the frontend owns the pre-session toggle state and
+/// passes it to `agent_start`.
+#[tauri::command]
+fn agent_set_uploads_armed(state: State<'_, AppState>, armed: bool) -> Result<(), String> {
+    let guard = lock_agent(&state);
+    if let Some(session) = guard.as_ref() {
+        session.uploads_armed.store(armed, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 /// Queue a user message for the child's stdin.
@@ -3364,6 +3785,8 @@ pub fn run() {
             chat_load,
             chat_delete,
             chat_totals,
+            usage_overview,
+            chat_list_usage,
             list_sketch_files,
             read_sketch_file,
             write_sketch_file,
@@ -3441,6 +3864,7 @@ pub fn run() {
             agent_start,
             agent_send,
             agent_interrupt,
+            agent_set_uploads_armed,
             agent_stop
         ])
         .build(tauri::generate_context!())
@@ -3550,29 +3974,46 @@ mod tests {
         gate: Arc<Mutex<()>>,
         cancelled: Arc<AtomicBool>,
     ) -> TestListener {
+        start_listener_parts(cli, sketch_dir, gate, cancelled, HwParts::default())
+    }
+
+    fn start_listener_parts(
+        cli: ArduinoCli,
+        sketch_dir: &str,
+        gate: Arc<Mutex<()>>,
+        cancelled: Arc<AtomicBool>,
+        hw: HwParts,
+    ) -> TestListener {
         let (server, port) = bind_mcp_server().expect("bind loopback");
         let token = random_token().expect("entropy");
         let events: Events = Arc::new(Mutex::new(Vec::new()));
 
-        let ctx = McpVerifyCtx {
+        let cursor_start = hw.ring.lock().unwrap().next_seq();
+        let ctx = McpToolCtx {
             token: token.clone(),
             cli,
             sketch_dir: sketch_dir.to_string(),
             profile: None,
             fqbn: None,
             build_gate: gate,
+            serial: hw.serial,
+            serial_ring: hw.ring,
+            selected_target: hw.target,
+            uploads_armed: hw.uploads_armed,
+            serial_cursor: AtomicU64::new(cursor_start),
             session_pid: TEST_PID,
             cancelled,
         };
         let thread_server = server.clone();
         let thread_events = events.clone();
+        let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
+            thread_events
+                .lock()
+                .unwrap()
+                .push((name.to_string(), payload));
+        });
         let join = std::thread::spawn(move || {
-            mcp_listener_loop(thread_server, ctx, move |name, payload| {
-                thread_events
-                    .lock()
-                    .unwrap()
-                    .push((name.to_string(), payload));
-            });
+            mcp_listener_loop(thread_server, ctx, emit);
         });
 
         TestListener {
@@ -3674,6 +4115,313 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let state = bancada_core::git::repo_state(&dir).unwrap();
         assert!(matches!(state, bancada_core::git::RepoState::NoGit), "got {state:?}");
+    }
+
+    /// The hardware-facing parts of a listener's context, injectable per
+    /// test. `Default` = no serial owner, empty ring, no target, unarmed.
+    struct HwParts {
+        serial: Arc<Mutex<Option<SerialOwner>>>,
+        ring: Arc<Mutex<SerialRing>>,
+        target: Arc<Mutex<Option<SelectedTarget>>>,
+        uploads_armed: Arc<AtomicBool>,
+    }
+
+    impl Default for HwParts {
+        fn default() -> Self {
+            HwParts {
+                serial: Arc::new(Mutex::new(None)),
+                ring: Arc::new(Mutex::new(SerialRing::default())),
+                target: Arc::new(Mutex::new(None)),
+                uploads_armed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl HwParts {
+        fn armed_with_target(port: &str) -> Self {
+            let hw = HwParts::default();
+            hw.uploads_armed.store(true, Ordering::SeqCst);
+            *hw.target.lock().unwrap() = Some(SelectedTarget {
+                port: port.to_string(),
+                baud: 115200,
+            });
+            hw
+        }
+    }
+
+    fn start_listener_hw(
+        cli: ArduinoCli,
+        sketch_dir: &str,
+        gate: Arc<Mutex<()>>,
+        cancelled: Arc<AtomicBool>,
+        hw: HwParts,
+    ) -> TestListener {
+        start_listener_parts(cli, sketch_dir, gate, cancelled, hw)
+    }
+
+    // ---------- hardware tools: upload ----------
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_list_advertises_the_hardware_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+        let (_, _, body) = post(&l, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let names: Vec<&str> = value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["verify", "upload", "serial_read", "serial_send"]);
+    }
+
+    #[cfg(unix)]
+    fn call_tool(l: &TestListener, name: &str, args: serde_json::Value) -> (bool, String) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        })
+        .to_string();
+        let (status, _, reply) = post(l, &body);
+        assert_eq!(status, 200);
+        let value: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let is_error = value["result"]["isError"].as_bool().unwrap_or(false);
+        let text = value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        (is_error, text)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unarmed_upload_is_refused_with_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hw = HwParts::default(); // unarmed
+        *hw.target.lock().unwrap() = Some(SelectedTarget {
+            port: "/dev/ttyTEST0".into(),
+            baud: 115200,
+        });
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/nowhere",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            hw,
+        );
+        let (is_error, text) = call_tool(&l, "upload", serde_json::json!({}));
+        assert!(is_error);
+        assert!(text.contains("Allow uploads"), "{text}");
+        // Refused before anything ran: no synthetic events, no build lines.
+        assert!(l.event_types().is_empty());
+        assert!(l.build_lines().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_armed_upload_without_a_target_asks_for_a_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let hw = HwParts::default();
+        hw.uploads_armed.store(true, Ordering::SeqCst);
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/nowhere",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            hw,
+        );
+        let (is_error, text) = call_tool(&l, "upload", serde_json::json!({}));
+        assert!(is_error);
+        assert!(text.contains("no serial port is selected"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_armed_upload_runs_the_flash_and_reports_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener_hw(
+            stub_cli(&dir, "echo flashing; exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            HwParts::armed_with_target("/dev/ttyTEST0"),
+        );
+        let (is_error, text) = call_tool(&l, "upload", serde_json::json!({}));
+        assert!(!is_error, "{text}");
+        assert!(text.starts_with("success: true\nexit_code: 0"), "{text}");
+        assert_eq!(l.event_types(), vec!["upload_started", "upload_done"]);
+        // Synthetic events carry the session pid, same as verify's. Scoped:
+        // build_lines() locks the same events mutex.
+        {
+            let events = l.events.lock().unwrap();
+            for (name, payload) in events.iter() {
+                if name == "agent://event" {
+                    assert_eq!(payload["pid"], TEST_PID, "{payload}");
+                }
+            }
+        }
+        // The flash's output reached the Build console stream.
+        assert!(!l.build_lines().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_upload_is_refused_while_the_build_gate_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_gate = gate();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            shared_gate.clone(),
+            Arc::new(AtomicBool::new(false)),
+            HwParts::armed_with_target("/dev/ttyTEST0"),
+        );
+        let _held = shared_gate.lock().unwrap();
+        let (is_error, text) = call_tool(&l, "upload", serde_json::json!({}));
+        assert!(is_error);
+        assert_eq!(text, BUILD_BUSY);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_upload_reports_it_and_never_flashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener_hw(
+            stub_cli(&dir, "echo should-not-run; exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(true)), // stopped before the call
+            HwParts::armed_with_target("/dev/ttyTEST0"),
+        );
+        let (is_error, text) = call_tool(&l, "upload", serde_json::json!({}));
+        assert!(is_error);
+        assert!(text.contains("stopped"), "{text}");
+        assert!(l.event_types().is_empty());
+        assert!(l.build_lines().is_empty());
+    }
+
+    // ---------- hardware tools: serial ----------
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_send_without_a_monitor_says_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            HwParts::default(),
+        );
+        let (is_error, text) = call_tool(&l, "serial_send", serde_json::json!({"data": "hi"}));
+        assert!(is_error);
+        assert!(text.contains("serial monitor is not running"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_read_without_a_target_asks_for_a_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            HwParts::default(), // no owner, no target
+        );
+        let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
+        assert!(is_error);
+        assert!(text.contains("no serial port is selected"), "{text}");
+    }
+
+    /// A long-lived stand-in for a monitor child, so tests can install a
+    /// `SerialOwner::Monitor` without a real arduino-cli.
+    #[cfg(unix)]
+    fn dummy_monitor_child() -> Child {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn dummy monitor")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_read_returns_the_ring_backlog_then_reports_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let hw = HwParts::default();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        let serial = hw.serial.clone();
+        let ring = hw.ring.clone();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            hw,
+        );
+        // Seeded *after* the listener started: the session cursor begins at
+        // the ring head, so pre-session backlog is never replayed — only
+        // output that arrives during the session is.
+        ring.lock()
+            .unwrap()
+            .push(bancada_core::types::OutputStream::Stdout, "[fw] 0.1.0");
+        ring.lock()
+            .unwrap()
+            .push(bancada_core::types::OutputStream::Stderr, "brownout");
+        let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
+        assert!(!is_error, "{text}");
+        assert_eq!(text, "[fw] 0.1.0\n[stderr] brownout");
+        // The cursor advanced: a second read has nothing new.
+        let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
+        assert!(!is_error);
+        assert_eq!(text, "(no new output)");
+        evict_owner(&mut serial.lock().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_send_writes_the_line_to_the_monitor_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("sent.txt");
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("head -n 1 > {}", out_file.display()))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sink");
+        let hw = HwParts::default();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(child));
+        let serial = hw.serial.clone();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            gate(),
+            Arc::new(AtomicBool::new(false)),
+            hw,
+        );
+        let (is_error, text) = call_tool(&l, "serial_send", serde_json::json!({"data": "AT+GMR"}));
+        assert!(!is_error, "{text}");
+        // head exits after one line; poll for the file it wrote.
+        let mut written = String::new();
+        for _ in 0..50 {
+            if let Ok(s) = std::fs::read_to_string(&out_file) {
+                if !s.is_empty() {
+                    written = s;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(written, "AT+GMR\n");
+        evict_owner(&mut serial.lock().unwrap());
     }
 
     // ---------- JSON-RPC over HTTP ----------
@@ -4061,6 +4809,79 @@ mod tests {
         let bare = system_prompt_extra("/home/me/Blink", None, None);
         assert!(!bare.contains("profile is"), "{bare}");
         assert!(!bare.contains("FQBN"), "{bare}");
+    }
+
+    // ---------- continue an AI session: valid_session_id / clamp_facts ----------
+
+    #[test]
+    fn valid_session_id_accepts_uuid_shapes() {
+        assert!(valid_session_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(valid_session_id("abc123de"));
+        assert!(valid_session_id("ABCDEF12"));
+        assert!(valid_session_id(&"a".repeat(64)));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_a_flag_shaped_value() {
+        // The load-bearing case: a value that could be mistaken for another
+        // flag once it lands in argv right after --resume.
+        assert!(!valid_session_id("--resume"));
+        assert!(!valid_session_id("-x"));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_all_hyphen_and_leading_hyphen_values() {
+        // Character-class + length alone would admit these; they need the
+        // "starts with '-'" and "has at least one hex digit" checks too.
+        assert!(!valid_session_id("--------"));
+        assert!(!valid_session_id(&"-".repeat(64)));
+        assert!(!valid_session_id("-abc123ef"));
+        // A real uuid still passes.
+        assert!(valid_session_id("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_spaces_empty_and_out_of_range_lengths() {
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("short"));
+        assert!(!valid_session_id("abc 1234"));
+        assert!(!valid_session_id(&"a".repeat(7)));
+        assert!(!valid_session_id(&"a".repeat(65)));
+        assert!(!valid_session_id(&"a".repeat(70)));
+    }
+
+    #[test]
+    fn valid_session_id_rejects_unicode() {
+        assert!(!valid_session_id("abcdefgh\u{1F600}"));
+        assert!(!valid_session_id("café1234"));
+    }
+
+    #[test]
+    fn clamp_facts_leaves_short_input_untouched() {
+        assert_eq!(clamp_facts("hello"), "hello");
+        assert_eq!(clamp_facts(""), "");
+    }
+
+    #[test]
+    fn clamp_facts_truncates_to_at_most_4096_bytes() {
+        let long = "a".repeat(5000);
+        let clamped = clamp_facts(&long);
+        assert_eq!(clamped.len(), 4096);
+    }
+
+    #[test]
+    fn clamp_facts_cuts_on_a_char_boundary_not_mid_character() {
+        // A multi-byte char (3 bytes in UTF-8) placed so the naive 4096-byte
+        // cut would land inside it.
+        let mut s = "a".repeat(4095);
+        s.push('€'); // 3-byte char straddling the 4096 boundary
+        s.push_str(&"b".repeat(100));
+        let clamped = clamp_facts(&s);
+        assert!(clamped.len() <= 4096);
+        // Must be valid UTF-8 — this would panic on a mid-char split.
+        assert!(std::str::from_utf8(clamped.as_bytes()).is_ok());
+        // The incomplete '€' must have been dropped, not left dangling.
+        assert!(!clamped.contains('€'));
     }
 
     // F4: a stale `agent://closed` for a superseded session must not kill a
@@ -4567,6 +5388,7 @@ mod tests {
             mcp_config_path: mcp_config_path.clone(),
             settings_path: settings_path.clone(),
             verify_cancel: verify_cancel.clone(),
+            uploads_armed: Arc::new(AtomicBool::new(false)),
         };
         stop_agent_session(session);
         assert!(!mcp_config_path.exists());
@@ -4620,6 +5442,7 @@ mod tests {
                 Some("test"),
                 None,
             ),
+            resume_session_id: None,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))
@@ -4725,6 +5548,7 @@ mod tests {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(&sketch_dir, None, None),
+            resume_session_id: None,
         };
 
         let mut child = std::process::Command::new("claude")
@@ -4873,25 +5697,32 @@ mod tests {
         let (server, port) = bind_mcp_server().expect("bind loopback");
         let token = random_token().expect("entropy");
         let events: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::new(Mutex::new(Vec::new()));
-        let ctx = McpVerifyCtx {
+        let hw = HwParts::default();
+        let ctx = McpToolCtx {
             token: token.clone(),
             cli,
             sketch_dir: sketch_dir.clone(),
             profile: Some(profile.clone()),
             fqbn: None,
             build_gate: gate(),
+            serial: hw.serial,
+            serial_ring: hw.ring,
+            selected_target: hw.target,
+            uploads_armed: hw.uploads_armed,
+            serial_cursor: AtomicU64::new(0),
             session_pid: TEST_PID,
             cancelled: Arc::new(AtomicBool::new(false)),
         };
         let thread_server = server.clone();
         let thread_events = events.clone();
+        let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
+            thread_events
+                .lock()
+                .unwrap()
+                .push((name.to_string(), payload));
+        });
         let join = std::thread::spawn(move || {
-            mcp_listener_loop(thread_server, ctx, move |name, payload| {
-                thread_events
-                    .lock()
-                    .unwrap()
-                    .push((name.to_string(), payload));
-            });
+            mcp_listener_loop(thread_server, ctx, emit);
         });
 
         let mcp_config_path = write_mcp_config_file(port, &token).unwrap();
@@ -4900,6 +5731,7 @@ mod tests {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(&sketch_dir, Some(&profile), None),
+            resume_session_id: None,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))

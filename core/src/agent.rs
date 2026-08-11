@@ -283,6 +283,12 @@ pub struct AgentCfg {
     /// Project dir/profile context, composed by the caller and appended to
     /// the agent's system prompt via `--append-system-prompt`.
     pub system_prompt_extra: String,
+    /// CLI session id to resume via native `--resume`, when continuing a
+    /// past chat whose transcript the CLI still has on disk. `None` starts a
+    /// fresh session, same as before this field existed. The caller
+    /// (src-tauri's `agent_start`) validates the id's shape before it ever
+    /// reaches here; `agent_args` trusts it and only decides placement.
+    pub resume_session_id: Option<String>,
 }
 
 /// The built-in tools the embedded session is given, as a `--tools` value.
@@ -738,8 +744,22 @@ fn deny_json(reason: &str) -> String {
 /// hooks are shell commands.** What A1's `--settings` hook does is take away
 /// the other half of that pair — an unconfined `Write` — so a hostile or
 /// merely careless hook can no longer be *installed* by the agent itself.
+///
+/// ## `--resume` placement
+///
+/// When [`AgentCfg::resume_session_id`] is `Some`, `--resume <id>` is
+/// appended as the *final* pair, after `--append-system-prompt`'s value —
+/// never spliced earlier. This keeps the pinned prefix (`args[0..9]`, the
+/// documented flag sequence a test asserts on verbatim) and every other
+/// flag's relative position stable regardless of whether a session is
+/// resuming or starting fresh, so nothing upstream of this function needs to
+/// know resume exists. The id itself is not re-validated here — the command
+/// layer (src-tauri's `agent_start`) already rejected anything that is not
+/// `^[0-9a-fA-F-]{8,64}$` before it reaches an `AgentCfg`, so by the time
+/// this function sees `Some(id)` it cannot be flag-shaped or contain a shell
+/// metacharacter.
 pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-p".to_string(),
         "--verbose".to_string(),
         "--include-partial-messages".to_string(),
@@ -764,7 +784,12 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         cfg.settings_path.clone(),
         "--append-system-prompt".to_string(),
         cfg.system_prompt_extra.clone(),
-    ]
+    ];
+    if let Some(id) = &cfg.resume_session_id {
+        args.push("--resume".to_string());
+        args.push(id.clone());
+    }
+    args
 }
 
 // ---------- summarize_build_output ----------
@@ -1219,6 +1244,7 @@ mod tests {
             mcp_config_path: "/tmp/bancada-agent-mcp-abc.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
@@ -1235,6 +1261,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
@@ -1252,6 +1279,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
@@ -1268,6 +1296,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         assert!(
@@ -1289,6 +1318,7 @@ mod tests {
             mcp_config_path: "/tmp/bancada-agent-mcp-sekrit-nonce.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
@@ -1309,6 +1339,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/s.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1331,6 +1362,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-nonce.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1351,6 +1383,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /home/me/Blink, profile esp32s3".to_string(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1368,6 +1401,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         assert!(!args.iter().any(|a| a == "--cwd" || a == "-cwd"));
@@ -1379,6 +1413,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         assert_eq!(
@@ -1394,6 +1429,34 @@ mod tests {
                 "--permission-mode",
                 "acceptEdits",
             ]
+        );
+    }
+
+    #[test]
+    fn agent_args_appends_resume_id_as_the_final_pair() {
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
+            system_prompt_extra: "project at /s, profile esp32s3".to_string(),
+            resume_session_id: Some("abc123de".to_string()),
+        };
+        let args = agent_args(&cfg);
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--resume", "abc123de"],
+            "--resume <id> must be the final flag pair"
+        );
+
+        let cfg_none = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
+            system_prompt_extra: "project at /s, profile esp32s3".to_string(),
+            resume_session_id: None,
+        };
+        let args_none = agent_args(&cfg_none);
+        assert!(
+            !args_none.iter().any(|a| a == "--resume"),
+            "no --resume flag should appear when resume_session_id is None"
         );
     }
 
@@ -1910,6 +1973,7 @@ mod tests {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/s.json".to_string(),
             system_prompt_extra: String::new(),
+            resume_session_id: None,
         };
         let args = agent_args(&cfg);
         let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
