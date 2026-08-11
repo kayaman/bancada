@@ -304,13 +304,35 @@ pub fn delete_chat(chats_root: &Path, key: &str, file: &str) -> Result<()> {
 
 /// Best-effort cap on chats per sketch, deleting oldest beyond `keep`.
 ///
+/// Ranks by file modification time, newest first — NOT by filename. A
+/// continued chat appends into its ORIGINAL timestamp-named file, so the
+/// lexicographically-oldest name can be the most-recently-written file on
+/// disk; ranking by name would prune exactly the chat the user just kept
+/// talking in. Ties (including two files whose mtime can't be read) fall
+/// back to filename descending, so ordering stays deterministic. A file
+/// whose mtime can't be read is treated as the oldest, so a stat failure
+/// prunes it first rather than protecting it.
+///
 /// Silent by design: history is a convenience, and a failed cleanup must
 /// never surface into the chat flow that triggered it.
 pub fn prune(chats_root: &Path, key: &str, keep: usize) {
+    let dir = chats_root.join(key);
     let mut files = chat_file_names(chats_root, key);
-    files.sort_unstable_by(|a, b| b.cmp(a));
+    files.sort_by(|a, b| {
+        let mtime = |name: &str| {
+            std::fs::metadata(dir.join(name))
+                .and_then(|m| m.modified())
+                .ok()
+        };
+        match (mtime(a), mtime(b)) {
+            (Some(ma), Some(mb)) => mb.cmp(&ma).then_with(|| b.cmp(a)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.cmp(a),
+        }
+    });
     for file in files.into_iter().skip(keep) {
-        let _ = std::fs::remove_file(chats_root.join(key).join(file));
+        let _ = std::fs::remove_file(dir.join(file));
     }
 }
 
@@ -549,6 +571,42 @@ mod tests {
         assert_eq!(list[1].file, "2026-08-02T00-00-00.ndjson");
         // Pruning a sketch that never chatted must not panic.
         prune(tmp.path(), "ghost", 2);
+    }
+
+    /// A continued chat appends into its ORIGINAL timestamp-named file, so a
+    /// lexicographically-old name can be the most recently written file on
+    /// disk. Pruning must rank by mtime, not filename, or it deletes a chat
+    /// the user just kept talking in while keeping a genuinely stale one.
+    #[test]
+    fn prune_ranks_by_mtime_not_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Old-named file: will be touched to a fresh mtime (simulates a
+        // continued chat appending into its original file).
+        write_chat(tmp.path(), "k", "2026-08-01T00-00-00.ndjson", &["l"]);
+        // New-named file: left with a stale mtime (simulates a chat started
+        // and abandoned, never touched again since).
+        write_chat(tmp.path(), "k", "2026-08-05T00-00-00.ndjson", &["l"]);
+
+        let dir = tmp.path().join("k");
+        let fresh = std::time::SystemTime::now();
+        let stale = fresh - std::time::Duration::from_secs(3600);
+        std::fs::File::open(dir.join("2026-08-01T00-00-00.ndjson"))
+            .unwrap()
+            .set_modified(fresh)
+            .unwrap();
+        std::fs::File::open(dir.join("2026-08-05T00-00-00.ndjson"))
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+
+        prune(tmp.path(), "k", 1);
+
+        let list = list_chats(tmp.path(), "k");
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].file, "2026-08-01T00-00-00.ndjson",
+            "the old-named but recently-touched (continued) chat must survive"
+        );
     }
 
     #[test]

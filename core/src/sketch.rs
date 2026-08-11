@@ -20,6 +20,11 @@ pub struct SketchYaml {
     pub default_profile: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
+    /// Top-level keys we don't model, e.g. `default_port`/`default_fqbn`
+    /// written by `arduino-cli board attach`. Preserved verbatim through
+    /// every load→save round trip instead of being silently dropped.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -33,6 +38,10 @@ pub struct Profile {
     pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
+    /// Profile-level keys we don't model, e.g. `programmer:`/`port_config:`.
+    /// Preserved verbatim through every load→save round trip.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
@@ -41,6 +50,10 @@ pub struct PlatformDep {
     pub platform: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_index_url: Option<String>,
+    /// Unmodeled platform-entry keys. Preserved verbatim through every
+    /// load→save round trip.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_yaml::Value>,
 }
 
 /// A profile library dependency: a registry entry like
@@ -172,6 +185,7 @@ impl SketchProject {
                 vec![PlatformDep {
                     platform: p.to_string(),
                     platform_index_url: None,
+                    extra: Default::default(),
                 }]
             })
             .unwrap_or_default();
@@ -218,6 +232,7 @@ impl SketchProject {
         p.platforms = vec![PlatformDep {
             platform: platform_entry.to_string(),
             platform_index_url: None,
+            extra: Default::default(),
         }];
         self.save_yaml(&y)?;
         Ok(y)
@@ -314,6 +329,7 @@ impl SketchProject {
             None => profile.platforms.push(PlatformDep {
                 platform: entry,
                 platform_index_url: None,
+                extra: Default::default(),
             }),
         }
         self.save_yaml(&y)?;
@@ -472,6 +488,77 @@ profiles:
         let text = serde_yaml::to_string(&y).unwrap();
         let y2: SketchYaml = serde_yaml::from_str(&text).unwrap();
         assert_eq!(y, y2);
+    }
+
+    /// arduino-cli (`board attach`) and hand-edits write keys `SketchYaml`,
+    /// `Profile` and `PlatformDep` don't model: top-level `default_port`,
+    /// profile-level `programmer:`/`port_config:`, and unknown platform keys.
+    /// Every load→mutate→save round trip must keep them verbatim, or Bancada
+    /// silently deletes user/arduino-cli state on the next save.
+    const SAMPLE_WITH_EXTRAS: &str = r#"
+default_profile: esp32s3
+default_port: /dev/ttyACM0
+profiles:
+  esp32s3:
+    fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi
+    programmer: atmel_ice
+    port_config:
+      baudrate: 115200
+    platforms:
+      - platform: esp32:esp32 (3.3.0)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+        platform_unknown_key: something
+    libraries:
+      - PubSubClient (2.8.0)
+      - dir: ../libs/EnvSensor
+"#;
+
+    #[test]
+    fn yaml_preserves_unmodeled_keys_across_a_mutating_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("sketch.yaml"), SAMPLE_WITH_EXTRAS).unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+
+        // A realistic mutating op unrelated to any of the foreign keys.
+        proj.add_profile("uno", "arduino:avr:uno", None, None)
+            .unwrap();
+
+        let reloaded = proj.load_yaml().unwrap();
+        assert_eq!(
+            reloaded.extra.get("default_port").and_then(|v| v.as_str()),
+            Some("/dev/ttyACM0"),
+            "top-level default_port must survive"
+        );
+        let esp32s3 = &reloaded.profiles["esp32s3"];
+        assert_eq!(
+            esp32s3.extra.get("programmer").and_then(|v| v.as_str()),
+            Some("atmel_ice"),
+            "profile-level programmer: must survive"
+        );
+        assert_eq!(
+            esp32s3
+                .extra
+                .get("port_config")
+                .and_then(|v| v.get("baudrate"))
+                .and_then(|v| v.as_i64()),
+            Some(115200),
+            "profile-level port_config: must survive"
+        );
+        let platform = &esp32s3.platforms[0];
+        assert_eq!(
+            platform.platform_index_url.as_deref(),
+            Some("https://espressif.github.io/arduino-esp32/package_esp32_index.json")
+        );
+        assert_eq!(
+            platform
+                .extra
+                .get("platform_unknown_key")
+                .and_then(|v| v.as_str()),
+            Some("something"),
+            "unknown platform key must survive"
+        );
+        // The mutation itself still landed.
+        assert_eq!(reloaded.profiles["uno"].fqbn, "arduino:avr:uno");
     }
 
     #[test]
