@@ -2695,3 +2695,36 @@ body {
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* ---------- device browser (Web tab) ---------- */
+
+/* Page above, request log below — same shrink rules as .obs-main. */
+.devweb-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.devweb-frame {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  /* Device pages assume a light page ground; don't hand them a transparent
+     dark one. */
+  background: #fff;
+}
+.devweb-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+.devweb-log {
+  height: 38%;
+  min-height: 120px;
+  display: flex;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
