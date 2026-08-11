@@ -674,3 +674,24 @@ describe("port events", () => {
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("ports://changed");
   });
 });
+
+describe("device browser", () => {
+  it("deviceBrowseStart passes url and an event channel", async () => {
+    await api.deviceBrowseStart("http://unoq.local", () => {});
+    const [cmd, args] = called();
+    expect(cmd).toBe("device_browse_start");
+    expect(args.url).toBe("http://unoq.local");
+    // The channel rides the invoke as `onEvent` (Rust param on_event).
+    expect(args.onEvent).toBeTypeOf("object");
+  });
+
+  it("deviceBrowseSetTarget and deviceBrowseStop pass through", async () => {
+    await api.deviceBrowseSetTarget("http://192.168.0.7:8080");
+    expect(called()).toEqual([
+      "device_browse_set_target",
+      { url: "http://192.168.0.7:8080" },
+    ]);
+    await api.deviceBrowseStop();
+    expect(called()).toEqual(["device_browse_stop", {}]);
+  });
+});

@@ -739,6 +739,42 @@ export const mqttConnect = (
   });
 };
 
+// ---------- device browser (Web tab) ----------
+
+/** One proxied HTTP exchange, or a proxy lifecycle event. */
+export type DeviceBrowseEvent =
+  | { type: "stage"; stage: "listening"; port: number }
+  | {
+      type: "exchange";
+      method: string;
+      path: string;
+      status: number;
+      duration_ms: number;
+      content_type: string | null;
+      req_bytes: number;
+      resp_bytes: number;
+      preview: string;
+      truncated: boolean;
+      binary: boolean;
+    }
+  | { type: "error"; path: string; message: string }
+  | { type: "closed" };
+
+/** Start the loopback device proxy for `url`; resolves to the proxy port
+ *  the Web tab's iframe should load. Exchange events arrive on `onEvent`. */
+export const deviceBrowseStart = (
+  url: string,
+  onEvent: (e: DeviceBrowseEvent) => void,
+) => {
+  const channel = new Channel<DeviceBrowseEvent>();
+  channel.onmessage = onEvent;
+  return invoke<number>("device_browse_start", { url, onEvent: channel });
+};
+/** Repoint the running proxy at a different device (same port/origin). */
+export const deviceBrowseSetTarget = (url: string) =>
+  invoke<void>("device_browse_set_target", { url });
+export const deviceBrowseStop = () => invoke<void>("device_browse_stop", {});
+
 export const mqttPublish = (topic: string, payload: string, retain: boolean) =>
   invoke<void>("mqtt_publish", { topic, payload, retain });
 export const mqttSubscribe = (filter: string) =>
