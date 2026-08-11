@@ -15,12 +15,14 @@
 //! - `init_repo` makes an initial commit rather than leaving an empty
 //!   repository. An empty repo has no baseline to restore to, which is the one
 //!   thing the Assistant panel's warning is about.
-//! - `commit` (the checkpoint path) carries the same identity/gpg/hooks
-//!   fallbacks as `init_repo`, unconditionally. Both are app-internal safety
-//!   commits rather than authorship claims, so neither should depend on the
-//!   machine having a git identity configured, a working gpg agent, or a
-//!   harmless global hooks directory — any one of those missing must not be
-//!   able to turn "save a checkpoint" into an error.
+//! - `commit` (the checkpoint path) always disables gpg-signing and hooks,
+//!   the same as `init_repo` and for the same reason: a checkpoint is an
+//!   app-internal safety commit, and a broken gpg agent or a harmless global
+//!   hooks directory must never turn "save a checkpoint" into an error. The
+//!   identity fallback, though, is conditional — used only when the
+//!   repository has no `user.email` of its own — so a checkpoint with a
+//!   configured identity keeps the user's own authorship, and only a
+//!   genuinely identity-less repo falls back to Bancada's.
 
 use crate::{Error, Result};
 use crate::types::{OutputLine, OutputStream};
@@ -446,16 +448,22 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
 /// then commit. In a nested sketch this commits only the subtree's paths —
 /// the parent repository's other changes are not swept in.
 ///
-/// The commit carries the same `-c` fallback set as [`init_repo`] — no-identity,
-/// no-gpg-sign, no-hooks — and for the same reason, extended: a checkpoint is
-/// an app-internal safety commit triggered by the Assistant panel, not a
-/// claim of authorship, so it should no more depend on the machine's git
-/// identity, gpg agent, or global hooks than the initial commit does. The
-/// fallback is unconditional (not "only if identity is missing") to keep
-/// checkpoint and init behaving identically — a checkpoint that used the
-/// real identity when present and Bancada's when absent would make commit
-/// authorship depend on machine state, which is one more thing to explain
-/// when someone looks at the log.
+/// gpg-signing and hooks are always disabled (`-c commit.gpgsign=false -c
+/// core.hooksPath= --no-verify`), for the same reason as [`init_repo`]: a
+/// checkpoint is an app-internal safety commit triggered by the Assistant
+/// panel, and a broken gpg agent or a harmless global hooks directory must
+/// never be able to turn "save a checkpoint" into an error.
+///
+/// The `user.name`/`user.email` fallback, unlike those, is conditional: it
+/// is added only when [`has_usable_identity`] finds the repository has none
+/// configured. When an identity exists, a checkpoint is the user's own
+/// commit and keeps their authorship — a pushed checkpoint must read as
+/// theirs, not as "Bancada". When none exists — a fresh machine, a sandboxed
+/// build environment — the Bancada identity is a fallback so checkpointing
+/// itself still never fails for lack of configuration, mirroring
+/// `init_repo`'s rationale for its own baseline commit. `init_repo`'s
+/// identity fallback stays unconditional on purpose: there is no prior
+/// authorship to preserve for a repository that doesn't exist yet.
 pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
     let d = dir
         .to_str()
@@ -465,13 +473,12 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
         return Ok(CommitOutcome::NothingToCommit);
     }
     run(&["-C", d, "add", "-A", "--", "."])?;
-    run(&[
-        "-C",
-        d,
-        "-c",
-        "user.name=Bancada",
-        "-c",
-        "user.email=bancada@localhost",
+
+    let mut args: Vec<&str> = vec!["-C", d];
+    if !has_usable_identity(d) {
+        args.extend(["-c", "user.name=Bancada", "-c", "user.email=bancada@localhost"]);
+    }
+    args.extend([
         "-c",
         "commit.gpgsign=false",
         "-c",
@@ -483,8 +490,20 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
         message,
         "--",
         ".",
-    ])?;
+    ]);
+    run(&args)?;
     Ok(CommitOutcome::Committed)
+}
+
+/// Whether `dir`'s effective git config already resolves a usable
+/// `user.email` — local config, global config, or environment, whatever git
+/// itself would use. Probed with `git config user.email` rather than reading
+/// config files directly, so it honours exactly the same resolution order
+/// `git commit` would.
+fn has_usable_identity(dir: &str) -> bool {
+    run(&["-C", dir, "config", "user.email"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Outcome of a checkpoint commit. "Nothing to commit" is a state the UI
@@ -695,6 +714,38 @@ pub fn set_remote(dir: &Path, url: &str, mut on_line: impl FnMut(OutputLine)) ->
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Restores a process environment variable to whatever it held before,
+    /// when dropped — including on an unwinding panic. A couple of fixtures
+    /// below need to point `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` at
+    /// `/dev/null` so the `commit()` call under test can't see this
+    /// machine's ambient git identity; `commit()` calls `run()`, which
+    /// spawns `git` inheriting the process environment, so there is no
+    /// per-invocation `.env()` to attach the override to instead — the
+    /// mutation has to be process-wide. Wrapping it in a guard means a
+    /// failed assertion mid-test can never leave the override leaked into
+    /// whatever test runs next in the same process.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            EnvGuard { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     /// The bug this module exists for: a sketch inside a repository was
     /// reported as "not under git" because only its own directory was checked.
@@ -1153,14 +1204,13 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
     /// "Please tell me who you are", a repo with `commit.gpgsign=true` and no
     /// usable agent hung/failed, and a broken global hook aborted the
     /// checkpoint. GIT_CONFIG_GLOBAL/SYSTEM are pointed at `/dev/null` for the
-    /// duration so the assertion exercises the fixture's (lack of) identity,
+    /// duration (via `EnvGuard`, restored on drop even if an assertion below
+    /// panics) so the assertion exercises the fixture's (lack of) identity,
     /// not whatever happens to be configured on the machine running the test.
     #[test]
     fn commit_falls_back_to_bancada_identity_and_skips_gpg_and_hooks() {
-        let prev_global = std::env::var_os("GIT_CONFIG_GLOBAL");
-        let prev_system = std::env::var_os("GIT_CONFIG_SYSTEM");
-        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-        std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+        let _global = EnvGuard::set("GIT_CONFIG_GLOBAL", "/dev/null");
+        let _system = EnvGuard::set("GIT_CONFIG_SYSTEM", "/dev/null");
 
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().canonicalize().unwrap().join("NoIdentity");
@@ -1179,20 +1229,36 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
         let result = commit(&dir, "checkpoint: b.h");
 
-        if let Some(v) = prev_global {
-            std::env::set_var("GIT_CONFIG_GLOBAL", v);
-        } else {
-            std::env::remove_var("GIT_CONFIG_GLOBAL");
-        }
-        if let Some(v) = prev_system {
-            std::env::set_var("GIT_CONFIG_SYSTEM", v);
-        } else {
-            std::env::remove_var("GIT_CONFIG_SYSTEM");
-        }
-
         assert_eq!(result.unwrap(), CommitOutcome::Committed);
         let log = run(&["-C", d, "log", "--format=%an <%ae>", "-1"]).unwrap();
         assert!(log.contains("Bancada <bancada@localhost>"), "log {log:?}");
+    }
+
+    /// FINDING 1 fix: when the repository already has a usable identity, a
+    /// checkpoint commit must carry it — not Bancada's — so a pushed
+    /// checkpoint reads as the user's own commit, not as authored by the
+    /// app. Identity is set on local config only, so this is hermetic
+    /// regardless of what the other fixture in this module does with
+    /// GIT_CONFIG_GLOBAL/SYSTEM: local config always wins.
+    #[test]
+    fn commit_uses_the_repos_own_identity_when_one_is_configured() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("HasIdentity");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+
+        let d = dir.to_str().unwrap();
+        run(&["-C", d, "config", "user.name", "Test User"]).unwrap();
+        run(&["-C", d, "config", "user.email", "t@example.com"]).unwrap();
+
+        std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
+        assert_eq!(commit(&dir, "checkpoint: b.h").unwrap(), CommitOutcome::Committed);
+
+        let author_name = run(&["-C", d, "log", "-1", "--format=%an"]).unwrap();
+        let author_email = run(&["-C", d, "log", "-1", "--format=%ae"]).unwrap();
+        assert_eq!(author_name.trim(), "Test User");
+        assert_eq!(author_email.trim(), "t@example.com");
     }
 
     #[test]

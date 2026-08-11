@@ -313,25 +313,37 @@ pub fn delete_chat(chats_root: &Path, key: &str, file: &str) -> Result<()> {
 /// whose mtime can't be read is treated as the oldest, so a stat failure
 /// prunes it first rather than protecting it.
 ///
+/// Each file's mtime is read exactly once, into a snapshot, before sorting —
+/// NOT from inside the `sort_by` comparator itself. Reading `fs::metadata`
+/// live from the comparator means a concurrent append (the `chat_append`
+/// command calls `prune` right after writing) can change a file's mtime
+/// *between* two comparisons the sort makes for the very same file, so the
+/// comparator stops being a consistent total order mid-sort. Since Rust
+/// 1.81, `slice::sort_by` detects that and panics — which would turn a
+/// background prune into a failed append from the webview's point of view.
+/// Sorting a fixed snapshot instead makes the comparator a pure function of
+/// data captured once, so it can never observe a change mid-sort.
+///
 /// Silent by design: history is a convenience, and a failed cleanup must
 /// never surface into the chat flow that triggered it.
 pub fn prune(chats_root: &Path, key: &str, keep: usize) {
     let dir = chats_root.join(key);
-    let mut files = chat_file_names(chats_root, key);
-    files.sort_by(|a, b| {
-        let mtime = |name: &str| {
-            std::fs::metadata(dir.join(name))
+    let mut snapshot: Vec<(String, Option<std::time::SystemTime>)> = chat_file_names(chats_root, key)
+        .into_iter()
+        .map(|name| {
+            let mtime = std::fs::metadata(dir.join(&name))
                 .and_then(|m| m.modified())
-                .ok()
-        };
-        match (mtime(a), mtime(b)) {
-            (Some(ma), Some(mb)) => mb.cmp(&ma).then_with(|| b.cmp(a)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => b.cmp(a),
-        }
+                .ok();
+            (name, mtime)
+        })
+        .collect();
+    snapshot.sort_by(|(a, ma), (b, mb)| match (ma, mb) {
+        (Some(ma), Some(mb)) => mb.cmp(ma).then_with(|| b.cmp(a)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.cmp(a),
     });
-    for file in files.into_iter().skip(keep) {
+    for (file, _) in snapshot.into_iter().skip(keep) {
         let _ = std::fs::remove_file(dir.join(file));
     }
 }
@@ -607,6 +619,59 @@ mod tests {
             list[0].file, "2026-08-01T00-00-00.ndjson",
             "the old-named but recently-touched (continued) chat must survive"
         );
+    }
+
+    /// FINDING 2 fix: `prune` now sorts a mtime snapshot taken once up front
+    /// instead of calling `fs::metadata` from inside `sort_by`'s comparator —
+    /// the live-read version could observe a concurrent append's mtime
+    /// change between two comparisons of the same file within a single sort,
+    /// breaking the total order `sort_by` requires and (Rust >= 1.81)
+    /// panicking, which would fail the `chat_append` command that triggers
+    /// pruning. Forcing that race deterministically in a portable test isn't
+    /// feasible, so this asserts what the snapshot fix guarantees instead:
+    /// pruning two directories with identical contents (same names, same
+    /// mtimes) is a pure function of that snapshot and deletes the identical
+    /// set both times.
+    #[test]
+    fn prune_is_deterministic_across_identical_directory_snapshots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let names = [
+            "2026-08-01T00-00-00.ndjson",
+            "2026-08-02T00-00-00.ndjson",
+            "2026-08-03T00-00-00.ndjson",
+            "2026-08-04T00-00-00.ndjson",
+            "2026-08-05T00-00-00.ndjson",
+        ];
+        for name in names {
+            write_chat(tmp.path(), "a", name, &["l"]);
+            write_chat(tmp.path(), "b", name, &["l"]);
+        }
+        // Give "b"'s files the same mtimes as "a"'s twins, so the two
+        // directories are identical in every way prune cares about.
+        for name in names {
+            let mtime = std::fs::metadata(tmp.path().join("a").join(name))
+                .unwrap()
+                .modified()
+                .unwrap();
+            std::fs::File::open(tmp.path().join("b").join(name))
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        }
+
+        prune(tmp.path(), "a", 2);
+        prune(tmp.path(), "b", 2);
+
+        let remaining = |key: &str| {
+            let mut v: Vec<String> =
+                list_chats(tmp.path(), key).into_iter().map(|e| e.file).collect();
+            v.sort();
+            v
+        };
+        let a = remaining("a");
+        let b = remaining("b");
+        assert_eq!(a.len(), 2, "prune must still keep exactly `keep` files");
+        assert_eq!(a, b, "identical directory snapshots must prune to identical sets");
     }
 
     #[test]
