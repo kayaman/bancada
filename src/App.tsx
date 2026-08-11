@@ -688,6 +688,15 @@ export default function App() {
       setDirtyFiles(
         (prev) => new Set([...prev].map((p) => pathAfterRename(p, from, to, wasDir) ?? p)),
       );
+      // Otherwise a rename of a conflicted file leaves the conflict entry
+      // pointing at a path that no longer exists — sendToAgent's guard
+      // never trips, and Verify/Flash can clobber the assistant's on-disk
+      // fix (now living under `to`) with the stale buffer still keyed under
+      // `from`.
+      agentConflictsRef.current = new Set(
+        [...agentConflictsRef.current].map((p) => pathAfterRename(p, from, to, wasDir) ?? p),
+      );
+      setConflicts([...agentConflictsRef.current]);
       setOpenTabs((prev) => renameTabs(prev, from, to, wasDir));
       if (armedTab) {
         const np = pathAfterRename(armedTab, from, to, wasDir);
@@ -729,6 +738,13 @@ export default function App() {
       setDirtyFiles(
         (prev) => new Set([...prev].filter((p) => !affectedByDelete(p, relPath, wasDir))),
       );
+      // Otherwise deleting a conflicted file leaves its entry in the set
+      // forever — nothing can resolve a conflict on a path that no longer
+      // exists, wedging sendToAgent's guard behind an unresolvable banner.
+      for (const p of [...agentConflictsRef.current]) {
+        if (affectedByDelete(p, relPath, wasDir)) agentConflictsRef.current.delete(p);
+      }
+      setConflicts([...agentConflictsRef.current]);
       const remainingTabs = deleteTabs(openTabs, relPath, wasDir);
       setOpenTabs(remainingTabs);
       if (armedTab && affectedByDelete(armedTab, relPath, wasDir)) setArmedTab(null);
@@ -1371,13 +1387,25 @@ export default function App() {
    *  out of the App-level listener so a `ResumeWatch`'s buffered/flushed
    *  events go through the exact same path a live event would. */
   const deliverAgentEvent = (ev: AgentEvent) => {
-    agentStore.push(ev);
-    // Deltas are transient duplicates of the authoritative assistant
-    // event that follows them — recording them would write the same
-    // text twice and fire one IPC append per streamed fragment. Replay
-    // of completed turns is unchanged without them; only an
-    // interrupted turn's partial text is lost from history.
-    if (ev.type !== "stream_event") chatRecorder.record({ op: "push", ev });
+    // Between teardownAgentSession's clear()/prepareContinuation() and the
+    // next sessionStarted, the store sits idle with no pid — the only
+    // events that can still land in that window are a just-torn-down
+    // session's flushed stragglers (queued before agentStop resolved).
+    // Pushing one would repaint a store nobody owns yet; recording one
+    // would write a dead session's tail into whatever chat is live now (or
+    // start a new file for none at all). Skip both; side effects below
+    // already carry their own pid guards.
+    const snap = agentStore.snapshot();
+    const betweenSessions = snap.status === "idle" && snap.pid === undefined;
+    if (!betweenSessions) {
+      agentStore.push(ev);
+      // Deltas are transient duplicates of the authoritative assistant
+      // event that follows them — recording them would write the same
+      // text twice and fire one IPC append per streamed fragment. Replay
+      // of completed turns is unchanged without them; only an
+      // interrupted turn's partial text is lost from history.
+      if (ev.type !== "stream_event") chatRecorder.record({ op: "push", ev });
+    }
     if (bottomTabRef.current !== "agent")
       setUnseen((u) => ({ ...u, agent: true }));
     handleAgentSideEffects(ev);
@@ -1406,7 +1434,16 @@ export default function App() {
       notify("Open a sketch first.", true);
       return;
     }
+    // Captured before the first await below — re-checked after every await
+    // in this function so a teardown/"New session"/project switch that lands
+    // mid-send can't bind the spawned (or about-to-spawn) child to a project
+    // it no longer belongs to, unrecorded.
+    const epoch = teardownEpochRef.current;
     await saveAll();
+    // A teardown/continue raced ahead of us during the save — this send no
+    // longer belongs to any session we still own. Bail silently: nothing
+    // user-visible has happened yet (no bubble, no spawn).
+    if (teardownEpochRef.current !== epoch) return;
     // saveAll refuses to flush a conflicted buffer, so re-check: a conflict
     // raised between the guard above and here still blocks the send.
     if (agentConflictsRef.current.size > 0) return; // saveAll already notified
@@ -1440,6 +1477,14 @@ export default function App() {
           stash?.sessionId,
           stash?.sessionId ? undefined : stash?.facts,
         );
+        // A teardown/continue raced ahead of us while the child was
+        // spawning: this pid belongs to no chat we still track. Reap it
+        // (pid-scoped, so it can never touch whatever session superseded
+        // this send) and bail — touching neither store nor recorder.
+        if (teardownEpochRef.current !== epoch) {
+          void api.agentStop(pid);
+          return;
+        }
         agentStore.sessionStarted(pid);
         chatRecorder.record({ op: "sessionStarted", pid });
         // A continuation spawn (native-resume attempt or facts-only) always
@@ -1447,7 +1492,14 @@ export default function App() {
         // snap the UI toggle to match so a fast click on "Allow uploads"
         // between `continueChat` and this send can't leave it showing armed
         // while the child is actually locked.
-        if (stash) setUploadsArmed(false);
+        if (stash) {
+          setUploadsArmed(false);
+          // Belt-and-suspenders: the backend already started unarmed, but a
+          // toggle click that raced in between the spawn and this line could
+          // have flipped it. Best-effort re-disarm so backend and UI cannot
+          // diverge.
+          api.agentSetUploadsArmed(false).catch(() => {});
+        }
         if (stash?.sessionId) {
           // Native resume attempted: hold events back until the child
           // proves itself or dies trying. Capture the teardown epoch now —
@@ -1556,6 +1608,11 @@ export default function App() {
       // Matches sendToAgent's continuation-spawn invariant: always unarmed,
       // and the toggle must show it.
       setUploadsArmed(false);
+      // Belt-and-suspenders: the backend already started unarmed (`false`
+      // above), but a toggle click racing in between the spawn and this line
+      // could have flipped it. Best-effort re-disarm so backend and UI
+      // cannot diverge.
+      api.agentSetUploadsArmed(false).catch(() => {});
       agentStore.sessionStarted(pid2);
       chatRecorder.record({ op: "sessionStarted", pid: pid2 });
       await api.agentSend(pendingText);
@@ -1573,6 +1630,14 @@ export default function App() {
   };
 
   const interruptAgent = () => {
+    // Stop must never trigger fallbackRespawn: a pending resume watch that
+    // outlives the interrupt would see the child die (interrupted, same as
+    // any other exit) and treat it as a failed resume attempt, respawning a
+    // fresh session and re-sending the just-interrupted message. Cancel the
+    // watch and drop the continuation stash first so neither is left to fire.
+    resumeWatchRef.current?.cancel();
+    resumeWatchRef.current = null;
+    continuationRef.current = null;
     api.agentInterrupt().catch((e) => notify(String(e), true));
   };
 
@@ -1644,13 +1709,23 @@ export default function App() {
     // doc.
     teardownEpochRef.current++;
     teardownAgentSession("continued another chat");
+    // Captured *after* both bumps above (this call's own, plus
+    // teardownAgentSession's) — the epoch this continuation owns from here
+    // on. Re-checked after the chatLoad await below so a second ▶, a "New
+    // session", or a project switch that lands mid-load can't merge its
+    // transcript into (or resurrect) a torn-down chat. Same pattern
+    // `fallbackRespawn` uses for its own awaits.
+    const epoch = teardownEpochRef.current;
+    const startDir = sketchDirRef.current;
     try {
       const lines = await api.chatLoad(sketchDir, file);
       // The project may have been closed or switched while chatLoad was in
       // flight — re-read the live ref rather than trusting the `sketchDir`
-      // closure captured before the await.
+      // closure captured before the await. Also bail if a teardown/continue
+      // raced ahead of us: no state writes past this point belong to us.
+      if (teardownEpochRef.current !== epoch) return;
       const dir = sketchDirRef.current;
-      if (!dir) return;
+      if (!dir || dir !== startDir) return;
       applyChatOps(agentStore, lines);
       agentStore.prepareContinuation();
       const snap = agentStore.snapshot();
@@ -1732,7 +1807,7 @@ export default function App() {
 
       {profileForm && sketchDir && (
         <ProfileInit
-          key={profileForm}
+          key={`${profileForm}:${profile ?? ""}`}
           mode={profileForm}
           sketchDir={sketchDir}
           detectedFqbn={detectedFqbn() ?? null}
