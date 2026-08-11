@@ -2345,7 +2345,6 @@ fn db_send(on_event: &Channel<InvokeResponseBody>, ev: &DeviceBrowseEvent) -> bo
 
 struct DeviceBrowse {
     server: Arc<tiny_http::Server>,
-    port: u16,
     target: Arc<Mutex<Target>>,
     join: Option<JoinHandle<()>>,
 }
@@ -2536,7 +2535,6 @@ fn device_browse_start(
 
     *guard = Some(DeviceBrowse {
         server,
-        port,
         target,
         join: Some(join),
     });
