@@ -10,6 +10,17 @@ interface Props {
   title: string;
 }
 
+/** Derive a fallback label for an FQBN with options (e.g. "esp32c6 (CDCOnBoot=cdc")
+ *  when it doesn't match any listed board. Extracts board name (3rd colon segment)
+ *  and options (remainder after 3rd colon). */
+export function fallbackFqbnLabel(fqbn: string): string {
+  const parts = fqbn.split(":");
+  if (parts.length < 3) return fqbn;
+  const boardName = parts[2];
+  const optionsPart = parts.slice(3).join(":");
+  return optionsPart ? `${boardName} (${optionsPart})` : boardName;
+}
+
 /** A grouped board <select> with a filter input in front. While the query
  *  is non-empty the select opens into a results listbox overlaying the
  *  content below (see .board-select-anchor); picking collapses it. */
@@ -63,7 +74,13 @@ export default function BoardPicker({ boards, value, onChange, title }: Props) {
               )}
             </>
           ) : (
-            <option value="">— choose a board —</option>
+            <>
+              {value && !boards.some((b) => b.fqbn === value) ? (
+                <option value={value}>{fallbackFqbnLabel(value)}</option>
+              ) : (
+                <option value="">— choose a board —</option>
+              )}
+            </>
           )}
           {groups.map(([platform, list]) => (
             <optgroup key={platform} label={platform}>

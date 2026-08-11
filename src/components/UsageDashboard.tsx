@@ -5,7 +5,7 @@
 // padded with placeholder rows. Fetches on mount and on ⟳; deliberately no
 // live updates while a session streams (project-usage-totals spec).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import type { ProjectUsage, SessionEntry } from "../api";
 import { replayChat } from "../agent/chatLog";
@@ -30,6 +30,9 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
   const [error, setError] = useState<string | null>(null);
   /** sketch_dir of the project whose sessions are expanded. */
   const [expanded, setExpanded] = useState<string | null>(null);
+  /** Ref mirroring expanded state for guarding stale chatListUsage responses;
+   *  updated synchronously whenever expanded is set. */
+  const expandedRef = useRef<string | null>(null);
   const [sessions, setSessions] = useState<SessionEntry[] | null>(null);
   const [replay, setReplay] = useState<{
     store: AgentStore;
@@ -55,15 +58,25 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
     setViewTurn(null);
     if (expanded === row.sketch_dir) {
       setExpanded(null);
+      expandedRef.current = null;
       setSessions(null);
       return;
     }
     setExpanded(row.sketch_dir);
+    expandedRef.current = row.sketch_dir;
     setSessions(null);
+    // Capture sketch_dir at call time; only apply response if it still matches
+    // the expanded row (guards against slow responses landing after a collapse
+    // or switch to another project).
+    const requestedDir = row.sketch_dir;
     api
-      .chatListUsage(row.sketch_dir)
-      .then(setSessions)
-      .catch(() => setSessions([]));
+      .chatListUsage(requestedDir)
+      .then((s) => {
+        if (requestedDir === expandedRef.current) setSessions(s);
+      })
+      .catch(() => {
+        if (requestedDir === expandedRef.current) setSessions([]);
+      });
   };
 
   const openSession = (row: ProjectUsage, s: SessionEntry) => {
