@@ -216,6 +216,9 @@ struct AppState {
     selected_target: Arc<Mutex<Option<SelectedTarget>>>,
     /// MQTT broker session — a sibling of `serial`, never coupled to it.
     mqtt: Mutex<Option<MqttSession>>,
+    /// Device-browser proxy (Web tab) — another sibling slot, one at a
+    /// time; leaf lock, held only across start/stop/target-swap.
+    device_browse: Mutex<Option<DeviceBrowse>>,
     /// Embedded `claude` session — another sibling slot, one at a time.
     agent: Mutex<Option<AgentSession>>,
     /// Serialises the three *sketch build* paths — user Verify
@@ -2286,6 +2289,284 @@ fn save_mqtt_config(app: AppHandle, cfg: mqtt::MqttConfig) -> Result<(), String>
 
 // ---------- agent (Assistant panel) ----------
 
+// ---------- device browser (Web tab) ----------
+//
+// A loopback reverse proxy so the Web tab's iframe can browse a bench
+// device: the iframe loads `http://127.0.0.1:<port>/`, Rust forwards each
+// request to the single user-set target and streams one `exchange` event
+// per round-trip over the invocation Channel (the `mqtt_connect` shape).
+// Routing through loopback sidesteps CORS and the production
+// custom-protocol origin in one move, and makes the log complete —
+// every byte passes through here.
+//
+// Security posture: single-target. The forwarded host comes only from
+// `device_browse_start`/`device_browse_set_target` (invoke, never HTTP),
+// so the port cannot be steered to arbitrary hosts by whatever it serves.
+// Residual exposure — another *local* process browsing the currently
+// chosen device through this port while the tab is open — is accepted
+// for a bench tool.
+
+use bancada_core::devproxy::{self, Target};
+
+/// One log event per proxied exchange, plus lifecycle. Serde-tagged like
+/// `mqtt::MqttEvent` so the frontend switch mirrors the MQTT panel's.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DeviceBrowseEvent {
+    Stage {
+        stage: &'static str,
+        port: u16,
+    },
+    Exchange {
+        method: String,
+        path: String,
+        status: u16,
+        duration_ms: u64,
+        content_type: Option<String>,
+        req_bytes: usize,
+        resp_bytes: usize,
+        preview: String,
+        truncated: bool,
+        binary: bool,
+    },
+    Error {
+        path: String,
+        message: String,
+    },
+    Closed {},
+}
+
+fn db_send(on_event: &Channel<InvokeResponseBody>, ev: &DeviceBrowseEvent) -> bool {
+    match serde_json::to_string(ev) {
+        Ok(json) => on_event.send(InvokeResponseBody::Json(json)).is_ok(),
+        Err(_) => false,
+    }
+}
+
+struct DeviceBrowse {
+    server: Arc<tiny_http::Server>,
+    port: u16,
+    target: Arc<Mutex<Target>>,
+    join: Option<JoinHandle<()>>,
+}
+
+/// Request/response body cap. Bench pages are small; anything past this
+/// is refused rather than buffered without bound.
+const DEV_PROXY_MAX_BODY: usize = 8 * 1024 * 1024;
+const DEV_PROXY_PREVIEW: usize = 2048;
+
+/// Forward one request to the device and answer the iframe. Runs on a
+/// per-request thread: device pages fetch assets in parallel and a serial
+/// loop would serialize the page load.
+fn dev_proxy_handle(
+    mut request: tiny_http::Request,
+    target: &Target,
+    agent: &ureq::Agent,
+    on_event: &Channel<InvokeResponseBody>,
+) {
+    let started = Instant::now();
+    let method = request.method().as_str().to_string();
+    let path = request.url().to_string();
+
+    let mut req_body = Vec::new();
+    if request
+        .as_reader()
+        .take(DEV_PROXY_MAX_BODY as u64 + 1)
+        .read_to_end(&mut req_body)
+        .is_err()
+        || req_body.len() > DEV_PROXY_MAX_BODY
+    {
+        let _ = request.respond(
+            tiny_http::Response::from_string("request body too large for the device proxy")
+                .with_status_code(413),
+        );
+        return;
+    }
+
+    let url = format!("http://{}:{}{}", target.host, target.port, path);
+    let mut upstream = agent.request(&method, &url);
+    for h in request.headers() {
+        let name = h.field.as_str().as_str();
+        // Host is the proxy's own; the client rewrites it for the target.
+        if devproxy::is_hop_by_hop(name) || name.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        upstream = upstream.set(name, h.value.as_str());
+    }
+
+    let result = if req_body.is_empty() {
+        upstream.call()
+    } else {
+        upstream.send_bytes(&req_body)
+    };
+    // A 4xx/5xx from the device is a real response to forward, not an
+    // error — only transport failures take the Err arm.
+    let response = match result {
+        Ok(r) => r,
+        Err(ureq::Error::Status(_, r)) => r,
+        Err(e) => {
+            let message = format!("device unreachable at {}:{}: {e}", target.host, target.port);
+            let _ = db_send(
+                on_event,
+                &DeviceBrowseEvent::Error {
+                    path: path.clone(),
+                    message: message.clone(),
+                },
+            );
+            let _ = request
+                .respond(tiny_http::Response::from_string(message).with_status_code(502));
+            return;
+        }
+    };
+
+    let status = response.status();
+    let content_type = response.header("content-type").map(str::to_string);
+    let headers: Vec<(String, String)> = response
+        .headers_names()
+        .into_iter()
+        .filter(|n| !devproxy::is_hop_by_hop(n) && !n.eq_ignore_ascii_case("content-length"))
+        .filter_map(|n| response.header(&n).map(|v| (n.clone(), v.to_string())))
+        .collect();
+
+    let mut resp_body = Vec::new();
+    if response
+        .into_reader()
+        .take(DEV_PROXY_MAX_BODY as u64 + 1)
+        .read_to_end(&mut resp_body)
+        .is_err()
+        || resp_body.len() > DEV_PROXY_MAX_BODY
+    {
+        let message = "device response exceeded the proxy's body cap".to_string();
+        let _ = db_send(
+            on_event,
+            &DeviceBrowseEvent::Error {
+                path: path.clone(),
+                message: message.clone(),
+            },
+        );
+        let _ = request.respond(tiny_http::Response::from_string(message).with_status_code(502));
+        return;
+    }
+
+    let (preview, truncated) = devproxy::body_preview(&resp_body, DEV_PROXY_PREVIEW);
+    let binary = std::str::from_utf8(&resp_body)
+        .map(|t| t.contains('\u{0}'))
+        .unwrap_or(true);
+    let _ = db_send(
+        on_event,
+        &DeviceBrowseEvent::Exchange {
+            method,
+            path,
+            status,
+            duration_ms: started.elapsed().as_millis() as u64,
+            content_type,
+            req_bytes: req_body.len(),
+            resp_bytes: resp_body.len(),
+            preview,
+            truncated,
+            binary,
+        },
+    );
+
+    let mut out = tiny_http::Response::from_data(resp_body).with_status_code(status);
+    for (name, value) in headers {
+        if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            out = out.with_header(h);
+        }
+    }
+    let _ = request.respond(out);
+}
+
+/// The listener loop: accept until `Server::unblock` breaks the recv
+/// (same lifecycle as the MCP listener — an AtomicBool cannot interrupt
+/// a blocking accept). Each request is handled on its own thread.
+fn dev_proxy_loop(
+    server: Arc<tiny_http::Server>,
+    target: Arc<Mutex<Target>>,
+    on_event: Channel<InvokeResponseBody>,
+) {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build();
+    for request in server.incoming_requests() {
+        let target = target.lock().unwrap().clone();
+        let agent = agent.clone();
+        let on_event = on_event.clone();
+        std::thread::spawn(move || dev_proxy_handle(request, &target, &agent, &on_event));
+    }
+    let _ = db_send(&on_event, &DeviceBrowseEvent::Closed {});
+}
+
+fn stop_device_browse(mut db: DeviceBrowse) {
+    db.server.unblock();
+    if let Some(join) = db.join.take() {
+        let _ = join.join();
+    }
+}
+
+/// Start the device proxy for `url`, replacing any previous instance.
+/// Returns the loopback port the Web tab's iframe should load.
+#[tauri::command]
+fn device_browse_start(
+    state: State<'_, AppState>,
+    url: String,
+    on_event: Channel<InvokeResponseBody>,
+) -> Result<u16, String> {
+    let target = devproxy::parse_target(&url).map_err(err_str)?;
+
+    let mut guard = state.device_browse.lock().unwrap();
+    if let Some(old) = guard.take() {
+        stop_device_browse(old);
+    }
+
+    let server = tiny_http::Server::http("127.0.0.1:0")
+        .map_err(|e| format!("could not start the device proxy: {e}"))?;
+    let port = match server.server_addr() {
+        tiny_http::ListenAddr::IP(addr) => addr.port(),
+        other => return Err(format!("device proxy bound to a non-IP address: {other:?}")),
+    };
+    let server = Arc::new(server);
+    let target = Arc::new(Mutex::new(target));
+
+    let _ = db_send(&on_event, &DeviceBrowseEvent::Stage { stage: "listening", port });
+
+    let loop_server = server.clone();
+    let loop_target = target.clone();
+    let join = std::thread::spawn(move || dev_proxy_loop(loop_server, loop_target, on_event));
+
+    *guard = Some(DeviceBrowse {
+        server,
+        port,
+        target,
+        join: Some(join),
+    });
+    Ok(port)
+}
+
+/// Point the running proxy at a different device without rebinding the
+/// port (the iframe keeps its origin; the next request goes to the new
+/// target).
+#[tauri::command]
+fn device_browse_set_target(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    let target = devproxy::parse_target(&url).map_err(err_str)?;
+    let guard = state.device_browse.lock().unwrap();
+    match guard.as_ref() {
+        Some(db) => {
+            *db.target.lock().unwrap() = target;
+            Ok(())
+        }
+        None => Err("the device proxy is not running — start it first".into()),
+    }
+}
+
+#[tauri::command]
+fn device_browse_stop(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(db) = state.device_browse.lock().unwrap().take() {
+        stop_device_browse(db);
+    }
+    Ok(())
+}
+
 use bancada_core::agent::{self, AgentCfg};
 use bancada_core::mcp::{self, McpReply};
 use bancada_core::types::OutputLine;
@@ -3745,6 +4026,7 @@ pub fn run() {
                 serial_ring: Arc::new(Mutex::new(SerialRing::default())),
                 selected_target: Arc::new(Mutex::new(None)),
                 mqtt: Mutex::new(None),
+                device_browse: Mutex::new(None),
                 agent: Mutex::new(None),
                 build_gate: Arc::new(Mutex::new(())),
             });
@@ -3854,6 +4136,9 @@ pub fn run() {
             identify_board,
             forget_board,
             mqtt_connect,
+            device_browse_start,
+            device_browse_set_target,
+            device_browse_stop,
             mqtt_publish,
             mqtt_subscribe,
             mqtt_unsubscribe,
@@ -3888,6 +4173,16 @@ pub fn run() {
                 if let Some(session) = mqtt_session {
                     stop_mqtt_session(session);
                 }
+                // ---------- device browser ---------- unblock the proxy's
+                // accept loop so its thread exits instead of leaking.
+                let db = state
+                    .device_browse
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(db) = db {
+                    stop_device_browse(db);
+                }
                 // ---------- agent ---------- same teardown as `agent_stop`:
                 // kill and reap the child rather than orphan it.
                 let agent_session = lock_agent(&state).take();
@@ -3910,6 +4205,38 @@ mod tests {
     use super::*;
     use std::net::TcpStream;
     use std::sync::mpsc;
+
+    // ---------- device-browser event envelope ----------
+
+    #[test]
+    fn device_browse_events_serialize_with_the_type_tag_the_frontend_switches_on() {
+        let ex = DeviceBrowseEvent::Exchange {
+            method: "GET".into(),
+            path: "/data.json".into(),
+            status: 200,
+            duration_ms: 12,
+            content_type: Some("application/json".into()),
+            req_bytes: 0,
+            resp_bytes: 42,
+            preview: "{\"t\":24.5}".into(),
+            truncated: false,
+            binary: false,
+        };
+        let v: serde_json::Value = serde_json::to_value(&ex).unwrap();
+        assert_eq!(v["type"], "exchange");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["content_type"], "application/json");
+
+        let stage = DeviceBrowseEvent::Stage { stage: "listening", port: 4242 };
+        let v: serde_json::Value = serde_json::to_value(&stage).unwrap();
+        assert_eq!(v["type"], "stage");
+        assert_eq!(v["port"], 4242);
+
+        let closed = DeviceBrowseEvent::Closed {};
+        assert_eq!(serde_json::to_value(&closed).unwrap()["type"], "closed");
+        let err = DeviceBrowseEvent::Error { path: "/x".into(), message: "boom".into() };
+        assert_eq!(serde_json::to_value(&err).unwrap()["type"], "error");
+    }
 
     // ---------- harness ----------
 

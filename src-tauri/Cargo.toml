@@ -24,6 +24,10 @@ serde_json = "1"
 # server exists in the workspace already — hyper/reqwest are tauri's
 # client-side transitives, not ours to drive.
 tiny_http = "0.12"
+# Outbound half of the device-browser proxy (tiny_http is server-only).
+# Plain http on purpose: bench devices don't serve TLS, and the proxy
+# refuses https targets up front (core::devproxy::parse_target).
+ureq = { version = "2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
