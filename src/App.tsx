@@ -44,6 +44,7 @@ import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
 import UsageDashboard from "./components/UsageDashboard";
 import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
+import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
 import {
   GROUP_LABEL,
@@ -216,7 +217,7 @@ export default function App() {
   // per-group sub-tabs, same memory pattern as the sidebar.
   const [bottomGroup, setBottomGroup] = useState<BottomGroup>("console");
   const [debugTab, setDebugTab] = useState<"serial" | "scope">("serial");
-  const [obsTab, setObsTab] = useState<"mqtt" | "ws">("mqtt");
+  const [obsTab, setObsTab] = useState<"mqtt" | "ws" | "web">("mqtt");
   const bottomTab: BottomTab =
     bottomGroup === "console"
       ? "build"
@@ -247,6 +248,7 @@ export default function App() {
   const [scopeMounted, setScopeMounted] = useState(false);
   const [mqttMounted, setMqttMounted] = useState(false);
   const [wsMounted, setWsMounted] = useState(false);
+  const [webMounted, setWebMounted] = useState(false);
   const [agentMounted, setAgentMounted] = useState(false);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
@@ -342,10 +344,11 @@ export default function App() {
     const g = GROUP_OF[tab];
     setBottomGroup(g);
     if (g === "debug") setDebugTab(tab as "serial" | "scope");
-    if (g === "obs") setObsTab(tab as "mqtt" | "ws");
+    if (g === "obs") setObsTab(tab as "mqtt" | "ws" | "web");
     if (tab === "scope") setScopeMounted(true);
     if (tab === "mqtt") setMqttMounted(true);
     if (tab === "ws") setWsMounted(true);
+    if (tab === "web") setWebMounted(true);
     if (tab === "agent") setAgentMounted(true);
   }, []);
 
@@ -2149,6 +2152,9 @@ export default function App() {
           <MqttPanel active={bottomTab === "mqtt"} notify={notify} />
         )}
         {wsMounted && <WsPanel active={bottomTab === "ws"} notify={notify} />}
+        {webMounted && (
+          <DeviceBrowserPanel active={bottomTab === "web"} notify={notify} />
+        )}
         {scopeMounted && (
           <ScopeView
             active={bottomTab === "scope"}
