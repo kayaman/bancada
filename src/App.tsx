@@ -138,14 +138,32 @@ export default function App() {
   const [showingUsage, setShowingUsage] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
-  // Computed once per opened project (spec Risk R4): the Assistant panel
-  // warns when there's no undo path for its auto-applied edits.
-  const [gitWarning, setGitWarning] = useState(false);
   // Live mirror of sketchDir for the App-level agent event listeners, which
   // are registered once (empty-dep effect) and would otherwise close over a
   // stale `null`.
   const sketchDirRef = useRef<string | null>(null);
   sketchDirRef.current = sketchDir;
+
+  // The toolbar pill's whole world; null while no sketch is open.
+  const [gitState, setGitState] = useState<api.RepoState | null>(null);
+  const [ghOk, setGhOk] = useState(false);
+  const gitStateRefreshRef = useRef<(dir: string) => void>(() => {});
+
+  const refreshGitState = useCallback((dir: string) => {
+    // Fire-and-forget like fleetSync: a hint, not load-bearing. Guarded
+    // against staleness on both paths — a slow response for a project the
+    // user has since switched away from must not clobber the new one's
+    // state, whether it resolves or rejects.
+    api
+      .gitState(dir)
+      .then((s) => {
+        if (dir === sketchDirRef.current) setGitState(s);
+      })
+      .catch(() => {
+        if (dir === sketchDirRef.current) setGitState(null);
+      });
+  }, []);
+  gitStateRefreshRef.current = refreshGitState;
 
   // editor — unsaved edits live in the buffer map keyed by rel_path; disk is
   // the source of truth for clean files.
@@ -310,6 +328,13 @@ export default function App() {
     bottomTabRef.current = bottomTab;
     setUnseen((u) => (u[bottomTab] ? { ...u, [bottomTab]: false } : u));
   }, [bottomTab]);
+
+  // Whether `gh` is installed and on PATH — gates the "Create on GitHub"
+  // option in the git pill's remote-setup popover. Not a check that it's
+  // authenticated; an auth failure surfaces later, at create time.
+  useEffect(() => {
+    api.ghAvailable().then(setGhOk).catch(() => setGhOk(false));
+  }, []);
 
   /** Open a bottom tab: routes to its group, remembers it there, mounts
    *  live panels on first open. Every former setBottomTab caller uses this. */
@@ -537,11 +562,12 @@ export default function App() {
       setSketchDir(dir);
       setFiles(fs);
       setSketchYaml(yaml);
-      // Fire-and-forget, same as fleetSync above: a hint, not load-bearing.
-      api
-        .sketchHasGit(dir)
-        .then((has) => setGitWarning(!has))
-        .catch(() => setGitWarning(false));
+      // Reset synchronously before kicking off the async refresh: otherwise
+      // the pill would render the previous project's state — bound to the
+      // new project's handlers — for however long git_state takes to answer.
+      // The pill briefly disappearing is honest; a stale one lying is not.
+      setGitState(null);
+      refreshGitState(dir);
       const profiles = Object.keys(yaml.profiles ?? {});
       const prof = yaml.default_profile ?? profiles[0] ?? null;
       setProfile(prof);
@@ -875,7 +901,8 @@ export default function App() {
     if (skipped.length > 0) {
       notify(conflictMessage(skipped), true);
     }
-  }, [sketchDir, notify]);
+    refreshGitState(sketchDir);
+  }, [sketchDir, notify, refreshGitState]);
 
   /** Refuse a build/flash while the agent's edits and the user's disagree.
    *
@@ -1027,6 +1054,97 @@ export default function App() {
     }
   };
 
+  // ---------- project git (checkpoint & sync) ----------
+
+  const gitCommit = async (message: string) => {
+    if (!sketchDir) return;
+    await saveAll();
+    try {
+      const outcome = await api.gitCommit(sketchDir, message);
+      notify(outcome === "committed" ? "✓ Committed" : "Nothing to commit");
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      refreshGitState(sketchDir);
+    }
+  };
+
+  const gitSync = async () => {
+    if (!sketchDir) return;
+    setBuildLines([]);
+    openBottomTab("build");
+    setUserBusy(true);
+    notify("Syncing…");
+    try {
+      const outcome = await api.gitSync(sketchDir);
+      const msg: Record<api.SyncOutcome, [string, boolean]> = {
+        synced: ["✓ Synced with origin", false],
+        dirty_tree: ["Uncommitted changes — commit first", true],
+        diverged: [
+          "Diverged with conflicts — rebase aborted; resolve in a terminal, then Sync again",
+          true,
+        ],
+        no_remote: ["No remote configured", true],
+        not_root: ["Sync works from the repository root", true],
+      };
+      const [text, isErr] = msg[outcome];
+      notify(text, isErr);
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setUserBusy(false);
+      refreshGitState(sketchDir);
+    }
+  };
+
+  const gitInit = async () => {
+    if (!sketchDir) return;
+    const dir = sketchDir;
+    try {
+      const s = await api.gitInit(dir);
+      // Guarded like refreshGitState: a slow init for a project the user has
+      // since switched away from must not clobber the new one's state.
+      if (dir === sketchDirRef.current) setGitState(s);
+      notify("✓ Repository initialized (credential .gitignore + baseline commit)");
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
+
+  const gitCreateRemote = async (name: string) => {
+    if (!sketchDir) return;
+    setBuildLines([]);
+    openBottomTab("build");
+    setUserBusy(true);
+    notify(`Creating private GitHub repo ${name}…`);
+    try {
+      await api.gitCreateRemote(sketchDir, name);
+      notify(`✓ Created and pushed to ${name}`);
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setUserBusy(false);
+      refreshGitState(sketchDir);
+    }
+  };
+
+  const gitSetRemote = async (url: string) => {
+    if (!sketchDir) return;
+    setBuildLines([]);
+    openBottomTab("build");
+    setUserBusy(true);
+    notify("Setting remote and pushing…");
+    try {
+      await api.gitSetRemote(sketchDir, url);
+      notify("✓ Remote set and pushed");
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setUserBusy(false);
+      refreshGitState(sketchDir);
+    }
+  };
+
   // ---------- serial monitor ----------
 
   /** Best-effort monitor start (auto-capture); errors stay off the status bar. */
@@ -1163,6 +1281,7 @@ export default function App() {
       .catch(() => {
         /* best-effort — a missed tree refresh isn't worth surfacing */
       });
+    gitStateRefreshRef.current(dir);
 
     const rel = relativeToSketchDir(filePath, dir);
     if (rel !== openFileRef.current) return;
@@ -1602,6 +1721,13 @@ export default function App() {
         onRefreshPorts={refreshPorts}
         onVerify={verify}
         onUpload={upload}
+        gitState={gitState}
+        ghAvailable={ghOk}
+        onGitCommit={gitCommit}
+        onGitSync={gitSync}
+        onGitInit={gitInit}
+        onGitCreateRemote={gitCreateRemote}
+        onGitSetRemote={gitSetRemote}
       />
 
       {profileForm && sketchDir && (
@@ -1976,7 +2102,7 @@ export default function App() {
             onNewSession={newAgentSession}
             onContinueChat={continueChat}
             openBottomTab={openBottomTab}
-            gitWarning={gitWarning}
+            gitWarning={gitState?.kind === "no_git"}
             uploadsArmed={uploadsArmed}
             onToggleUploadsArmed={toggleUploadsArmed}
           />

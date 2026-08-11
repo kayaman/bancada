@@ -20,21 +20,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::{ghlib, library, project, sketch, Error, Result};
+use crate::git::merged_gitignore;
 
 /// Directories excluded from a clone on top of the sketch walker's skip
 /// list: `.bancada` is re-fetchable from `bancada.yaml`, and `.claude` is
 /// per-checkout agent state.
 const CLONE_EXTRA_SKIP_DIRS: &[&str] = &[".bancada", ".claude"];
-
-/// Entries every clone's `.gitignore` must carry: build output, vendored
-/// libraries, and the credential files that must never reach a commit.
-const GITIGNORE_REQUIRED: &[&str] = &[
-    "build/",
-    ".bancada/",
-    ".env",
-    "secrets.h",
-    "arduino_secrets.h",
-];
 
 /// A finished clone.
 #[derive(Debug, Clone, Serialize)]
@@ -307,33 +298,6 @@ fn copy_dir(
     Ok(())
 }
 
-/// Append the [`GITIGNORE_REQUIRED`] entries `existing` lacks, using the same
-/// trimmed-line comparison as `ghlib::ensure_gitignored`: `build`, `build/`,
-/// `/build` and `/build/` all count as the entry being present. Existing
-/// content is preserved, gaining a trailing newline when it is missing one.
-fn merged_gitignore(existing: &str) -> String {
-    let has = |content: &str, entry: &str| {
-        let base = entry.trim_end_matches('/');
-        content.lines().any(|l| {
-            let t = l.trim();
-            t == base
-                || t == format!("{base}/")
-                || t == format!("/{base}")
-                || t == format!("/{base}/")
-        })
-    };
-    let mut out = existing.to_string();
-    for entry in GITIGNORE_REQUIRED {
-        if !has(&out, entry) {
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(entry);
-            out.push('\n');
-        }
-    }
-    out
-}
 
 /// Rewrite the clone's main ino title comment: when line 1 is exactly a
 /// `// <src_name>` prefix followed by a non-alphanumeric character (or the

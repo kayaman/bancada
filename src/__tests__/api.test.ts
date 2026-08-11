@@ -607,10 +607,32 @@ describe("fleet and settings", () => {
     await api.removeRecentProject("/s");
     expect(called()).toEqual(["remove_recent_project", { dir: "/s" }]);
   });
+});
 
-  it("sketchHasGit passes sketchDir", async () => {
-    await api.sketchHasGit("/s");
-    expect(called()).toEqual(["sketch_has_git", { sketchDir: "/s" }]);
+describe("git commands", () => {
+  it("gitState passes sketchDir", async () => {
+    await api.gitState("/s");
+    expect(called()).toEqual(["git_state", { sketchDir: "/s" }]);
+  });
+
+  it("gitCommit passes sketchDir and message", async () => {
+    await api.gitCommit("/s", "checkpoint: x");
+    expect(called()).toEqual(["git_commit", { sketchDir: "/s", message: "checkpoint: x" }]);
+  });
+
+  it("gitSync passes sketchDir", async () => {
+    await api.gitSync("/s");
+    expect(called()).toEqual(["git_sync", { sketchDir: "/s" }]);
+  });
+
+  it("gitCreateRemote passes sketchDir and name", async () => {
+    await api.gitCreateRemote("/s", "proj");
+    expect(called()).toEqual(["git_create_remote", { sketchDir: "/s", name: "proj" }]);
+  });
+
+  it("gitSetRemote passes sketchDir and url", async () => {
+    await api.gitSetRemote("/s", "git@host:r.git");
+    expect(called()).toEqual(["git_set_remote", { sketchDir: "/s", url: "git@host:r.git" }]);
   });
 });
 
