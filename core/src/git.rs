@@ -15,6 +15,12 @@
 //! - `init_repo` makes an initial commit rather than leaving an empty
 //!   repository. An empty repo has no baseline to restore to, which is the one
 //!   thing the Assistant panel's warning is about.
+//! - `commit` (the checkpoint path) carries the same identity/gpg/hooks
+//!   fallbacks as `init_repo`, unconditionally. Both are app-internal safety
+//!   commits rather than authorship claims, so neither should depend on the
+//!   machine having a git identity configured, a working gpg agent, or a
+//!   harmless global hooks directory — any one of those missing must not be
+//!   able to turn "save a checkpoint" into an error.
 
 use crate::{Error, Result};
 use crate::types::{OutputLine, OutputStream};
@@ -239,10 +245,23 @@ pub struct StatusV2 {
     pub dirty: Vec<ChangedPath>,
 }
 
-/// Parse porcelain v2. Headers are `# branch.*` lines; entries start with
-/// `1` (ordinary), `2` (rename/copy — new path first, then a tab and the
-/// original), `u` (unmerged) or `?` (untracked). Unknown lines are skipped:
-/// git adds header kinds over time and a status pill must not break on them.
+/// Parse `git status --porcelain=v2 --branch -z` output. Records are
+/// NUL-terminated rather than newline-terminated — including the `#
+/// branch.*` headers — and pathnames are emitted verbatim, unquoted, per
+/// git's porcelain-v2 `-z` spec. That matters: with the default
+/// `core.quotePath`, a non-ASCII filename would otherwise arrive C-quoted
+/// (`"leitura-t\303\251rmica.ino"`, literal backslashes and quotes) in the
+/// plain newline-terminated form, breaking display, checkpoint messages and
+/// [`tracked_secrets`] matching. `-z` sidesteps quoting entirely instead of
+/// parsing it.
+///
+/// Entries start with `1` (ordinary), `2` (rename/copy), `u` (unmerged) or
+/// `?` (untracked). Unknown record kinds are skipped: git adds header kinds
+/// over time and a status pill must not break on them. A `2` (rename/copy)
+/// entry's path field is followed by a *second* NUL-terminated record, the
+/// original path — under `-z` there is no tab-joined pair on one line, so
+/// that second record is consumed here and not surfaced (call sites want the
+/// new path, same as the non-`-z` behaviour this replaces).
 pub fn parse_status_v2(out: &str) -> StatusV2 {
     let mut s = StatusV2 {
         branch: String::new(),
@@ -252,13 +271,17 @@ pub fn parse_status_v2(out: &str) -> StatusV2 {
         behind: 0,
         dirty: Vec::new(),
     };
-    for line in out.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
+    let mut records = out.split('\0');
+    while let Some(rec) = records.next() {
+        if rec.is_empty() {
+            continue;
+        }
+        if let Some(rest) = rec.strip_prefix("# branch.head ") {
             s.detached = rest == "(detached)";
             s.branch = rest.to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+        } else if let Some(rest) = rec.strip_prefix("# branch.upstream ") {
             s.upstream = Some(rest.to_string());
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+        } else if let Some(rest) = rec.strip_prefix("# branch.ab ") {
             for part in rest.split_whitespace() {
                 if let Some(n) = part.strip_prefix('+') {
                     s.ahead = n.parse().unwrap_or(0);
@@ -266,39 +289,48 @@ pub fn parse_status_v2(out: &str) -> StatusV2 {
                     s.behind = n.parse().unwrap_or(0);
                 }
             }
-        } else if let Some(rest) = line.strip_prefix("? ") {
+        } else if let Some(rest) = rec.strip_prefix("? ") {
             s.dirty.push(ChangedPath {
                 path: rest.to_string(),
                 status: "??".to_string(),
             });
-        } else if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
-            let status = line.get(2..4).unwrap_or("").to_string();
+        } else if rec.starts_with("1 ") || rec.starts_with("2 ") || rec.starts_with("u ") {
+            let status = rec.get(2..4).unwrap_or("").to_string();
             // Fields are space-separated; the path is everything from field 8
-            // (ordinary) / 9 (unmerged has an extra mode) onward. Taking the
-            // tail after the 8th space and splitting a rename's `\t` is
-            // simpler and survives spaces in filenames.
-            let n_meta = if line.starts_with("u ") { 10 } else { 8 };
-            let mut rest = line;
+            // (ordinary/rename) / field 10 (unmerged has extra mode columns)
+            // onward. Taking the tail after the Nth space is simpler than a
+            // fixed-width split and survives spaces in filenames.
+            let n_meta = if rec.starts_with("u ") { 10 } else { 8 };
+            let mut rest = rec;
             for _ in 0..n_meta {
                 rest = match rest.split_once(' ') {
                     Some((_, r)) => r,
                     None => "",
                 };
             }
-            let mut path = rest.split('\t').next().unwrap_or("").to_string();
-            // For renames/copies, strip the score prefix (e.g., "R100 " or "C75 ")
-            if line.starts_with("2 ") {
-                if let Some(space_idx) = path.find(' ') {
-                    let prefix = &path[..space_idx];
-                    if (prefix.starts_with('R') || prefix.starts_with('C'))
-                        && prefix[1..].chars().all(|c| c.is_ascii_digit())
+            // For renames/copies the remaining text is "<score> <path>"
+            // (e.g. "R100 renamed.h"); strip the score. The path itself is
+            // the whole rest of the record now — no tab to split on under
+            // `-z`, since the original path is a separate NUL record.
+            let path = if rec.starts_with("2 ") {
+                match rest.split_once(' ') {
+                    Some((prefix, tail))
+                        if (prefix.starts_with('R') || prefix.starts_with('C'))
+                            && prefix[1..].chars().all(|c| c.is_ascii_digit()) =>
                     {
-                        path = path[space_idx + 1..].to_string();
+                        tail.to_string()
                     }
+                    _ => rest.to_string(),
                 }
-            }
+            } else {
+                rest.to_string()
+            };
             if !path.is_empty() {
                 s.dirty.push(ChangedPath { path, status });
+            }
+            if rec.starts_with("2 ") {
+                // Consume the paired origPath record; it is not surfaced.
+                let _ = records.next();
             }
         }
     }
@@ -316,12 +348,16 @@ pub fn suggested_message(dirty: &[ChangedPath]) -> String {
     }
 }
 
-/// Credential-named files among `git ls-files` output — files `.gitignore`
-/// can no longer protect, because they are already tracked.
+/// Credential-named files among `git ls-files -z` output — files
+/// `.gitignore` can no longer protect, because they are already tracked.
+/// Expects NUL-separated, unquoted paths (`-z`): with plain `ls-files`, a
+/// non-ASCII path like `configuração/secrets.h` would arrive C-quoted under
+/// the default `core.quotePath` and the basename match below would miss it.
 pub fn tracked_secrets(ls_files_out: &str) -> Vec<String> {
     let secret_names = ["secrets.h", "arduino_secrets.h", ".env"];
     ls_files_out
-        .lines()
+        .split('\0')
+        .filter(|p| !p.is_empty())
         .filter(|p| {
             let base = p.rsplit('/').next().unwrap_or(p);
             secret_names.contains(&base)
@@ -330,11 +366,40 @@ pub fn tracked_secrets(ls_files_out: &str) -> Vec<String> {
         .collect()
 }
 
+/// Strip `dir`'s root-relative prefix from each of `dirty`'s paths.
+///
+/// `git status -z` reports paths relative to the repository root regardless
+/// of `-C`/cwd (unlike the non-`-z` form, which is cwd-relative) — see
+/// `git-status(1)`'s porcelain v2 section. A nested sketch's dirty paths
+/// therefore arrive as `inner/tracked.ino`, not `tracked.ino`; callers that
+/// want them scoped to the sketch (matching how they're already scoped to
+/// exclude the rest of the repository) need the prefix removed.
+fn strip_root_prefix(root: &Path, dir: &Path, dirty: Vec<ChangedPath>) -> Vec<ChangedPath> {
+    let Ok(rel) = dir.strip_prefix(root) else {
+        return dirty;
+    };
+    let prefix = rel.to_string_lossy().replace('\\', "/");
+    if prefix.is_empty() {
+        return dirty;
+    }
+    dirty
+        .into_iter()
+        .map(|mut c| {
+            if let Some(stripped) = c.path.strip_prefix(&prefix).and_then(|s| s.strip_prefix('/')) {
+                c.path = stripped.to_string();
+            }
+            c
+        })
+        .collect()
+}
+
 /// Everything the git pill needs, in one call.
 ///
 /// Root-vs-nested comes from [`repo_root`] ancestry. Dirty paths are always
 /// scoped to the sketch directory (`status ... -- .` with `-C <sketch>`), so a
-/// nested sketch never reports its parent repository's unrelated noise.
+/// nested sketch never reports its parent repository's unrelated noise. Under
+/// `-z` those paths come back root-relative (see [`strip_root_prefix`]), so
+/// the Nested arm strips the sketch's prefix back off before returning.
 pub fn repo_state(dir: &Path) -> Result<RepoState> {
     let Some(root) = repo_root(dir) else {
         return Ok(RepoState::NoGit);
@@ -343,13 +408,15 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
         .to_str()
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
 
-    let status = run(&["-C", dir_s, "status", "--porcelain=v2", "--branch", "--", "."])?;
+    // `-z`: NUL-terminated records with unquoted paths, so a non-ASCII
+    // filename comes back exact instead of C-quoted. See `parse_status_v2`.
+    let status = run(&["-C", dir_s, "status", "--porcelain=v2", "--branch", "-z", "--", "."])?;
     let parsed = parse_status_v2(&status);
 
     if root != dir {
         return Ok(RepoState::Nested {
             root: root.to_string_lossy().into_owned(),
-            dirty: parsed.dirty,
+            dirty: strip_root_prefix(&root, dir, parsed.dirty),
         });
     }
 
@@ -358,7 +425,7 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let ls = run(&["-C", dir_s, "ls-files", "--", "."])?;
+    let ls = run(&["-C", dir_s, "ls-files", "-z", "--", "."])?;
     let secrets = tracked_secrets(&ls);
     let msg = suggested_message(&parsed.dirty);
 
@@ -378,6 +445,17 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
 /// Checkpoint everything under `dir`: `add -A -- .` scoped to the sketch,
 /// then commit. In a nested sketch this commits only the subtree's paths —
 /// the parent repository's other changes are not swept in.
+///
+/// The commit carries the same `-c` fallback set as [`init_repo`] — no-identity,
+/// no-gpg-sign, no-hooks — and for the same reason, extended: a checkpoint is
+/// an app-internal safety commit triggered by the Assistant panel, not a
+/// claim of authorship, so it should no more depend on the machine's git
+/// identity, gpg agent, or global hooks than the initial commit does. The
+/// fallback is unconditional (not "only if identity is missing") to keep
+/// checkpoint and init behaving identically — a checkpoint that used the
+/// real identity when present and Bancada's when absent would make commit
+/// authorship depend on machine state, which is one more thing to explain
+/// when someone looks at the log.
 pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
     let d = dir
         .to_str()
@@ -387,7 +465,25 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
         return Ok(CommitOutcome::NothingToCommit);
     }
     run(&["-C", d, "add", "-A", "--", "."])?;
-    run(&["-C", d, "commit", "--quiet", "-m", message, "--", "."])?;
+    run(&[
+        "-C",
+        d,
+        "-c",
+        "user.name=Bancada",
+        "-c",
+        "user.email=bancada@localhost",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=",
+        "commit",
+        "--no-verify",
+        "--quiet",
+        "-m",
+        message,
+        "--",
+        ".",
+    ])?;
     Ok(CommitOutcome::Committed)
 }
 
@@ -766,8 +862,14 @@ mod tests {
         let sketch = root.join("inner");
         std::fs::create_dir_all(&sketch).unwrap();
 
-        // Add a tracked file inside the sketch directory
+        // Add a tracked file inside the sketch directory. Identity is set
+        // locally (rather than relying on the host's ambient git config, as
+        // the rest of this module's fixtures do) so this test is hermetic —
+        // in particular, immune to another test in the suite isolating
+        // itself from ambient identity via GIT_CONFIG_GLOBAL/SYSTEM.
         std::fs::write(sketch.join("tracked.ino"), "void setup() {}\n").unwrap();
+        run(&["-C", sketch.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
+        run(&["-C", sketch.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
         run(&["-C", sketch.to_str().unwrap(), "add", "tracked.ino"]).unwrap();
         run(&["-C", sketch.to_str().unwrap(), "commit", "-m", "add tracked file"]).unwrap();
 
@@ -795,6 +897,32 @@ mod tests {
         }
     }
 
+    /// `git status -z` reports paths root-relative regardless of `-C`,
+    /// unlike the non-`-z` form which is cwd-relative — confirmed by hand
+    /// against a real nested checkout (`git -C <subdir> status --porcelain=v2
+    /// -z -- .` returns `inner/tracked.ino`, not `tracked.ino`). Direct unit
+    /// coverage of the stripping helper, independent of the full
+    /// `repo_state` round-trip above.
+    #[test]
+    fn strip_root_prefix_removes_the_sketchs_root_relative_prefix() {
+        let root = Path::new("/repo");
+        let dirty = vec![
+            ChangedPath { path: "inner/tracked.ino".into(), status: ".M".into() },
+            ChangedPath { path: "inner/new.ino".into(), status: "??".into() },
+        ];
+        let stripped = strip_root_prefix(root, Path::new("/repo/inner"), dirty);
+        let paths: Vec<&str> = stripped.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["tracked.ino", "new.ino"]);
+    }
+
+    #[test]
+    fn strip_root_prefix_is_a_no_op_at_the_repo_root() {
+        let root = Path::new("/repo");
+        let dirty = vec![ChangedPath { path: "a.ino".into(), status: ".M".into() }];
+        let stripped = strip_root_prefix(root, root, dirty.clone());
+        assert_eq!(stripped, dirty);
+    }
+
     #[test]
     fn repo_state_flags_a_tracked_secret() {
         let tmp = TempDir::new().unwrap();
@@ -808,6 +936,50 @@ mod tests {
         match repo_state(&dir).unwrap() {
             RepoState::Root { tracked_secrets, .. } => {
                 assert_eq!(tracked_secrets, vec!["secrets.h"]);
+            }
+            other => panic!("expected Root, got {other:?}"),
+        }
+    }
+
+    /// The bug this test exists for: with the default `core.quotePath`, a
+    /// non-ASCII filename comes back from `status --porcelain=v2` (and
+    /// `ls-files`) C-quoted — `"t\303\251rmica.ino"`, literal backslashes and
+    /// quotes — which broke display, checkpoint messages, and
+    /// `tracked_secrets` matching a quoted `configuração/secrets.h`. `-z`
+    /// (NUL-terminated, unquoted paths) fixes all three at once.
+    #[test]
+    fn repo_state_reports_non_ascii_paths_unquoted_and_flags_a_non_ascii_secret() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("Naovoce");
+        std::fs::create_dir_all(dir.join("configuração")).unwrap();
+        std::fs::write(dir.join("térmica.ino"), "void setup() {}\n").unwrap();
+        std::fs::write(dir.join("configuração/secrets.h"), "#define X\n").unwrap();
+        run(&["init", "--quiet", dir.to_str().unwrap()]).unwrap();
+        let d = dir.to_str().unwrap();
+        run(&["-C", d, "config", "user.name", "T"]).unwrap();
+        run(&["-C", d, "config", "user.email", "t@t"]).unwrap();
+        // Simulate a repo from before the ignore rules: track the secret by
+        // force, same as `repo_state_flags_a_tracked_secret`. Committed (not
+        // left staged) so only `térmica.ino`'s later edit shows up as dirty.
+        run(&["-C", d, "add", "-f", "configuração/secrets.h"]).unwrap();
+        run(&["-C", d, "add", "térmica.ino"]).unwrap();
+        run(&["-C", d, "commit", "--quiet", "-m", "base"]).unwrap();
+
+        std::fs::write(dir.join("térmica.ino"), "void setup() { }\n").unwrap();
+
+        match repo_state(&dir).unwrap() {
+            RepoState::Root { dirty, tracked_secrets, .. } => {
+                let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
+                assert_eq!(
+                    paths,
+                    ["térmica.ino"],
+                    "path must come back exact, not C-quoted: {paths:?}"
+                );
+                assert_eq!(
+                    tracked_secrets,
+                    vec!["configuração/secrets.h"],
+                    "a quoted path would not have matched the secrets basename check"
+                );
             }
             other => panic!("expected Root, got {other:?}"),
         }
@@ -878,24 +1050,25 @@ mod tests {
 
     // ----- porcelain-v2 parsing -----
 
-    // Real `git status --porcelain=v2 --branch` output shapes. `1` = ordinary
-    // change, `2` = rename (path\tab origPath), `?` = untracked, `u` = unmerged.
+    // Real `git status --porcelain=v2 --branch -z` output shapes: every
+    // record (including headers) is NUL-terminated instead of newline
+    // terminated. `1` = ordinary change, `2` = rename (path record, then a
+    // *separate* NUL-terminated origPath record — no tab under `-z`), `?` =
+    // untracked, `u` = unmerged.
     const STATUS_V2: &str = "\
-# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445
-# branch.head main
-# branch.upstream origin/main
-# branch.ab +2 -1
-1 .M N... 100644 100644 100644 aaaa bbbb sketch.ino
-1 A. N... 000000 100644 100644 0000 cccc web/index.html
-2 R. N... 100644 100644 100644 dddd eeee R100 renamed.h\told.h
-u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
-? notes.txt
-";
+# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445\0\
+# branch.head main\0\
+# branch.upstream origin/main\0\
+# branch.ab +2 -1\0\
+1 .M N... 100644 100644 100644 aaaa bbbb sketch.ino\0\
+1 A. N... 000000 100644 100644 0000 cccc web/index.html\0\
+2 R. N... 100644 100644 100644 dddd eeee R100 renamed.h\0old.h\0\
+u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
+? notes.txt\0";
 
     const STATUS_V2_DETACHED: &str = "\
-# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445
-# branch.head (detached)
-";
+# branch.oid 4e83dc1f24864aa68013ed2de6b6d4be42179445\0\
+# branch.head (detached)\0";
 
     #[test]
     fn parses_branch_upstream_and_ahead_behind() {
@@ -929,7 +1102,7 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
 
     #[test]
     fn a_clean_repo_without_upstream_parses_to_empty() {
-        let s = parse_status_v2("# branch.oid aaaa\n# branch.head main\n");
+        let s = parse_status_v2("# branch.oid aaaa\0# branch.head main\0");
         assert_eq!(s.branch, "main");
         assert_eq!(s.upstream, None);
         assert!(s.dirty.is_empty());
@@ -951,9 +1124,9 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
 
     #[test]
     fn tracked_secrets_flags_only_credential_basenames() {
-        let out = "sketch.ino\nsecrets.h\nweb/.env\nnotes/secrets.h.example\n";
+        let out = "sketch.ino\0secrets.h\0web/.env\0notes/secrets.h.example\0";
         assert_eq!(tracked_secrets(out), vec!["secrets.h", "web/.env"]);
-        assert!(tracked_secrets("sketch.ino\n").is_empty());
+        assert!(tracked_secrets("sketch.ino\0").is_empty());
     }
 
     // ----- commit -----
@@ -973,6 +1146,53 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt
         assert!(log.contains("checkpoint: b.h"), "log {log:?}");
         let status = run(&["-C", d, "status", "--porcelain"]).unwrap();
         assert!(status.trim().is_empty(), "tree should be clean: {status:?}");
+    }
+
+    /// The bug this test exists for: `commit` had none of `init_repo`'s
+    /// fallbacks, so a checkpoint on a machine with no git identity failed
+    /// "Please tell me who you are", a repo with `commit.gpgsign=true` and no
+    /// usable agent hung/failed, and a broken global hook aborted the
+    /// checkpoint. GIT_CONFIG_GLOBAL/SYSTEM are pointed at `/dev/null` for the
+    /// duration so the assertion exercises the fixture's (lack of) identity,
+    /// not whatever happens to be configured on the machine running the test.
+    #[test]
+    fn commit_falls_back_to_bancada_identity_and_skips_gpg_and_hooks() {
+        let prev_global = std::env::var_os("GIT_CONFIG_GLOBAL");
+        let prev_system = std::env::var_os("GIT_CONFIG_SYSTEM");
+        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("NoIdentity");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+
+        let d = dir.to_str().unwrap();
+        // Explicitly unset any identity (init_repo never persists one to
+        // local config — it only ever used `-c` for its own commit) and force
+        // a gpg signature this sandbox has no agent to produce.
+        let _ = run(&["-C", d, "config", "--unset-all", "user.name"]);
+        let _ = run(&["-C", d, "config", "--unset-all", "user.email"]);
+        run(&["-C", d, "config", "commit.gpgsign", "true"]).unwrap();
+
+        std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
+        let result = commit(&dir, "checkpoint: b.h");
+
+        if let Some(v) = prev_global {
+            std::env::set_var("GIT_CONFIG_GLOBAL", v);
+        } else {
+            std::env::remove_var("GIT_CONFIG_GLOBAL");
+        }
+        if let Some(v) = prev_system {
+            std::env::set_var("GIT_CONFIG_SYSTEM", v);
+        } else {
+            std::env::remove_var("GIT_CONFIG_SYSTEM");
+        }
+
+        assert_eq!(result.unwrap(), CommitOutcome::Committed);
+        let log = run(&["-C", d, "log", "--format=%an <%ae>", "-1"]).unwrap();
+        assert!(log.contains("Bancada <bancada@localhost>"), "log {log:?}");
     }
 
     #[test]
