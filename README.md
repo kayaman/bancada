@@ -5,25 +5,31 @@ local/proprietary libraries), compile/flash, serial monitor, and board
 utilities (ESP MAC address reader) — built with **Tauri 2 + Rust + React**.
 
 Bancada does not reimplement the toolchain. It drives the same engines the
-official IDE uses:
+official IDE uses, plus a few more, all resolved from `PATH`:
 
 - **arduino-cli** — boards, cores, builds, uploads, library registry (all via `--json`)
 - **esptool** — ESP-specific utilities (read MAC, chip info)
+- **git** / **gh** — project version control and one-button private repo creation
+- **claude** — the AI Assistant panel
 
 ```
 ┌─────────────────────────── Tauri window ───────────────────────────┐
-│ React UI (CodeMirror editor, file tree, library manager, consoles) │
+│ React UI — editor, file tree, library/board/fleet managers,        │
+│ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-                    invoke / events (build://line, serial://line)
+          src/api.ts:  91 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
-│ src-tauri  — commands, event streaming, serial monitor process     │
-│ core (bancada-core) — pure Rust, no UI deps, unit-tested:          │
-│   cli.rs      arduino-cli wrapper (JSON parsing, line streaming)   │
-│   sketch.rs   sketch.yaml profiles, dir: local libraries           │
-│   esptool.rs  MAC / chip info reader                               │
+│ src-tauri — commands, event streaming, threads, session state,     │
+│             plus a loopback MCP server the Assistant calls into    │
+├────────────────────────────────────────────────────────────────────┤
+│ core (bancada-core) — 22 modules of pure Rust, no UI deps:         │
+│   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
-                     subprocesses: arduino-cli, esptool
+      subprocesses: arduino-cli · esptool · git · gh · claude
 ```
+
+**Full architecture documentation: [docs/architecture/](docs/architecture/README.md)** —
+layer map, the IPC contract, the runtime model, and six end-to-end data flows.
 
 ## Prerequisites (openSUSE Tumbleweed)
 
@@ -163,6 +169,24 @@ scaffolded library, a fetched library and a newly created project actually
   FQBNs it has been built for, and when it was first and last seen
 - Sidebar split into **Software** (files, libraries) and **Hardware** (boards,
   fleet) groups, drag-resizable and collapsible to a rail
+- **Editor tabs** — multiple files open at once, dirty markers, and a
+  close-again-to-discard step so unsaved work is never dropped by one click
+- **Git pill** — repository state at a glance in the toolbar, with commit,
+  sync, `git init`, and one-button private repo creation through `gh`. Warns
+  before committing anything that looks like a tracked secret
+- **Scope** — a software oscilloscope in the Debugging tab, with two sources:
+  a **plotter** that parses numeric values out of the existing serial stream
+  (any board), and an **ADC** mode where companion firmware on an ESP32 streams
+  raw 12-bit samples over serial. Trigger, timebase, cursors, measurements, FFT
+  spectrum, and CSV/PNG export. The firmware ships in the binary — one button
+  installs and flashes it. Protocol: [docs/scope-architecture.md](docs/scope-architecture.md)
+- **Observability** tabs — an **MQTT** client and a **WebSocket** client for
+  watching what your board publishes, with topic stats, filtering, pause, and
+  pretty-printed JSON or hex payloads
+- **Web** tab — browse a board's own HTTP interface in an embedded iframe,
+  through a loopback reverse proxy that logs every request and response
+- **Usage dashboard** — cumulative AI Assistant spend per project, expandable
+  into individual sessions that replay inline
 - **AI Assistant** panel — a bottom-panel **Assistant** tab where a `claude`
   CLI session (spawned per project, scoped to the open sketch) reads/edits
   your sketch's files, runs Verify, reads the compiler errors, and iterates
@@ -247,32 +271,27 @@ under git`), because there is no undo path for an agent's edit without
 version control; commit or initialize git before trusting it with anything
 you can't easily retype.
 
-Writes are refused outside the sketch directory, and for the project's
-`.claude/`, `.git/`, `.mcp.json` (plus your own `~/.claude/`, shell rc
-files, `/etc/`, and similar), by `permissions.deny` rules in a `--settings`
-policy file Bancada writes **outside the project tree** — a policy the
-agent cannot edit — anchoring a `PreToolUse` guard hook that adds the
-subtree-containment check a denylist alone can't express. If a project's
-own settings already disable hooks (`disableAllHooks`), Bancada refuses to
-*start* the session rather than run one whose guard hook is known in
-advance not to fire. A second, independent check re-inspects every edit the
-agent reports and the session's tool list, and stops the session outright
-if either drifted from what Bancada expects.
+Writes are confined to the sketch directory, and refused for the project's
+`.claude/`, `.git/` and `.mcp.json` as well as your own `~/.claude/`, by four
+enforcement layers — deny rules, a `PreToolUse` guard hook, a pre-flight
+refusal, and an independent runtime backstop that stops the session if an edit
+or the tool list drifts from what Bancada expects.
 
-This is **in-process policy enforced by the `claude` CLI's own permission
-engine — not an OS-level sandbox or container**. **Reads are not confined
-at all**: the agent can read anything your account can, including SSH keys
-and credential files; only writes are policed. As of 0.12.0 the session
-also has **web access** (`WebFetch`/`WebSearch`) — a deliberate egress
-trade-off worth stating plainly: combined with unconfined reads, data the
-agent reads on your machine *can leave it*. If that trade-off is wrong for
-your environment, don't chat with the Assistant on machines holding
-secrets you wouldn't paste into a browser. The embedded session also
-still loads your own Claude Code configuration (hooks, plugins, skills) —
-the flags that would suppress that also break login or disable the
-`verify` tool — so a hostile hook already present in your personal
-configuration before the session starts is out of scope for this to catch.
-Bancada can only stop the agent from *installing* a new one.
+Three limits are worth stating plainly before you use it:
+
+- This is **in-process policy inside the `claude` CLI's own permission engine —
+  not an OS-level sandbox or container.**
+- **Reads are not confined at all.** The agent can read anything your account
+  can, including SSH keys and credential files. Only writes are policed.
+- Since 0.12.0 the session has **web access** (`WebFetch`/`WebSearch`) — a
+  deliberate egress trade-off. Combined with unconfined reads, data the agent
+  reads on your machine *can leave it*. If that is wrong for your environment,
+  don't chat with the Assistant on machines holding secrets you wouldn't paste
+  into a browser.
+
+**The complete model — all four layers, what each one can and cannot express,
+and everything that is *not* enforced — is documented in
+[docs/architecture/agent-safety.md](docs/architecture/agent-safety.md).**
 
 ## Roadmap ideas
 
@@ -280,18 +299,24 @@ Bancada can only stop the agent from *installing* a new one.
 - Profile editor UI (create/edit `sketch.yaml` platforms visually)
 - More esptool utilities: flash erase, flash size, filesystem image upload
 - Board options in the FQBN (`CDCOnBoot=cdc`) chosen from a picker
-- Git integration; multi-sketch workspaces
+- Multi-sketch workspaces
 
 ## Repo layout
 
 ```
 bancada/
-├── core/            # bancada-core: pure Rust bridge (unit-tested, no Tauri)
-├── src-tauri/       # Tauri app: commands, events, window config
+├── core/            # bancada-core: 22 modules of pure Rust (no Tauri, unit-tested)
+├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
+├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope
+├── docs/            # architecture, install, wire contracts, release notes
 ├── package.json
 └── Cargo.toml       # workspace: core + src-tauri
 ```
+
+See [docs/](docs/README.md) for the documentation index, and
+[docs/architecture/](docs/architecture/README.md) for how the pieces fit
+together.
 
 ## Notes
 
