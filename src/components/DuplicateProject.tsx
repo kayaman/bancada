@@ -8,7 +8,7 @@ import {
 } from "../api";
 
 interface Props {
-  /** Directory of the currently open sketch, prefilled as the source. */
+  /** Directory of the currently open project, prefilled as the source. */
   sourceDir: string | null;
   onCreated: (dir: string) => void;
   onCancel: () => void;

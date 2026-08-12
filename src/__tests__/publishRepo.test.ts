@@ -17,7 +17,7 @@ const root = (over: Partial<Extract<RepoState, { kind: "root" }>> = {}): RepoSta
 });
 
 describe("defaultRepoName", () => {
-  it("is the sketch folder's name", () => {
+  it("is the project folder's name", () => {
     expect(defaultRepoName("/home/u/Projects/teste-uno-veia")).toBe("teste-uno-veia");
   });
   it("ignores trailing slashes", () => {
@@ -68,11 +68,11 @@ describe("checkRepoName", () => {
 });
 
 describe("publishBlockedReason", () => {
-  it("blocks with no sketch open", () => {
-    expect(publishBlockedReason(null, "private", true)).toBe("open a sketch first");
+  it("blocks with no project open", () => {
+    expect(publishBlockedReason(null, "private", true)).toBe("open a project first");
   });
 
-  it("does not block an untracked sketch — the backend inits first", () => {
+  it("does not block an untracked project — the backend inits first", () => {
     expect(publishBlockedReason({ kind: "no_git" }, "private", true)).toBeNull();
     expect(publishBlockedReason({ kind: "no_git" }, "public", true)).toBeNull();
   });
@@ -87,7 +87,7 @@ describe("publishBlockedReason", () => {
     expect(r).toMatch(/already has a remote/i);
   });
 
-  it("blocks a nested sketch, naming the root — gh repo create --source would publish the wrong tree", () => {
+  it("blocks a nested project, naming the root — gh repo create --source would publish the wrong tree", () => {
     const r = publishBlockedReason(
       { kind: "nested", root: "/home/u/Projects", dirty: [] },
       "private",

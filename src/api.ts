@@ -631,7 +631,7 @@ export const loadSettings = () => invoke<AppSettings>("load_settings");
 /** Remember the open sketch and file for the next launch's restore. */
 export const setLastSketch = (dir: string, openFile: string | null) =>
   invoke<void>("set_last_sketch", { dir, openFile });
-/** Remember where the last project was created, for the New/Clone forms. */
+/** Remember where the last project was created, for the New/Duplicate forms. */
 export const setLastProjectParent = (dir: string) =>
   invoke<void>("set_last_project_parent", { dir });
 /** Move `dir` to the top of the recent-projects list (adding it if new). */

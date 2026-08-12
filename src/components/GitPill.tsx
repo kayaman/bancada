@@ -15,12 +15,12 @@ interface Props {
   state: RepoState | null;
   busy: boolean;
   ghAvailable: boolean;
-  /** Prefill for the gh repo name: the sketch folder's name. */
+  /** Prefill for the gh repo name: the project folder's name. */
   defaultRepoName: string;
   onCommit: (message: string) => void;
   onSync: () => void;
   onInit: () => void;
-  /** Init a nested sketch as a repository of its own — see git_init_here. */
+  /** Init a nested project as a repository of its own — see git_init_here. */
   onInitHere: () => void;
   onCreateRemote: (name: string, visibility: Visibility, description: string | null) => void;
   onSetRemote: (url: string) => void;
@@ -28,7 +28,7 @@ interface Props {
 
 /** Toolbar git pill: one glanceable state, and a popover holding the two
  *  actions (Commit / Sync) or the setup that must come first. Rendered only
- *  while a sketch is open — the caller passes state=null otherwise. */
+ *  while a project is open — the caller passes state=null otherwise. */
 export default function GitPill(props: Props) {
   const btnRef = useRef<HTMLButtonElement>(null);
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -53,7 +53,7 @@ export default function GitPill(props: Props) {
     else setMessage("");
     setRepoName(props.defaultRepoName);
     // Private every time the popover opens: publishing publicly should be a
-    // decision made now, never one inherited from the last sketch.
+    // decision made now, never one inherited from the last project.
     setVisibility("private");
     setDescription("");
     const r = btnRef.current?.getBoundingClientRect();
@@ -75,7 +75,7 @@ export default function GitPill(props: Props) {
     close();
   };
 
-  // Offered from `setup_remote` and from `init` alike: a sketch that is not
+  // Offered from `setup_remote` and from `init` alike: a project that is not
   // yet under git should reach GitHub in one action, not by initializing on
   // one trip and finding this row on the next. The backend inits first.
   const publishBlock = props.ghAvailable && (
@@ -205,13 +205,13 @@ export default function GitPill(props: Props) {
               <button
                 className="ctx-item"
                 disabled={props.busy}
-                title="Creates a repository inside the parent one. The parent will list this sketch as an embedded repository."
+                title="Creates a repository inside the parent one. The parent will list this project as an embedded repository."
                 onClick={() => {
                   props.onInitHere();
                   close();
                 }}
               >
-                Give this sketch its own repository
+                Give this project its own repository
               </button>
             </>
           )}

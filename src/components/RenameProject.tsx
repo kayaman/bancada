@@ -4,7 +4,7 @@ import type { RepoState } from "../api";
 import { checkProjectName, renamePlan } from "../projectRename";
 
 interface Props {
-  /** Directory of the currently open sketch. Renaming needs one open. */
+  /** Directory of the currently open project. Renaming needs one open. */
   sketchDir: string;
   gitState: RepoState | null;
   onRenamed: (dir: string) => void;
@@ -53,7 +53,7 @@ export default function RenameProject({
   const reason = name.trim() && !check.ok ? check.reason : null;
 
   const rename = async () => {
-    // Guard as CloneProject does: Enter bypasses the disabled button, and a
+    // Guard as DuplicateProject does: Enter bypasses the disabled button, and a
     // second concurrent rename would race the first one's directory move.
     if (working || !check.ok) return;
     setWorking(true);
@@ -84,7 +84,7 @@ export default function RenameProject({
           className="btn small primary"
           onClick={rename}
           disabled={working || !check.ok}
-          title={reason ?? "Rename the folder, its sketch, and everything keyed to the old path"}
+          title={reason ?? "Rename the folder, its main .ino, and everything keyed to the old path"}
         >
           ✎ Rename
         </button>

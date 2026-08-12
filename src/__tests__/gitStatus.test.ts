@@ -24,7 +24,7 @@ const root = (over: Partial<Extract<RepoState, { kind: "root" }>> = {}): RepoSta
 });
 
 describe("pillLabel", () => {
-  it("is null with no state (no sketch open — no placeholder pill)", () => {
+  it("is null with no state (no project open — no placeholder pill)", () => {
     expect(pillLabel(null)).toBeNull();
   });
   it("shows clean, changed, and ahead/behind states", () => {
@@ -107,15 +107,15 @@ describe("flashTaggingNote", () => {
     expect(flashTaggingNote(root())).toBeNull();
     expect(flashTaggingNote(root({ dirty: [{ path: "a.ino", status: ".M" }] }))).toBeNull();
   });
-  it("says nothing with no sketch open", () => {
+  it("says nothing with no project open", () => {
     expect(flashTaggingNote(null)).toBeNull();
   });
-  it("points an untracked sketch at init", () => {
+  it("points an untracked project at init", () => {
     const note = flashTaggingNote({ kind: "no_git" });
     expect(note).toMatch(/aren't tagged/);
     expect(note).toMatch(/initialize a repository/i);
   });
-  it("names the parent repo for a nested sketch", () => {
+  it("names the parent repo for a nested project", () => {
     const note = flashTaggingNote({ kind: "nested", root: "/home/u/Projects", dirty: [] });
     expect(note).toMatch(/aren't tagged/);
     expect(note).toContain("Projects");

@@ -17,11 +17,11 @@ pub fn validate_rel_path(rel: &str) -> Result<()> {
         return Err(Error::Other("empty path".into()));
     }
     if rel.starts_with('/') {
-        return Err(Error::Other(format!("{rel} is not inside the sketch")));
+        return Err(Error::Other(format!("{rel} is not inside the project")));
     }
     for seg in rel.split('/') {
         if seg == ".." {
-            return Err(Error::Other(format!("{rel} would leave the sketch (..)")));
+            return Err(Error::Other(format!("{rel} would leave the project (..)")));
         }
         if seg.trim().is_empty() {
             return Err(Error::Other(format!("{rel} has an empty path segment")));
@@ -91,7 +91,7 @@ impl SketchProject {
         }
         if self.is_protected(from) {
             return Err(Error::Other(format!(
-                "{from} is required by the sketch and cannot be renamed or moved"
+                "{from} is required by the build and cannot be renamed or moved"
             )));
         }
         if from_abs.symlink_metadata().is_err() {
@@ -117,7 +117,7 @@ impl SketchProject {
         let abs = self.abs_path(rel_path)?;
         if self.is_protected(rel_path) {
             return Err(Error::Other(format!(
-                "{rel_path} is required by the sketch and cannot be deleted"
+                "{rel_path} is required by the build and cannot be deleted"
             )));
         }
         if abs.symlink_metadata().is_err() {
@@ -328,7 +328,7 @@ mod tests {
     fn rename_rejects_protected_source() {
         let (_t, proj) = sample();
         let err = proj.rename_entry("demo.ino", "renamed.ino").unwrap_err();
-        assert!(err.to_string().contains("required by the sketch"), "{err}");
+        assert!(err.to_string().contains("required by the build"), "{err}");
         assert!(proj.rename_entry("sketch.yaml", "cfg.yaml").is_err());
     }
 

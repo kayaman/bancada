@@ -6,11 +6,11 @@ providers, no context, and no global store.
 
 ```
 ┌─ Toolbar ──────────────────────────────────────────────────────────┐
-│ brand · profile · port · Verify · Upload · git pill · menus        │
+│ brand │ 📁 project ▾ │ profile ＋ ✎ │ port ⟳ │ git ⟷ 📊 Verify Flash │
 ├─ ProfileInit (conditional row) ────────────────────────────────────┤
 ├─ main ─────────────────────────────────────────────────────────────┤
 │ ┌ sidebar ─────────┐ ┌ editor-area ────────────────────────────┐   │
-│ │ Software│Hardware│ │ New | Clone | Rename | Usage | editor   │   │
+│ │ Software│Hardware│ │ New | Duplicate | Rename | Usage | edit │   │
 │ │ ──────────────── │ │   …or…                                  │   │
 │ │ Files│Libraries  │ │ EditorTabs + CodeMirror                 │   │
 │ │ Boards│Fleet     │ │                                         │   │
@@ -30,9 +30,22 @@ providers, no context, and no global store.
 all cross-panel state and registers every backend subscription. Its render tree
 begins around line 1749.
 
-Four composition rules are encoded there and are easy to break by accident:
+Five composition rules are encoded there and are easy to break by accident:
 
-**One editor-area form at a time.** `NewProject`, `CloneProject`,
+**One project affordance.** `📁 <name> ▾` (`ProjectMenu.tsx`) names the open
+project and holds every action on it — Open, Recent, New, Duplicate, Rename.
+It exists because the bar had drifted into six project controls and three
+glyphs each meaning two things. What it offers, and what is disabled and why,
+lives in `src/toolbarModel.ts`: `vitest`'s include glob does not match `.tsx`,
+so a decision left in the component is verified by eye alone.
+
+`ProjectMenu` is also the codebase's only **nested** `Menu`. `Menu` needed no
+change — a child rendered inside the parent's `children` is inside the parent's
+`ref`, so clicking it does not dismiss the parent. Escape was the one gap: both
+listen on `window` in the bubble phase and would close together, so
+`ProjectMenu` takes Escape in the **capture** phase and stops it there.
+
+**One editor-area form at a time.** `NewProject`, `DuplicateProject`,
 `RenameProject` and `UsageDashboard` are mutually exclusive, and the profile
 form is exclusive with all of them. That is expressed once, by `showPane(pane,
 profileMode?)` — call it rather than setting the booleans. The reset list used

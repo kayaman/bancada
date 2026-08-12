@@ -1,7 +1,7 @@
-// Pure derivations for publishing the open sketch to a new GitHub repo —
+// Pure derivations for publishing the open project to a new GitHub repo —
 // kept out of the component so the whole vocabulary is unit-testable.
 //
-// The backend refuses a bad name, a non-root sketch and a missing `gh` too
+// The backend refuses a bad name, a non-root project and a missing `gh` too
 // — this exists for friendlier messages without a round trip.
 
 import type { RepoState, Visibility } from "./api";
@@ -10,7 +10,7 @@ import { parentName } from "./gitStatus";
 export type { Visibility };
 export type Check = { ok: true } | { ok: false; reason: string };
 
-/** Default repo name from a sketch path — was inlined in Toolbar.tsx. */
+/** Default repo name from a project path — was inlined in Toolbar.tsx. */
 export function defaultRepoName(sketchDir: string): string {
   return sketchDir.split("/").filter(Boolean).pop() ?? "";
 }
@@ -40,7 +40,7 @@ export function checkRepoName(name: string): Check {
 /** Why publishing is blocked right now, or null when it can proceed.
  *
  *  `no_git` is deliberately absent: the backend initializes the repository
- *  before creating the remote, so an untracked sketch can still publish.
+ *  before creating the remote, so an untracked project can still publish.
  *
  *  Order: structural facts first, then the credential guard, and the missing
  *  `gh` last — its "paste a remote URL instead" advice is only true once
@@ -50,9 +50,9 @@ export function publishBlockedReason(
   visibility: Visibility,
   ghAvailable: boolean,
 ): string | null {
-  if (!state) return "open a sketch first";
+  if (!state) return "open a project first";
   if (state.kind === "nested")
-    return `the repository root is ${parentName(state.root)} — publish from there, not from this sketch`;
+    return `the repository root is ${parentName(state.root)} — publish from there, not from this project`;
   if (state.kind === "root") {
     if (state.remote) return "this repository already has a remote — use Sync to push";
     if (visibility === "public" && state.tracked_secrets.length > 0) {
