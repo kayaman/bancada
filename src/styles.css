@@ -49,6 +49,11 @@ body {
 
 /* ---------- toolbar ---------- */
 
+/* The bar has no overflow and no scroll of its own: under `body { overflow:
+   hidden }` anything past the right edge is unreachable, and `.btn` is
+   `white-space: nowrap`, so nothing wraps either. Every bit of give the bar
+   has therefore comes from a descendant opting out of the min-content floor
+   with `min-width: 0` — remove one and controls are silently clipped. */
 .toolbar {
   display: flex;
   align-items: center;
@@ -133,6 +138,10 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
+  /* A link in the shrink chain: without this the pair's floor is its content
+     width, so whatever the groups above it allow, the selects inside it can
+     never actually be squeezed. */
+  min-width: 0;
 }
 
 /* ---------- controls (shared) ----------
@@ -439,8 +448,7 @@ body {
   color: var(--text);
 }
 
-.editor-tabs-empty,
-.editor-tabs-hint {
+.editor-tabs-empty {
   padding: 4px 6px;
   font-size: 11px;
   color: var(--text-dim);
@@ -451,10 +459,6 @@ body {
   width: 160px;
   font-size: 11px;
   font-family: var(--font-mono);
-}
-
-.tree-new {
-  padding: 2px 8px;
 }
 
 /* One-row profile-bootstrap form, anchored under the toolbar. */
@@ -708,7 +712,10 @@ body {
   font-size: 10px;
 }
 
-.chevron.spacer::before {
+/* Leaf rows keep the chevron's width so names stay aligned with folders'.
+   Not `.spacer` — that is the global `flex: 1` utility, and one day
+   `.tree-item` will be a flex row. */
+.chevron-blank::before {
   content: "";
 }
 
@@ -1446,22 +1453,6 @@ body {
   color: var(--text);
 }
 
-.agent-text {
-  margin: 0 0 4px;
-}
-
-.agent-code {
-  margin: 4px 0;
-  padding: 6px 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  overflow-x: auto;
-  white-space: pre;
-}
-
 .agent-stderr {
   margin: 4px 0;
   color: var(--text-dim);
@@ -2123,8 +2114,8 @@ body {
 }
 
 .trig-chip.trigd {
-  color: #4ade80;
-  border-color: #4ade80;
+  color: var(--success);
+  border-color: var(--success);
 }
 
 .trig-chip.auto {
