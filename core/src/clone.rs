@@ -299,11 +299,13 @@ fn copy_dir(
 }
 
 
-/// Rewrite the clone's main ino title comment: when line 1 is exactly a
+/// Rewrite a main ino's title comment: when line 1 is exactly a
 /// `// <src_name>` prefix followed by a non-alphanumeric character (or the
 /// end of the line), that one occurrence becomes `new_name`. Everything else
 /// stays byte-identical, and a non-UTF-8 file is left alone.
-fn retitle_main_ino(path: &Path, src_name: &str, new_name: &str) -> Result<()> {
+///
+/// Shared with [`crate::project::rename_project`], which applies it in place.
+pub(crate) fn retitle_main_ino(path: &Path, src_name: &str, new_name: &str) -> Result<()> {
     let Ok(text) = String::from_utf8(std::fs::read(path)?) else {
         return Ok(());
     };
@@ -324,39 +326,44 @@ fn retitle_main_ino(path: &Path, src_name: &str, new_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Repoint sketch.yaml `dir:` library deps so the clone resolves the same
-/// libraries the source did: absolute paths inside the source move to the
-/// clone, relative paths that climb out of the sketch are re-aimed at their
-/// original target from the clone's location, and everything that already
-/// resolves (inside-the-tree relatives, external absolutes) stays put.
+/// Repoint sketch.yaml `dir:` library deps so a project at `dest` resolves the
+/// same libraries it did at `src`: absolute paths inside `src` are rebased onto
+/// `dest`, relative paths that climb out of the sketch are re-aimed at their
+/// original target from `dest`, and everything that already resolves
+/// (inside-the-tree relatives, external absolutes) stays put.
+///
+/// `work_dir` is where the file to edit lives — the staging copy for a clone,
+/// the project itself for [`crate::project::rename_project`], which runs this
+/// before the directory moves. `src`/`dest` are the tree's old and new roots
+/// either way.
 ///
 /// The parse is read-only, purely to find the local deps; the rewrite itself
 /// is textual because a serde round-trip is lossy — unknown arduino-cli keys,
 /// comments and ordering would all be dropped or reshuffled.
-fn rewrite_sketch_yaml(
-    staging: &Path,
+pub(crate) fn rewrite_sketch_yaml(
+    work_dir: &Path,
     src: &Path,
     dest: &Path,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let yaml_path = staging.join("sketch.yaml");
+    let yaml_path = work_dir.join("sketch.yaml");
     if !yaml_path.is_file() {
         return Ok(());
     }
-    // An absolute sketch.yaml symlink resolves outside the clone, and the
+    // An absolute sketch.yaml symlink resolves outside the project, and the
     // rewrite below would edit the link's target. Leave links alone.
     if yaml_path.symlink_metadata()?.file_type().is_symlink() {
         warnings.push(
-            "sketch.yaml is a symlink shared with the source project — its library paths were not rewritten"
+            "sketch.yaml is a symlink to a file outside the project — its library paths were not rewritten"
                 .into(),
         );
         return Ok(());
     }
-    let parsed = match sketch::SketchProject::open(staging)?.load_yaml() {
+    let parsed = match sketch::SketchProject::open(work_dir)?.load_yaml() {
         Ok(y) => y,
         Err(e) => {
             warnings.push(format!(
-                "sketch.yaml could not be parsed and was copied verbatim: {e}"
+                "sketch.yaml could not be parsed — its library paths were left unchanged: {e}"
             ));
             return Ok(());
         }
@@ -429,7 +436,7 @@ fn rewrite_sketch_yaml(
     for (i, (old, _)) in rewrites.iter().enumerate() {
         if !applied[i] {
             warnings.push(format!(
-                "sketch.yaml library path `{old}` could not be rewritten — update it in the clone by hand"
+                "sketch.yaml library path `{old}` could not be rewritten — update it by hand"
             ));
         }
     }
@@ -936,7 +943,7 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         assert_eq!(read(made.dir.join("sketch.yaml")), garbage);
         assert!(
-            made.warnings.iter().any(|w| w.contains("copied verbatim")),
+            made.warnings.iter().any(|w| w.contains("could not be parsed")),
             "{:?}",
             made.warnings
         );

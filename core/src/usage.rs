@@ -136,6 +136,32 @@ impl UsageStore {
         true
     }
 
+    /// Follow a renamed project: move its entry to `new_key` and repoint
+    /// `sketch_dir`, which is both the dashboard's label and what the chat
+    /// commands re-hash into a key.
+    ///
+    /// Totals are a lifetime record, so an occupied target is **merged into**
+    /// rather than clobbered — renaming a project back to a name it once had
+    /// must not delete what that name already spent. `last_chat` keeps the
+    /// newer stem (they are frontend timestamps, so ordering is lexical).
+    /// An unrecorded project has nothing to move and must not gain an empty
+    /// entry, so it is a no-op.
+    pub fn rename_project_key(&mut self, old_key: &str, new_key: &str, new_sketch_dir: &str) {
+        let Some(moved) = self.projects.remove(old_key) else {
+            return;
+        };
+        let p = self.projects.entry(new_key.to_string()).or_default();
+        p.sketch_dir = new_sketch_dir.to_string();
+        p.cost_usd += moved.cost_usd;
+        p.input_tokens += moved.input_tokens;
+        p.output_tokens += moved.output_tokens;
+        p.turns += moved.turns;
+        p.sessions += moved.sessions;
+        if moved.last_chat > p.last_chat {
+            p.last_chat = moved.last_chat;
+        }
+    }
+
     /// Dashboard rows: every project, most expensive first (path as the
     /// deterministic tie-break).
     pub fn overview(&self) -> Vec<ProjectUsage> {
@@ -345,6 +371,66 @@ mod tests {
         assert!(s.note_new_chat("k", "/s"));
         assert_eq!(s.projects["k"].sessions, 2);
         assert_eq!(s.projects["k"].sketch_dir, "/s");
+    }
+
+    #[test]
+    fn rename_project_key_moves_the_entry_and_repoints_its_path() {
+        let mut s = UsageStore::default();
+        s.note_new_chat("old", "/home/me/Old");
+        s.record_line("old", "/home/me/Old", "2026-08-09T10-00-00.ndjson",
+            &result_line(0.05, 500, 50, 3));
+
+        s.rename_project_key("old", "new", "/home/me/New");
+
+        assert!(!s.projects.contains_key("old"), "the old key must be gone");
+        let p = &s.projects["new"];
+        assert_eq!(p.sketch_dir, "/home/me/New");
+        assert!((p.cost_usd - 0.05).abs() < 1e-9);
+        assert_eq!(p.input_tokens, 500);
+        assert_eq!(p.output_tokens, 50);
+        assert_eq!(p.turns, 3);
+        assert_eq!(p.sessions, 1);
+        assert_eq!(p.last_chat.as_deref(), Some("2026-08-09T10-00-00"));
+    }
+
+    #[test]
+    fn rename_project_key_merges_into_an_occupied_target() {
+        // A project renamed back to a name it once had already has totals
+        // under the target key; clobbering them would lose recorded spend.
+        let mut s = UsageStore::default();
+        s.note_new_chat("old", "/home/me/Old");
+        s.record_line("old", "/home/me/Old", "2026-08-09T10-00-00.ndjson",
+            &result_line(0.05, 500, 50, 3));
+        s.note_new_chat("new", "/home/me/New");
+        s.record_line("new", "/home/me/New", "2026-08-01T10-00-00.ndjson",
+            &result_line(0.01, 100, 10, 1));
+
+        s.rename_project_key("old", "new", "/home/me/New");
+
+        assert!(!s.projects.contains_key("old"));
+        let p = &s.projects["new"];
+        assert!((p.cost_usd - 0.06).abs() < 1e-9);
+        assert_eq!(p.input_tokens, 600);
+        assert_eq!(p.output_tokens, 60);
+        assert_eq!(p.turns, 4);
+        assert_eq!(p.sessions, 2);
+        assert_eq!(
+            p.last_chat.as_deref(),
+            Some("2026-08-09T10-00-00"),
+            "the newer of the two stems wins"
+        );
+        assert_eq!(p.sketch_dir, "/home/me/New");
+    }
+
+    #[test]
+    fn rename_project_key_of_an_unrecorded_project_changes_nothing() {
+        // A project that never cost anything has no entry to move, and must
+        // not gain an empty one.
+        let mut s = UsageStore::default();
+        s.note_new_chat("other", "/home/me/Other");
+        s.rename_project_key("old", "new", "/home/me/New");
+        assert_eq!(s.projects.len(), 1);
+        assert!(!s.projects.contains_key("new"));
     }
 
     #[test]

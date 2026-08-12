@@ -288,6 +288,36 @@ fn chat_file_names(chats_root: &Path, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Move a sketch's whole history from `old_key` to `new_key`.
+///
+/// [`sketch_key`] hashes the full path *and* carries the basename, so renaming
+/// a project changes both halves of its key and orphans every chat it ever
+/// had. This is that move, and it is a plain directory rename: the recorded
+/// `meta` lines inside the files are left alone, because they say where a
+/// conversation actually happened, which stays true.
+///
+/// `Ok(false)` when there is nothing to move — a project that never chatted
+/// has no directory, and that is not a failure. An occupied destination *is*
+/// a failure: merging two projects' histories under one key is not a decision
+/// this module gets to make silently.
+pub fn rename_key(chats_root: &Path, old_key: &str, new_key: &str) -> Result<bool> {
+    let from = chats_root.join(old_key);
+    if from.symlink_metadata().is_err() {
+        return Ok(false);
+    }
+    let to = chats_root.join(new_key);
+    // symlink_metadata, not exists(): a dangling symlink reports false from
+    // exists() while the rename would still land on it.
+    if to.symlink_metadata().is_ok() {
+        return Err(Error::Other(format!(
+            "chat history for `{new_key}` already exists — move or delete {} first",
+            to.display()
+        )));
+    }
+    std::fs::rename(&from, &to)?;
+    Ok(true)
+}
+
 /// Read one chat back as its raw op lines, ready for the frontend replayer.
 pub fn load_chat(chats_root: &Path, key: &str, file: &str) -> Result<Vec<String>> {
     let path = chat_path(chats_root, key, file)?;
@@ -712,6 +742,55 @@ mod tests {
         assert_eq!(list[1].input_tokens, 300);
         assert_eq!(list[1].output_tokens, 30);
         assert_eq!(list[1].turns, 5);
+    }
+
+    #[test]
+    fn rename_key_moves_the_whole_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_chat(tmp.path(), "old-key", "2026-08-05T09-00-00.ndjson", &["l1"]);
+        write_chat(tmp.path(), "old-key", "2026-08-06T09-00-00.ndjson", &["l2"]);
+
+        assert!(rename_key(tmp.path(), "old-key", "new-key").unwrap());
+
+        assert!(!tmp.path().join("old-key").exists());
+        let list = list_chats(tmp.path(), "new-key");
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            load_chat(tmp.path(), "new-key", "2026-08-05T09-00-00.ndjson").unwrap(),
+            vec!["l1"]
+        );
+    }
+
+    #[test]
+    fn rename_key_without_a_source_is_not_an_error() {
+        // A project that never had a chat has nothing to move.
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!rename_key(tmp.path(), "never-chatted", "new-key").unwrap());
+        assert!(!tmp.path().join("new-key").exists());
+    }
+
+    #[test]
+    fn rename_key_refuses_an_occupied_destination() {
+        // Two histories under one key would interleave two projects' chats,
+        // so this is a conflict to report, not something to merge.
+        let tmp = tempfile::tempdir().unwrap();
+        write_chat(tmp.path(), "old-key", "2026-08-05T09-00-00.ndjson", &["mine"]);
+        write_chat(tmp.path(), "new-key", "2026-08-05T09-00-00.ndjson", &["theirs"]);
+
+        let err = rename_key(tmp.path(), "old-key", "new-key")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already"), "{err}");
+        assert_eq!(
+            load_chat(tmp.path(), "new-key", "2026-08-05T09-00-00.ndjson").unwrap(),
+            vec!["theirs"],
+            "the destination must be untouched"
+        );
+        assert_eq!(
+            load_chat(tmp.path(), "old-key", "2026-08-05T09-00-00.ndjson").unwrap(),
+            vec!["mine"],
+            "the source must be untouched"
+        );
     }
 
     #[test]
