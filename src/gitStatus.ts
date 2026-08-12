@@ -64,6 +64,22 @@ export function popoverMode(state: RepoState): PopoverMode {
   }
 }
 
+/** Why flashes aren't being tagged in this repo state, or null when they are.
+ *  A flash that changes the code writes a `flash/<timestamp>` tag, but only
+ *  when the sketch dir *is* the repo root — same rule as Sync, and the same
+ *  reason it must say why. Null with no sketch open: nothing to explain. */
+export function flashTaggingNote(state: RepoState | null): string | null {
+  if (!state) return null;
+  switch (state.kind) {
+    case "no_git":
+      return "flashes aren't tagged — initialize a repository to record what's on the board";
+    case "nested":
+      return `flashes aren't tagged — the repository root is ${parentName(state.root)}, not this sketch`;
+    case "root":
+      return null;
+  }
+}
+
 /** Why Sync is disabled right now, or null when it can run. The profile
  *  silently winning over the port taught us (2026-08-09) that disabled
  *  buttons must say why. */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  flashTaggingNote,
   parentName,
   pillLabel,
   popoverMode,
@@ -98,6 +99,26 @@ describe("syncDisabledReason", () => {
     ).toMatch(/commit first/i);
     expect(syncDisabledReason(root({ detached: true }))).toMatch(/detached/i);
     expect(syncDisabledReason(root())).toBeNull();
+  });
+});
+
+describe("flashTaggingNote", () => {
+  it("says nothing at the repo root, where flashes are tagged", () => {
+    expect(flashTaggingNote(root())).toBeNull();
+    expect(flashTaggingNote(root({ dirty: [{ path: "a.ino", status: ".M" }] }))).toBeNull();
+  });
+  it("says nothing with no sketch open", () => {
+    expect(flashTaggingNote(null)).toBeNull();
+  });
+  it("points an untracked sketch at init", () => {
+    const note = flashTaggingNote({ kind: "no_git" });
+    expect(note).toMatch(/aren't tagged/);
+    expect(note).toMatch(/initialize a repository/i);
+  });
+  it("names the parent repo for a nested sketch", () => {
+    const note = flashTaggingNote({ kind: "nested", root: "/home/u/Projects", dirty: [] });
+    expect(note).toMatch(/aren't tagged/);
+    expect(note).toContain("Projects");
   });
 });
 
