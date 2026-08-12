@@ -5,7 +5,7 @@ import { portOptions } from "../ports";
 import { defaultRepoName } from "../publishRepo";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
-import RecentsMenu from "./RecentsMenu";
+import ProjectMenu from "./ProjectMenu";
 
 interface Props {
   sketchDir: string | null;
@@ -16,11 +16,11 @@ interface Props {
   busy: boolean;
   gitState: RepoState | null;
   ghAvailable: boolean;
-  onOpenSketch: () => void;
+  onOpenProject: () => void;
   onOpenRecent: (dir: string) => void;
   onNewProject: () => void;
   onRenameProject: () => void;
-  onCloneProject: () => void;
+  onDuplicateProject: () => void;
   onUsage: () => void;
   onCreateProfile: () => void;
   onAddProfile: () => void;
@@ -44,7 +44,6 @@ interface Props {
 
 export default function Toolbar(props: Props) {
   const profiles = Object.keys(props.sketchYaml?.profiles ?? {});
-  const sketchName = props.sketchDir?.split("/").pop();
   // tauri.conf.json is the single source of truth for the version; outside a
   // Tauri shell (plain vite in a browser) the call rejects and the span
   // simply never renders.
@@ -63,50 +62,17 @@ export default function Toolbar(props: Props) {
 
       <div className="toolbar-sep" />
 
-      <div className="toolbar-group">
-        <button
-          className="btn"
-          onClick={props.onOpenSketch}
-          title={props.sketchDir ?? "Open a sketch folder"}
-        >
-          {sketchName ? `📁 ${sketchName}` : "📁 Open Sketch…"}
-        </button>
-
-        <RecentsMenu onOpen={props.onOpenRecent} />
-
-        <button
-          className="btn"
-          onClick={props.onNewProject}
-          title="Create a sketch with a sketch.yaml profile"
-        >
-          ＋ New Project…
-        </button>
-
-        {props.sketchDir && (
-          <button
-            className="btn"
-            onClick={props.onRenameProject}
-            title="Rename this project — the folder, its sketch, and its history"
-          >
-            ✎ Rename…
-          </button>
-        )}
-
-        <button
-          className="btn"
-          onClick={props.onCloneProject}
-          title="Copy a sketch into a new project with a fresh git repo"
-        >
-          ⧉ Clone…
-        </button>
-
-        <button
-          className="btn"
-          onClick={props.onUsage}
-          title="Token usage and cost per project"
-        >
-          📊 Usage
-        </button>
+      {/* Project: one affordance. It names what is open and holds every
+          action on it, so `＋` and `✎` each mean one thing on this bar. */}
+      <div className="toolbar-group toolbar-group-project">
+        <ProjectMenu
+          sketchDir={props.sketchDir}
+          onOpen={props.onOpenProject}
+          onOpenRecent={props.onOpenRecent}
+          onNew={props.onNewProject}
+          onDuplicate={props.onDuplicateProject}
+          onRename={props.onRenameProject}
+        />
       </div>
 
       <div className="toolbar-sep" />
@@ -116,7 +82,7 @@ export default function Toolbar(props: Props) {
           <button
             className="btn"
             onClick={props.onCreateProfile}
-            title="This sketch has no sketch.yaml profile — create one"
+            title="This project has no sketch.yaml profile — create one"
           >
             ＋ Create profile…
           </button>
@@ -207,7 +173,19 @@ export default function Toolbar(props: Props) {
 
       <div className="spacer" />
 
-      <div className="toolbar-group">
+      {/* Build: pinned `flex: none` in CSS. These are the two controls that
+          must never be the ones squeezed off the bar. Usage sits here rather
+          than with the project actions — it reports on every project, not
+          the open one. */}
+      <div className="toolbar-group toolbar-group-build">
+        <button
+          className="btn icon"
+          onClick={props.onUsage}
+          title="Token usage and cost, across all projects"
+          aria-label="Usage"
+        >
+          📊
+        </button>
         <button
           className="btn"
           onClick={props.onVerify}

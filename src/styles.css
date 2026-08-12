@@ -97,6 +97,36 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Without this, a flex item's min-content width is its content, so nothing
+     in the bar can actually shrink and the overflow is pushed onto whatever
+     comes last instead. */
+  min-width: 0;
+}
+
+/* Verify and Flash are the point of the window. They yield last, never first
+   — before this they were the controls that got pushed off the right edge and
+   clipped by `body { overflow: hidden }`, with no scroll to reach them. */
+.toolbar-group-build {
+  flex: none;
+}
+
+/* The project name is the one unbounded string on the bar. Let it ellipsise
+   rather than push the build group off-screen; the full path is in the
+   button's title. */
+.toolbar-group-project {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.project-btn {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolbar-pair {
@@ -200,6 +230,10 @@ body {
   appearance: none;
   cursor: pointer;
   max-width: 260px;
+  /* Paired with the max-width: the profile and port selects would otherwise
+     collapse to unreadable slivers under pressure before anything else in the
+     bar gave way. */
+  min-width: 96px;
   padding-right: 26px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b93a1' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
@@ -745,6 +779,24 @@ body {
 .file-tree.drop-target {
   outline: 2px dashed var(--accent);
   outline-offset: -2px;
+}
+
+/* A menu row with something right-aligned and dim after its label: an
+   accelerator, or the ▸ that marks a submenu. */
+.ctx-item.with-accel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ctx-accel {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ctx-item:hover:not(:disabled) .ctx-accel {
+  color: inherit;
 }
 
 .ctx-sep {

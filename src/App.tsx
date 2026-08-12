@@ -39,7 +39,7 @@ import FleetManager from "./components/FleetManager";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
-import CloneProject from "./components/CloneProject";
+import DuplicateProject from "./components/DuplicateProject";
 import RenameProject from "./components/RenameProject";
 import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
 import UsageDashboard from "./components/UsageDashboard";
@@ -134,8 +134,8 @@ export default function App() {
   const [profile, setProfile] = useState<string | null>(null);
   /** When true the editor area shows the New Project form instead. */
   const [creatingProject, setCreatingProject] = useState(false);
-  /** When true the editor area shows the Clone Project form instead. */
-  const [cloningProject, setCloningProject] = useState(false);
+  /** When true the editor area shows the Duplicate Project form instead. */
+  const [duplicatingProject, setDuplicatingProject] = useState(false);
   /** When true the editor area shows the Rename Project form instead. */
   const [renamingProject, setRenamingProject] = useState(false);
   /** When true the editor area shows the usage dashboard instead. */
@@ -149,11 +149,11 @@ export default function App() {
    * call site, which is how the fifth pane would have been forgotten.
    */
   const showPane = (
-    pane: "new" | "clone" | "rename" | "usage" | null,
+    pane: "new" | "duplicate" | "rename" | "usage" | null,
     profileMode: ProfileFormMode | null = null,
   ) => {
     setCreatingProject(pane === "new");
-    setCloningProject(pane === "clone");
+    setDuplicatingProject(pane === "duplicate");
     setRenamingProject(pane === "rename");
     setShowingUsage(pane === "usage");
     setProfileForm(profileMode);
@@ -309,7 +309,7 @@ export default function App() {
    *  world moved on while it was suspended, and it must abort rather than
    *  write into (or spawn a child for) whatever chat/session is now live. */
   const teardownEpochRef = useRef(0);
-  const [status, setStatus] = useState("Bancada ready — open a sketch folder.");
+  const [status, setStatus] = useState("Bancada ready — open a project folder.");
   const [statusIsError, setStatusIsError] = useState(false);
 
   // Hotplug plumbing. busyRef mirrors `busy` for the event listener;
@@ -500,7 +500,7 @@ export default function App() {
       .then(async (s) => {
         if (!s.last_sketch_dir) return;
         const ok = await loadSketch(s.last_sketch_dir, s.last_open_file ?? undefined);
-        if (!ok) notify("Last sketch no longer available — open a sketch folder.");
+        if (!ok) notify("Last project no longer available — open a project folder.");
       })
       .catch(() => {});
     return () => {
@@ -564,7 +564,7 @@ export default function App() {
   };
 
   const openSketch = async () => {
-    const dir = await open({ directory: true, title: "Open sketch folder" });
+    const dir = await open({ directory: true, title: "Open project folder" });
     if (typeof dir !== "string") return;
     await loadSketch(dir);
   };
@@ -602,7 +602,7 @@ export default function App() {
       setOpenTabs([]);
       setArmedTab(null);
       // Opening a sketch dismisses any open form — a leftover New Project or
-      // Clone form would otherwise keep covering the editor.
+      // The Duplicate form would otherwise keep covering the editor.
       showPane(null);
       const name = dir.split("/").pop();
       const target =
@@ -614,7 +614,7 @@ export default function App() {
         api.setLastSketch(dir, null).catch(() => {});
       }
       notify(`Opened ${dir}`);
-      // One recency hook for every route in: picker, restore, new, clone and
+      // One recency hook for every route in: picker, restore, new, duplicate and
       // a recents-click all funnel through loadSketch.
       api.pushRecentProject(dir).catch(() => {});
       return true;
@@ -1468,7 +1468,7 @@ export default function App() {
       return;
     }
     if (!sketchDir) {
-      notify("Open a sketch first.", true);
+      notify("Open a project first.", true);
       return;
     }
     // Captured before the first await below — re-checked after every await
@@ -1789,10 +1789,10 @@ export default function App() {
         ports={ports}
         selectedPort={selectedPort}
         busy={busy}
-        onOpenSketch={openSketch}
+        onOpenProject={openSketch}
         onOpenRecent={(dir) => void loadSketch(dir)}
         onNewProject={() => showPane("new")}
-        onCloneProject={() => showPane("clone")}
+        onDuplicateProject={() => showPane("duplicate")}
         onRenameProject={() => showPane("rename")}
         onUsage={() => showPane("usage")}
         onCreateProfile={() => showPane(null, "bootstrap")}
@@ -1869,7 +1869,7 @@ export default function App() {
                   : "side-group-btn"
               }
               onClick={() => setSideGroup("software")}
-              title="The sketch: files and libraries"
+              title="The project: files and libraries"
             >
               ▦ Software
             </button>
@@ -2007,14 +2007,14 @@ export default function App() {
               onCancel={() => setCreatingProject(false)}
               notify={notify}
             />
-          ) : cloningProject ? (
-            <CloneProject
+          ) : duplicatingProject ? (
+            <DuplicateProject
               sourceDir={sketchDir}
               onCreated={async (dir) => {
-                setCloningProject(false);
+                setDuplicatingProject(false);
                 await loadSketch(dir);
               }}
-              onCancel={() => setCloningProject(false)}
+              onCancel={() => setDuplicatingProject(false)}
               notify={notify}
             />
           ) : renamingProject && sketchDir ? (

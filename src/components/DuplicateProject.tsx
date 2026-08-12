@@ -19,7 +19,7 @@ const basename = (dir: string) => dir.split("/").pop() ?? "";
 const defaultNameFor = (dir: string) =>
   basename(dir) ? `${basename(dir)}-copy` : "";
 
-export default function CloneProject({
+export default function DuplicateProject({
   sourceDir,
   onCreated,
   onCancel,
@@ -57,7 +57,7 @@ export default function CloneProject({
   };
 
   const chooseSource = async () => {
-    const dir = await open({ directory: true, title: "Sketch folder to clone" });
+    const dir = await open({ directory: true, title: "Project folder to duplicate" });
     if (typeof dir !== "string") return;
     changeSource(dir);
   };
@@ -68,9 +68,9 @@ export default function CloneProject({
     setParent(dir);
   };
 
-  const clone = async () => {
+  const duplicate = async () => {
     // The `working` guard matters: Enter in the name field bypasses the
-    // disabled button, and a second concurrent clone to the same name would
+    // disabled button, and a second concurrent run with the same name would
     // sabotage the first one's staging dir (see core clone.rs caveat).
     if (working || !source.trim() || !name.trim() || !parent) return;
     setWorking(true);
@@ -80,8 +80,8 @@ export default function CloneProject({
       setLastProjectParent(parent).catch(() => {});
       notify(
         res.warnings.length
-          ? `Cloned into ${res.dir}, with notes: ${res.warnings.join("; ")}`
-          : `✓ Cloned into ${res.dir}`,
+          ? `Duplicated into ${res.dir}, with notes: ${res.warnings.join("; ")}`
+          : `✓ Duplicated into ${res.dir}`,
       );
       onCreated(res.dir);
     } catch (e) {
@@ -94,23 +94,23 @@ export default function CloneProject({
   return (
     <div className="new-project">
       <div className="np-head">
-        <strong>Clone project</strong>
+        <strong>Duplicate project</strong>
         <div className="spacer" />
         <button className="btn small" onClick={onCancel} disabled={working}>
           Cancel
         </button>
         <button
           className="btn small primary"
-          onClick={clone}
+          onClick={duplicate}
           disabled={working || !source.trim() || !name.trim() || !parent}
         >
-          ⧉ Clone
+          ⧉ Duplicate
         </button>
       </div>
 
       <div className="np-body">
         <label className="field">
-          Source sketch
+          Source project
           <span className="np-row">
             <input
               className="input"
@@ -135,7 +135,7 @@ export default function CloneProject({
               // source repopulates `<name>-copy` instead of staying empty.
               setNameTouched(e.target.value !== "");
             }}
-            onKeyDown={(e) => e.key === "Enter" && clone()}
+            onKeyDown={(e) => e.key === "Enter" && duplicate()}
           />
         </label>
 
