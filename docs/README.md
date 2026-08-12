@@ -46,6 +46,7 @@ end to end.
 
 Newest first. One file per release, user-facing.
 
+- [0.15.1](RELEASE-NOTES-0.15.1.md) — architecture documentation
 - [0.15.0](RELEASE-NOTES-0.15.0.md) — device browser
 - [0.14.1](RELEASE-NOTES-0.14.1.md) — durability and assistant lifecycle fixes
 - [0.14.0](RELEASE-NOTES-0.14.0.md) — the git pill
