@@ -118,11 +118,6 @@ body {
 /* The project name is the one unbounded string on the bar. Let it ellipsise
    rather than push the build group off-screen; the full path is in the
    button's title. */
-.toolbar-group-project {
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
 .project-btn {
   min-width: 0;
   overflow: hidden;

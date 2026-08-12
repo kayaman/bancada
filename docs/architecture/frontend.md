@@ -136,6 +136,7 @@ So anything worth testing has been extracted into a plain `.ts` module:
 | `ports.ts` | visible boards, flash-target mismatch, port options |
 | `portWatch.ts` | hotplug arrival diffing |
 | `gitStatus.ts` | the git pill's entire vocabulary, incl. why flashes are untagged |
+| `check.ts` | the one `{ok} \| {ok:false, reason}` shape, and `reasonOf` |
 | `publishRepo.ts` | repo-name rules and why publishing is blocked |
 | `projectRename.ts` | project-name rules (mirrors `core::project::validate_project_name`) and the rename plan |
 | `toolbarModel.ts` | the project button's label; what the project menu offers, and what is disabled and why |
@@ -241,13 +242,51 @@ theme.**
 
 Flat, feature-prefixed class names (`.agent-*`, `.obs-*`, `.np-*`) over shared
 primitives (`.btn`, `.input`, `.select`, `.tab`, `.panel-tabs`). Inline `style`
-is used **only** for computed geometry — sidebar width, bottom height, and
-`display:none` hiding.
+is used **only** for computed geometry — sidebar width, bottom height, tree
+indentation, `Menu`'s position — and for data-driven colour, which is the one
+thing a class cannot carry (`ScopeView`'s per-channel traces).
 
-Accessibility is present and should be maintained: `role="separator"` with
-`aria-orientation` on resize handles, `role="alert"` on the conflict banner and
-agent alarm, `aria-label` on icon buttons, `:focus-visible` rules, and a
-`prefers-reduced-motion` block.
+### Unavailable controls: disable and say why
+
+Two idioms were in use for the same condition — some controls vanished when no
+project was open, others greyed out — and a greyed-out Flash button did not say
+whether it wanted a project, a port, or patience.
+
+**The rule: disable, and put the reason in `title`.** Hiding teaches nothing;
+a disabled control with a static description of the action teaches less than
+nothing, because it looks like an answer. `gitStatus.syncDisabledReason` exists
+because that cost us an afternoon in August 2026.
+
+The reason is computed in the pure-logic tier — `syncDisabledReason`,
+`publishBlockedReason`, `buildBlockedReason`, `retargetBlockedReason`,
+`projectMenuItems`' `disabledReason` — so the rule is testable rather than a
+habit. Where a pane shows the reason inline *and* on a button, suppress the
+inline copy until the user has typed, but never the button's.
+
+Hiding is still right for a control that would be *meaningless*, not merely
+unavailable: the profile `＋`/`✎` pair and the git pill have nothing to refer
+to without a project.
+
+### Accessibility
+
+Maintained, and worth keeping: `role="separator"` with `aria-orientation` on
+resize handles and inside menus, `role="alert"` on the conflict banner and
+agent alarm, `:focus-visible` rules, and a `prefers-reduced-motion` block.
+
+Two conventions that were practised but unwritten:
+
+- **An icon-only button carries both `title` and `aria-label`.** `title` alone
+  is not an accessible name in every AT/browser pairing. A button whose visible
+  content includes real text does not need the label.
+- **A button that opens a `Menu` also carries `aria-haspopup="menu"` and
+  `aria-expanded`.** Right-click targets are exempt — there is no trigger
+  element to annotate.
+
+`Menu` defaults to `role="menu"`, which is only valid when **every** child is a
+`menuitem`. A popover holding inputs must pass `role="group"` and an
+`ariaLabel` — `GitPill` does, because its popover is a small form. Getting this
+wrong is invisible on screen and makes the fields unreachable in menu-mode
+navigation.
 
 ---
 

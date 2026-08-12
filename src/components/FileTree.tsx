@@ -300,7 +300,7 @@ export default function FileTree({
             }}
             onDragEnd={() => setDragging(null)}
           >
-            <span className="chevron spacer" />
+            <span className="chevron chevron-blank" />
             {node.name}
             {dirty ? " ●" : ""}
           </button>

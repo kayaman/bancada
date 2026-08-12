@@ -75,7 +75,7 @@ export default function Toolbar(props: Props) {
 
       {/* Project: one affordance. It names what is open and holds every
           action on it, so `＋` and `✎` each mean one thing on this bar. */}
-      <div className="toolbar-group toolbar-group-project">
+      <div className="toolbar-group">
         <ProjectMenu
           sketchDir={props.sketchDir}
           onOpen={props.onOpenProject}
