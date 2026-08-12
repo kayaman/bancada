@@ -240,7 +240,7 @@ export default function App() {
   // sub-tabs; each group remembers its last-used tab.
   const [sideGroup, setSideGroup] = useState<SideGroup>("software");
   const [softwareTab, setSoftwareTab] = useState<SoftwareTab>("files");
-  const [hardwareTab, setHardwareTab] = useState<HardwareTab>("boards");
+  const [hardwareTab, setHardwareTab] = useState<HardwareTab>("fleet");
   const sideTab = sideGroup === "software" ? softwareTab : hardwareTab;
   // Bottom panel hierarchy: Console | Debugging | Observability groups over
   // per-group sub-tabs, same memory pattern as the sidebar.
