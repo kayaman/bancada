@@ -97,15 +97,20 @@ and repoints its `sketch_dir`, merging rather than clobbering if the target
 somehow exists. Without it a renamed project shows up twice in the dashboard —
 its whole history under the old name, and $0 under the new one.
 
-> **Known gap.** `ProjectUsage.sketch_dir` is both a display string *and* the
-> value the dashboard hands back to `chat_list_usage`/`chat_load`, which
-> re-hash it into a `sketch_key`. `usage::backfill` seeds that field from the
-> transcripts' `meta` lines, which keep the pre-rename path. So if `usage.json`
-> is ever deleted *after* a rename, backfill re-seeds the old path, and the
-> dashboard row drills into a key that no longer exists — silently empty
-> sessions. The fix is for `usage_overview` to return the map key it already
-> has, instead of the two chat commands re-deriving it from a display path.
-> Not yet done.
+**A row's identity is its key, never its path.** `ProjectUsage` carries the
+`key` it is stored under — filled by `overview()`, never persisted, because it
+would duplicate the map key and could drift from it.
+
+This matters because `sketch_dir` cannot do that job. `usage::backfill`
+recovers it from the transcripts' `meta` lines, which record where a
+conversation *happened*, not where the project is now. Delete `usage.json`
+after a rename and backfill re-seeds the pre-rename path — so hashing it yields
+a key nothing is stored under. That is why the dashboard's two commands
+(`chat_list_usage`, `chat_load_by_key`) take a key, while the live chat
+commands keep taking the open sketch's path, which is current by definition.
+
+A stale display *name* after such a backfill is left alone, and is arguably
+right: it names where those conversations actually happened.
 
 ### `fleet.json`
 

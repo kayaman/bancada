@@ -28,7 +28,8 @@ interface Props {
 export default function UsageDashboard({ onClose, openBottomTab }: Props) {
   const [rows, setRows] = useState<ProjectUsage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** sketch_dir of the project whose sessions are expanded. */
+  /** Store key of the project whose sessions are expanded — its identity.
+   *  A row's sketch_dir is a recovered display path and cannot address it. */
   const [expanded, setExpanded] = useState<string | null>(null);
   /** Ref mirroring expanded state for guarding stale chatListUsage responses;
    *  updated synchronously whenever expanded is set. */
@@ -56,34 +57,37 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
   const toggleProject = (row: ProjectUsage) => {
     setReplay(null);
     setViewTurn(null);
-    if (expanded === row.sketch_dir) {
+    if (expanded === row.key) {
       setExpanded(null);
       expandedRef.current = null;
       setSessions(null);
       return;
     }
-    setExpanded(row.sketch_dir);
-    expandedRef.current = row.sketch_dir;
+    setExpanded(row.key);
+    expandedRef.current = row.key;
     setSessions(null);
-    // Capture sketch_dir at call time; only apply response if it still matches
-    // the expanded row (guards against slow responses landing after a collapse
-    // or switch to another project).
-    const requestedDir = row.sketch_dir;
+    // Capture the key at call time; only apply the response if it still
+    // matches the expanded row (guards against slow responses landing after a
+    // collapse or a switch to another project).
+    const requestedKey = row.key;
     api
-      .chatListUsage(requestedDir)
+      .chatListUsage(requestedKey)
       .then((s) => {
-        if (requestedDir === expandedRef.current) setSessions(s);
+        if (requestedKey === expandedRef.current) setSessions(s);
       })
       .catch(() => {
-        if (requestedDir === expandedRef.current) setSessions([]);
+        if (requestedKey === expandedRef.current) setSessions([]);
       });
   };
 
   const openSession = (row: ProjectUsage, s: SessionEntry) => {
     api
-      .chatLoad(row.sketch_dir, s.file)
+      .chatLoadByKey(row.key, s.file)
       .then((lines) => setReplay({ store: replayChat(lines), title: s.title }))
-      .catch(() => {});
+      // Surfacing this matters: a silent failure here is a click that does
+      // nothing, which is how the key mismatch this addressing fixes went
+      // unnoticed in the first place.
+      .catch((e) => setError(String(e)));
   };
 
   if (replay) {
@@ -167,7 +171,7 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
                 )}
               </span>
             </button>
-            {expanded === r.sketch_dir && sessions && (
+            {expanded === r.key && sessions && (
               <div className="usage-sessions">
                 {sessions.map((s) => (
                   <button

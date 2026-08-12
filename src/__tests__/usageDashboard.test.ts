@@ -8,6 +8,7 @@ import {
 import type { ProjectUsage } from "../api";
 
 const row = (over: Partial<ProjectUsage>): ProjectUsage => ({
+  key: "0000000000000000-s",
   sketch_dir: "/s",
   cost_usd: 0,
   input_tokens: 0,

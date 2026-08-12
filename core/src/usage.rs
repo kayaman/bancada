@@ -27,7 +27,21 @@ fn usage_version() -> u32 {
 /// shows the difference against surviving files as "older sessions pruned".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectUsage {
-    /// Original sketch path — display, and re-hashed by chat commands.
+    /// The `sketch_key` this project is stored under — its identity, and the
+    /// only safe way to reach its chat directory.
+    ///
+    /// Filled by [`UsageStore::overview`] and **never persisted**: it would
+    /// duplicate the map key it is copied from, and a stored copy could drift
+    /// from it. Empty on a value read straight out of `projects`.
+    ///
+    /// It exists because `sketch_dir` cannot do this job. `backfill` recovers
+    /// that field from transcripts' `meta` lines, which record where a
+    /// conversation happened rather than where the project is now — so after
+    /// a rename it can name a directory that no longer exists. Re-hashing it
+    /// yields a key nothing is stored under.
+    #[serde(default, skip_serializing)]
+    pub key: String,
+    /// Original sketch path — display only. See `key` for addressing.
     #[serde(default)]
     pub sketch_dir: String,
     #[serde(default)]
@@ -164,8 +178,18 @@ impl UsageStore {
 
     /// Dashboard rows: every project, most expensive first (path as the
     /// deterministic tie-break).
+    /// Every project, dearest first, each row carrying the key it is stored
+    /// under. Callers drill into chat history with `key`, never by re-hashing
+    /// `sketch_dir` — see [`ProjectUsage::key`].
     pub fn overview(&self) -> Vec<ProjectUsage> {
-        let mut rows: Vec<ProjectUsage> = self.projects.values().cloned().collect();
+        let mut rows: Vec<ProjectUsage> = self
+            .projects
+            .iter()
+            .map(|(key, p)| ProjectUsage {
+                key: key.clone(),
+                ..p.clone()
+            })
+            .collect();
         rows.sort_by(|a, b| {
             b.cost_usd
                 .partial_cmp(&a.cost_usd)
@@ -202,6 +226,9 @@ pub fn backfill(chats_root: &Path) -> UsageStore {
         store.projects.insert(
             key,
             ProjectUsage {
+                // Not persisted, and not the map key's home — `overview`
+                // fills it from the map on the way out.
+                key: String::new(),
                 sketch_dir,
                 cost_usd: t.cost_usd,
                 input_tokens: t.input_tokens,
@@ -442,6 +469,58 @@ mod tests {
         let rows = s.overview();
         let dirs: Vec<&str> = rows.iter().map(|r| r.sketch_dir.as_str()).collect();
         assert_eq!(dirs, ["/pricey", "/mid", "/cheap"]);
+    }
+
+    #[test]
+    fn overview_carries_the_store_key_for_every_row() {
+        let mut s = UsageStore::default();
+        s.record_line("aaaa-one", "/one", "x.ndjson", &result_line(0.01, 1, 1, 1));
+        s.record_line("bbbb-two", "/two", "y.ndjson", &result_line(0.90, 1, 1, 1));
+        let rows = s.overview();
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["bbbb-two", "aaaa-one"], "sorted by cost, key preserved");
+    }
+
+    #[test]
+    fn overview_key_is_right_even_when_sketch_dir_is_stale() {
+        // The regression this field exists for. `backfill` recovers
+        // `sketch_dir` from a transcript's meta line, which records where the
+        // conversation happened — so after a project rename it names a
+        // directory that is gone. Re-hashing it gives a key nothing is stored
+        // under; the key must come from the map, not the path.
+        let tmp = tempfile::tempdir().unwrap();
+        let key = crate::chatlog::sketch_key("/home/u/Projects/porch-light");
+        write_chat(
+            tmp.path(),
+            &key,
+            "2026-08-01T08-00-00.ndjson",
+            &[
+                r#"{"op":"meta","sketchDir":"/home/u/Projects/led-test"}"#,
+                &result_line(0.25, 1, 1, 1),
+            ],
+        );
+        let rows = backfill(tmp.path()).overview();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sketch_dir, "/home/u/Projects/led-test", "stale, by design");
+        assert_eq!(rows[0].key, key, "addressing must not go through sketch_dir");
+        assert_ne!(
+            crate::chatlog::sketch_key(&rows[0].sketch_dir),
+            rows[0].key,
+            "re-hashing the display path is exactly the bug"
+        );
+    }
+
+    #[test]
+    fn overview_key_is_not_persisted() {
+        // It would duplicate the map key it is copied from, and a stored copy
+        // could drift from it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("usage.json");
+        let mut s = UsageStore::default();
+        s.record_line("kkkk-proj", "/p", "x.ndjson", &result_line(0.01, 1, 1, 1));
+        s.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("\"key\""), "{raw}");
     }
 
     #[test]

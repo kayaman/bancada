@@ -675,6 +675,9 @@ export const chatTotals = (sketchDir: string) =>
 
 /** Cumulative Assistant usage for one project — survives chat pruning. */
 export interface ProjectUsage {
+  /** The row's identity — pass to chatListUsage/chatLoadByKey verbatim. */
+  key: string;
+  /** Display only; may name a directory that no longer exists. */
   sketch_dir: string;
   cost_usd: number;
   input_tokens: number;
@@ -695,8 +698,19 @@ export interface SessionEntry {
 }
 
 export const usageOverview = () => invoke<ProjectUsage[]>("usage_overview");
-export const chatListUsage = (sketchDir: string) =>
-  invoke<SessionEntry[]>("chat_list_usage", { sketchDir });
+
+/**
+ * These two are addressed by `ProjectUsage.key`, not by a sketch path.
+ *
+ * The dashboard shows historical records whose `sketch_dir` was recovered
+ * from transcripts and may name a directory that no longer exists — hashing
+ * it would yield a key nothing is stored under. Pass `row.key` through
+ * unchanged; never re-derive it.
+ */
+export const chatListUsage = (key: string) =>
+  invoke<SessionEntry[]>("chat_list_usage", { key });
+export const chatLoadByKey = (key: string, file: string) =>
+  invoke<string[]>("chat_load_by_key", { key, file });
 
 // ---------- scope ----------
 

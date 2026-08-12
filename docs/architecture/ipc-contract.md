@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **93** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **94** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (93)
+## 2. Commands (94)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -153,8 +153,23 @@ Paths come from the OS save dialog; `save_binary_file` takes base64.
 
 `chat_append` also drives usage accounting and prunes to 50 chats per sketch.
 
-### Usage — 2
-`usage_overview` · `chat_list_usage`
+All five are **path-addressed**: they take the open sketch's directory and hash
+it to a `sketch_key` internally. That is safe here — a live caller's path is
+current by definition.
+
+### Usage — 3
+`usage_overview` · `chat_list_usage` · `chat_load_by_key`
+
+The last two are **key-addressed**, and the split from the chat-log commands
+above is load-bearing rather than stylistic. The dashboard browses *historical*
+records whose `sketch_dir` was recovered by `usage::backfill` from transcripts'
+`meta` lines — which record where a conversation happened, not where the
+project is now. After a rename that string can name a directory that is gone,
+and hashing it yields a key nothing is stored under: empty session lists and
+un-openable chats.
+
+So `usage_overview` returns each row's `key`, and these two take it unchanged.
+Never re-derive a key from a `ProjectUsage.sketch_dir`.
 
 ### Fleet — 6
 `read_board_mac` · `fleet_sync` · `set_board_nickname` · `note_board_fqbn` ·

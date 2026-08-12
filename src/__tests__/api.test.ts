@@ -416,9 +416,19 @@ describe("usage dashboard", () => {
     expect(called()[1]).toBeUndefined();
   });
 
-  it("chatListUsage passes sketchDir", async () => {
-    await api.chatListUsage("/s");
-    expect(called()).toEqual(["chat_list_usage", { sketchDir: "/s" }]);
+  it("chatListUsage passes the store key, not a sketch path", async () => {
+    // The dashboard's rows are addressed by key: a recovered sketch_dir can
+    // name a directory that is gone, and re-hashing it finds nothing.
+    await api.chatListUsage("a3f19c2e-led-test");
+    expect(called()).toEqual(["chat_list_usage", { key: "a3f19c2e-led-test" }]);
+  });
+
+  it("chatLoadByKey passes key and file", async () => {
+    await api.chatLoadByKey("a3f19c2e-led-test", "2026-08-01T08-00-00.ndjson");
+    expect(called()).toEqual([
+      "chat_load_by_key",
+      { key: "a3f19c2e-led-test", file: "2026-08-01T08-00-00.ndjson" },
+    ]);
   });
 });
 

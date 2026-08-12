@@ -2143,16 +2143,31 @@ fn usage_overview(
     Ok(store.overview())
 }
 
+// The two commands below are **key-addressed**, unlike `chat_list`/`chat_load`
+// and friends above, which take the open sketch's path.
+//
+// The distinction is load-bearing, not stylistic. A live caller holds a path
+// that is current by definition, so hashing it is safe. The usage dashboard
+// browses *historical* records whose `sketch_dir` was recovered by
+// `usage::backfill` from transcripts' `meta` lines — which record where a
+// conversation happened, not where the project is now. After a rename that
+// string names a directory that is gone, and hashing it yields a key nothing
+// is stored under: empty session lists and un-openable chats. `overview()`
+// hands out the real key; these take it unchanged.
+
 #[tauri::command]
 fn chat_list_usage(
     app: AppHandle,
-    sketch_dir: String,
+    key: String,
 ) -> Result<Vec<bancada_core::chatlog::SessionEntry>, String> {
     let root = chats_root(&app)?;
-    Ok(bancada_core::chatlog::list_chats_with_usage(
-        &root,
-        &bancada_core::chatlog::sketch_key(&sketch_dir),
-    ))
+    Ok(bancada_core::chatlog::list_chats_with_usage(&root, &key))
+}
+
+#[tauri::command]
+fn chat_load_by_key(app: AppHandle, key: String, file: String) -> Result<Vec<String>, String> {
+    let root = chats_root(&app)?;
+    bancada_core::chatlog::load_chat(&root, &key, &file).map_err(err_str)
 }
 
 // ---------- board utilities ----------
@@ -4395,6 +4410,7 @@ pub fn run() {
             chat_totals,
             usage_overview,
             chat_list_usage,
+            chat_load_by_key,
             list_sketch_files,
             read_sketch_file,
             write_sketch_file,
