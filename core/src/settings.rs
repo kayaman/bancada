@@ -50,6 +50,29 @@ impl AppSettings {
     pub fn remove_recent(&mut self, dir: &str) {
         self.recent_projects.retain(|d| d != dir);
     }
+
+    /// Point a recent entry at a renamed project's new directory, **in
+    /// place** — the list is ordered by how recently a project was opened,
+    /// and renaming one is not opening it. Absent `old`: nothing to do.
+    ///
+    /// A pre-existing entry for `new` (the name was used before) would
+    /// otherwise appear twice, so the surviving occurrence is the earlier —
+    /// i.e. more recent — of the two.
+    pub fn replace_recent(&mut self, old: &str, new: &str) {
+        let Some(at) = self.recent_projects.iter().position(|d| d == old) else {
+            return;
+        };
+        self.recent_projects[at] = new.to_string();
+        let mut seen = false;
+        self.recent_projects.retain(|d| {
+            if d != new {
+                return true;
+            }
+            let first = !seen;
+            seen = true;
+            first
+        });
+    }
 }
 
 pub fn load(path: &Path) -> AppSettings {
@@ -118,6 +141,38 @@ mod tests {
         assert_eq!(s.recent_projects, vec!["/b".to_string()]);
         s.remove_recent("/nope");
         assert_eq!(s.recent_projects, vec!["/b".to_string()]);
+    }
+
+    #[test]
+    fn replace_recent_keeps_the_position() {
+        // A rename must not promote the project to the top of the list — the
+        // ordering is "recently opened", and renaming is not opening.
+        let mut s = AppSettings::default();
+        s.push_recent("/c".into());
+        s.push_recent("/b".into());
+        s.push_recent("/a".into());
+        s.replace_recent("/b", "/renamed");
+        assert_eq!(
+            s.recent_projects,
+            vec!["/a".to_string(), "/renamed".to_string(), "/c".to_string()]
+        );
+    }
+
+    #[test]
+    fn replace_recent_ignores_an_absent_entry() {
+        let mut s = AppSettings::default();
+        s.push_recent("/a".into());
+        s.replace_recent("/nope", "/new");
+        assert_eq!(s.recent_projects, vec!["/a".to_string()]);
+    }
+
+    #[test]
+    fn replace_recent_does_not_duplicate_an_existing_entry() {
+        let mut s = AppSettings::default();
+        s.push_recent("/b".into());
+        s.push_recent("/a".into());
+        s.replace_recent("/b", "/a");
+        assert_eq!(s.recent_projects, vec!["/a".to_string()]);
     }
 
     #[test]
