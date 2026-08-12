@@ -26,7 +26,7 @@
 
 use crate::{Error, Result};
 use crate::types::{OutputLine, OutputStream};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -607,6 +607,115 @@ pub enum RepoState {
     },
 }
 
+// ---------- flash tags ----------
+
+/// `flash/2026-08-12T1430` for the instant `unix_secs`, in UTC.
+///
+/// Clock-free on purpose: `core` never reads the clock, so the Tauri layer
+/// passes the seconds in exactly as it does for `fleet` (see that module's
+/// doc). That is what makes a date-boundary case testable at all — a
+/// function calling `SystemTime::now()` internally could not be pinned to a
+/// leap day or to a second before midnight.
+///
+/// The civil-date conversion (Howard Hinnant's `civil_from_days`) is inlined
+/// for the same reason `chatlog`'s fnv1a is — "it is eight lines and not
+/// worth a dependency" (`chatlog.rs:33`). This is about fifteen, and the
+/// alternative is putting `chrono` or `time` into a workspace that has
+/// neither, to format one string.
+///
+/// UTC rather than local time so the tag reads the same in a log, in a
+/// remote's tag list, and on the other machine of a two-machine bench;
+/// minute resolution because two flashes within one minute are the same
+/// bench moment, and the tag is a label, not an identifier.
+pub fn flash_tag_name(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    let (hour, minute) = (rem / 3_600, (rem % 3_600) / 60);
+
+    // civil_from_days: shift the epoch to 0000-03-01 so a leap day lands at
+    // the end of the era and no month needs a special case. `era` is a
+    // 400-year Gregorian cycle (146097 days); `doe`/`yoe`/`doy` are the day
+    // of the era, year of the era and day of the year within it.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(month <= 2);
+
+    format!("flash/{year:04}-{month:02}-{day:02}T{hour:02}{minute:02}")
+}
+
+/// Tag HEAD of `dir` with an annotated tag `name` carrying `message`.
+///
+/// Annotated (`-a`/`-m`) rather than lightweight because the message *is*
+/// the provenance record — which board, which port, which sketch — and a
+/// lightweight tag is just a ref with nowhere to put it.
+///
+/// The flag discipline is [`commit`]'s, one step later and for the same
+/// reasons. gpg-signing and hooks are forced off (`-c tag.gpgSign=false -c
+/// core.hooksPath=`) because tagging a flash is an app-internal write and a
+/// broken gpg agent or a global hooks directory must never turn "record what
+/// was flashed" into an error. The `user.name`/`user.email` fallback stays
+/// conditional on [`has_usable_identity`]: an annotated tag carries a tagger,
+/// and a pushed flash tag must read as the user's own, not as "Bancada" —
+/// the fallback exists only so an identity-less machine still gets its tag.
+pub fn tag_annotated(dir: &Path, name: &str, message: &str) -> Result<()> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Other("tag name is empty".into()));
+    }
+    let mut args: Vec<&str> = vec!["-C", d];
+    if !has_usable_identity(d) {
+        args.extend(["-c", "user.name=Bancada", "-c", "user.email=bancada@localhost"]);
+    }
+    args.extend(["-c", "tag.gpgSign=false", "-c", "core.hooksPath=", "tag", "-a", "-m", message, name]);
+    run(&args)?;
+    Ok(())
+}
+
+/// Names of the `flash/*` tags pointing at HEAD, empty when there are none.
+///
+/// Scoped to `flash/*` and to HEAD so the answer is "what this exact commit
+/// was flashed as", which is the only question the UI asks — a release tag
+/// on the same commit, or an older flash of an earlier one, is not it.
+pub fn flash_tags_at_head(dir: &Path) -> Result<Vec<String>> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let out = run(&["-C", d, "tag", "--points-at", "HEAD", "-l", "flash/*"])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// `git push origin <tag>`, streaming git's output the way [`sync`] does.
+///
+/// A non-zero exit is `Ok(false)`, not an error, matching [`run_streaming`]:
+/// no remote, no auth, or a tag the remote already has are all states the UI
+/// reports quietly — the tag is already in the local history either way, so
+/// nothing was lost.
+pub fn push_tag(dir: &Path, tag: &str, on_line: impl FnMut(OutputLine)) -> Result<bool> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err(Error::Other("tag name is empty".into()));
+    }
+    run_streaming(&["-C", d, "push", "origin", tag], on_line)
+}
+
 // ---------- gh (GitHub CLI) ----------
 
 /// Is the GitHub CLI on PATH? Its absence only hides the create-repo button.
@@ -620,17 +729,58 @@ pub fn gh_available() -> bool {
         .unwrap_or(false)
 }
 
-/// `gh repo create <name> --private --source <dir> --push` — private by
-/// default; `--push` last so nothing partial happens on auth/name errors.
-pub fn create_remote_args(name: &str, dir: &str) -> Vec<String> {
-    ["repo", "create", name, "--private", "--source", dir, "--push"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+/// Who can see a repository `gh repo create` makes. Private stays the
+/// default at every call site: a bench sketch usually carries credentials
+/// before it carries a README, and publishing is a decision to take
+/// deliberately rather than to inherit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    Private,
+    Public,
 }
 
-/// Create a private GitHub repo for `dir` and push. Streams gh's output.
-pub fn create_remote(dir: &Path, name: &str, mut on_line: impl FnMut(OutputLine)) -> Result<()> {
+/// `gh repo create <name> --private|--public [--description <text>] --source
+/// <dir> --push` — `--push` last so nothing partial happens on auth/name
+/// errors, which is why `--description` rides ahead of `--source` rather
+/// than being appended.
+///
+/// An empty or whitespace-only description is dropped entirely instead of
+/// being passed as `--description ''`: a blank field is a user declining to
+/// write one, and gh would happily record the blank.
+pub fn create_remote_args(
+    name: &str,
+    dir: &str,
+    visibility: Visibility,
+    description: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["repo".into(), "create".into(), name.into()];
+    args.push(
+        match visibility {
+            Visibility::Private => "--private",
+            Visibility::Public => "--public",
+        }
+        .into(),
+    );
+    if let Some(text) = description.map(str::trim).filter(|t| !t.is_empty()) {
+        args.push("--description".into());
+        args.push(text.into());
+    }
+    args.push("--source".into());
+    args.push(dir.into());
+    args.push("--push".into());
+    args
+}
+
+/// Create a GitHub repo for `dir` at `visibility` and push. Streams gh's
+/// output.
+pub fn create_remote(
+    dir: &Path,
+    name: &str,
+    visibility: Visibility,
+    description: Option<&str>,
+    mut on_line: impl FnMut(OutputLine),
+) -> Result<()> {
     let d = dir
         .to_str()
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
@@ -638,7 +788,7 @@ pub fn create_remote(dir: &Path, name: &str, mut on_line: impl FnMut(OutputLine)
     if name.is_empty() {
         return Err(Error::Other("repository name is empty".into()));
     }
-    let args = create_remote_args(name, d);
+    let args = create_remote_args(name, d, visibility, description);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut child = std::process::Command::new("gh")
         .args(&arg_refs)
@@ -1395,15 +1545,233 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         assert_eq!(sync(&dir, |_| {}).unwrap(), SyncOutcome::NoRemote);
     }
 
+    // ----- flash tags -----
+
+    /// Expected values were read off `date -u -d @<secs>`, not derived from
+    /// the implementation, so the inlined civil-date arithmetic is checked
+    /// against the system's own calendar rather than against itself.
+    #[test]
+    fn flash_tag_name_formats_the_utc_minute_of_a_unix_instant() {
+        // date -u -d @0            -> 1970-01-01T0000
+        assert_eq!(flash_tag_name(0), "flash/1970-01-01T0000");
+        // date -u -d @1786545000   -> 2026-08-12T1430
+        assert_eq!(flash_tag_name(1_786_545_000), "flash/2026-08-12T1430");
+        // date -u -d @2147483647   -> 2038-01-19T0314 (past the 32-bit cliff)
+        assert_eq!(flash_tag_name(2_147_483_647), "flash/2038-01-19T0314");
+        // date -u -d @4102444799   -> 2099-12-31T2359
+        assert_eq!(flash_tag_name(4_102_444_799), "flash/2099-12-31T2359");
+    }
+
+    /// A leap day is where a hand-rolled days-from-civil conversion goes
+    /// wrong first, so it gets its own case.
+    #[test]
+    fn flash_tag_name_handles_a_leap_day() {
+        // date -u -d @1709164800 -> 2024-02-29T0000
+        assert_eq!(flash_tag_name(1_709_164_800), "flash/2024-02-29T0000");
+        // Seconds within the minute are dropped, not rounded up.
+        assert_eq!(flash_tag_name(1_709_164_837), "flash/2024-02-29T0000");
+    }
+
+    /// The rollover the tag name must get right: two seconds apart across
+    /// midnight UTC are two different days, and 2024-02-29 is followed by
+    /// 2024-03-01, not 2024-03-00.
+    #[test]
+    fn flash_tag_name_rolls_the_day_at_midnight_utc() {
+        // date -u -d @1709251140 -> 2024-02-29T2359
+        assert_eq!(flash_tag_name(1_709_251_140), "flash/2024-02-29T2359");
+        // date -u -d @1709251199 -> 2024-02-29T2359 (last second of the day)
+        assert_eq!(flash_tag_name(1_709_251_199), "flash/2024-02-29T2359");
+        // date -u -d @1709251200 -> 2024-03-01T0000
+        assert_eq!(flash_tag_name(1_709_251_200), "flash/2024-03-01T0000");
+    }
+
+    /// A repository with its own identity, so annotated tags are possible
+    /// without exercising the fallback.
+    fn repo_with_identity(tmp: &TempDir, name: &str) -> PathBuf {
+        let dir = tmp.path().canonicalize().unwrap().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        run(&["-C", d, "config", "user.name", "Test User"]).unwrap();
+        run(&["-C", d, "config", "user.email", "t@example.com"]).unwrap();
+        dir
+    }
+
+    /// Annotated, not lightweight: the message is the provenance record of
+    /// what was flashed, and a lightweight tag has nowhere to keep it.
+    #[test]
+    fn tag_annotated_writes_an_annotated_tag_carrying_its_message() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Tagged");
+        let d = dir.to_str().unwrap();
+
+        tag_annotated(&dir, "flash/2026-08-12T1430", "esp32:esp32:esp32c6 on /dev/ttyACM0").unwrap();
+
+        let kind = run(&["-C", d, "cat-file", "-t", "flash/2026-08-12T1430"]).unwrap();
+        assert_eq!(kind.trim(), "tag", "must be an annotated tag object");
+        let msg = run(&["-C", d, "tag", "-l", "--format=%(contents)", "flash/2026-08-12T1430"]).unwrap();
+        assert!(msg.contains("esp32:esp32:esp32c6 on /dev/ttyACM0"), "message was {msg:?}");
+        let tagger = run(&["-C", d, "tag", "-l", "--format=%(taggeremail)", "flash/2026-08-12T1430"]).unwrap();
+        assert!(tagger.contains("t@example.com"), "own identity must be kept: {tagger:?}");
+    }
+
+    /// Same failure modes `commit` guards against, one step later: tagging a
+    /// flash must not fail because the machine has no git identity, because
+    /// the repo asks for a gpg signature no agent can produce, or because a
+    /// global hooks directory has something to say.
+    ///
+    /// Identity is emptied in *local* config rather than by pointing
+    /// `GIT_CONFIG_GLOBAL` at `/dev/null` the way the `commit` fixture does.
+    /// An empty `user.email` is exactly what [`has_usable_identity`] reads as
+    /// "none configured", and git itself refuses it ("empty ident name (for
+    /// <>) not allowed"), so the failure mode is reproduced faithfully — and
+    /// hermetically, without a second test mutating the same process-wide
+    /// environment variable concurrently and restoring it out from under this
+    /// one.
+    #[test]
+    fn tag_annotated_falls_back_to_bancada_identity_and_skips_gpg_and_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("NoIdentityTag");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+
+        let d = dir.to_str().unwrap();
+        run(&["-C", d, "config", "user.name", ""]).unwrap();
+        run(&["-C", d, "config", "user.email", ""]).unwrap();
+        run(&["-C", d, "config", "tag.gpgSign", "true"]).unwrap();
+
+        tag_annotated(&dir, "flash/1970-01-01T0000", "flashed").unwrap();
+
+        let tagger = run(&["-C", d, "tag", "-l", "--format=%(taggeremail)", "flash/1970-01-01T0000"]).unwrap();
+        assert!(tagger.contains("bancada@localhost"), "tagger {tagger:?}");
+        // And the override really took: an unsigned tag has no signature,
+        // however well-configured the gpg agent on this machine happens to be.
+        let sig = run(&["-C", d, "tag", "-l", "--format=%(contents:signature)", "flash/1970-01-01T0000"]).unwrap();
+        assert!(sig.trim().is_empty(), "tag.gpgSign=false was not honoured: {sig:?}");
+    }
+
+    #[test]
+    fn empty_tag_names_are_refused_before_git_runs() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "EmptyName");
+        let err = tag_annotated(&dir, "   ", "m").unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
+        let err = push_tag(&dir, "", |_| {}).unwrap_err().to_string();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    /// Only `flash/*`, and only at HEAD: an older flash tag and a release
+    /// tag sharing the repository must not be reported as this commit's.
+    #[test]
+    fn flash_tags_at_head_lists_only_flash_tags_pointing_at_head() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Points");
+        let d = dir.to_str().unwrap();
+
+        assert!(flash_tags_at_head(&dir).unwrap().is_empty(), "premise: no tags yet");
+
+        // The fixture's own lightweight tags carry `-c tag.gpgSign=false`
+        // because the machine running the tests may well sign tags by
+        // default (this repository's release ritual does) — under an ambient
+        // `tag.gpgsign=true`, a bare `git tag <name>` becomes a signed
+        // annotated tag and fails with "no tag message?". That ambient
+        // setting is precisely what `tag_annotated` overrides, so the calls
+        // to it below are left alone to exercise the override.
+        let no_sign = ["-C", d, "-c", "tag.gpgSign=false", "tag"];
+
+        // An older commit carries a flash tag of its own.
+        run(&[&no_sign[..], &["flash/2020-01-01T0000"]].concat()).unwrap();
+        std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
+        commit(&dir, "second").unwrap();
+
+        tag_annotated(&dir, "flash/2026-08-12T1430", "flashed").unwrap();
+        tag_annotated(&dir, "flash/2026-08-12T1435", "flashed again").unwrap();
+        run(&[&no_sign[..], &["v1.0.0"]].concat()).unwrap();
+
+        let mut tags = flash_tags_at_head(&dir).unwrap();
+        tags.sort();
+        assert_eq!(tags, ["flash/2026-08-12T1430", "flash/2026-08-12T1435"]);
+    }
+
+    #[test]
+    fn push_tag_publishes_the_tag_to_origin() {
+        let tmp = TempDir::new().unwrap();
+        let (a, _b) = make_pair(&tmp);
+        let base = tmp.path().canonicalize().unwrap();
+        commit_file(&a, "flashed.ino", "void setup() {}\n", "flashed");
+        assert_eq!(sync(&a, |_| {}).unwrap(), SyncOutcome::Synced);
+
+        tag_annotated(&a, "flash/2026-08-12T1430", "esp32:esp32:esp32c6").unwrap();
+        assert!(push_tag(&a, "flash/2026-08-12T1430", |_| {}).unwrap());
+
+        let refs = run(&["-C", base.join("origin.git").to_str().unwrap(), "for-each-ref", "refs/tags"]).unwrap();
+        assert!(refs.contains("flash/2026-08-12T1430"), "origin tags: {refs:?}");
+    }
+
+    /// A non-zero exit is a `false`, not an `Err` — same contract as
+    /// [`run_streaming`], so the caller can report "not pushed" quietly.
+    #[test]
+    fn push_tag_reports_false_when_git_refuses() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "NoOrigin");
+        tag_annotated(&dir, "flash/2026-08-12T1430", "flashed").unwrap();
+        // No origin remote at all: git exits non-zero.
+        assert!(!push_tag(&dir, "flash/2026-08-12T1430", |_| {}).unwrap());
+    }
+
     // ----- gh remote -----
 
     #[test]
     fn create_remote_args_are_private_source_push() {
         assert_eq!(
-            create_remote_args("teste-uno-veia", "/home/u/Projects/teste-uno-veia"),
+            create_remote_args(
+                "teste-uno-veia",
+                "/home/u/Projects/teste-uno-veia",
+                Visibility::Private,
+                None,
+            ),
             ["repo", "create", "teste-uno-veia", "--private",
              "--source", "/home/u/Projects/teste-uno-veia", "--push"]
         );
+    }
+
+    #[test]
+    fn create_remote_args_can_publish_a_public_repo() {
+        assert_eq!(
+            create_remote_args("aberto", "/home/u/Projects/aberto", Visibility::Public, None),
+            ["repo", "create", "aberto", "--public",
+             "--source", "/home/u/Projects/aberto", "--push"]
+        );
+    }
+
+    /// `--description` rides between visibility and `--source`, so `--push`
+    /// stays last no matter which options are present.
+    #[test]
+    fn create_remote_args_carry_a_description_before_source_and_push() {
+        assert_eq!(
+            create_remote_args(
+                "termometro",
+                "/home/u/Projects/termometro",
+                Visibility::Public,
+                Some("Leitura térmica com AHT20"),
+            ),
+            ["repo", "create", "termometro", "--public",
+             "--description", "Leitura térmica com AHT20",
+             "--source", "/home/u/Projects/termometro", "--push"]
+        );
+    }
+
+    /// An empty description is omitted entirely rather than passed as an
+    /// empty flag: `gh repo create --description ''` is a valid but pointless
+    /// argument, and a whitespace-only one is a user leaving the field blank.
+    #[test]
+    fn create_remote_args_omit_a_blank_description() {
+        let expected = ["repo", "create", "x", "--private", "--source", "/d", "--push"];
+        assert_eq!(create_remote_args("x", "/d", Visibility::Private, Some("")), expected);
+        assert_eq!(create_remote_args("x", "/d", Visibility::Private, Some("   ")), expected);
+        assert_eq!(create_remote_args("x", "/d", Visibility::Private, None), expected);
     }
 
     #[test]
