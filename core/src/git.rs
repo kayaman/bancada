@@ -716,6 +716,84 @@ pub fn push_tag(dir: &Path, tag: &str, on_line: impl FnMut(OutputLine)) -> Resul
     run_streaming(&["-C", d, "push", "origin", tag], on_line)
 }
 
+/// The commit HEAD points at, full 40-char sha.
+///
+/// Exactly one subprocess, deliberately: this is called on the flash path,
+/// inside the build gate, where every extra `git` spawn is time between the
+/// press and the board being written. `rev-parse HEAD` answers it alone —
+/// there is nothing to add without paying for another process.
+///
+/// A directory that is not a repository is left to git to refuse, matching
+/// [`commit`] rather than [`repo_state`]'s `NoGit`. The difference is what
+/// the two are for: `repo_state` exists to *describe* a directory, so "no
+/// repository" is one of the answers it owes its caller, whereas this
+/// question — which commit is on the board — simply has no answer there, and
+/// the caller must record nothing rather than record something invented.
+pub fn head_sha(dir: &Path) -> Result<String> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    Ok(run(&["-C", d, "rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// How many commits `dir`'s HEAD is ahead of `commit` — `None` when the two
+/// cannot be compared at all.
+///
+/// `Option` rather than a documented `0` because "cannot compare" and
+/// "identical" are genuinely different answers and the banner words them
+/// differently: `Some(0)` is "this board is running what you are looking at",
+/// `None` is "the commit this board was flashed from is not in this history"
+/// — an invitation to re-flash, not a reassurance. Collapsing both to `0`
+/// would make a stale board read as up to date, which is the one wrong thing
+/// this function is able to say.
+///
+/// "Cannot compare" is `merge-base --is-ancestor` failing, which covers both
+/// halves of the problem in one probe: a sha naming nothing (the `flash/*`
+/// tag deleted, the project re-cloned) and a sha that still exists but no
+/// longer leads to HEAD (branch force-pushed, history rebased). The second is
+/// why a mere existence check would not be enough — `<commit>..HEAD` happily
+/// counts the whole rewritten branch and returns a large, confident,
+/// meaningless number.
+///
+/// HEAD is resolved first, via [`head_sha`], so that a directory which is not
+/// a repository stays an error instead of degrading into `None`: a failed
+/// comparison is only evidence about the *recorded commit* once the
+/// repository itself is known good. Unlike [`head_sha`] this runs for a
+/// banner rather than under the build gate, so the extra process costs
+/// nothing anyone is waiting on.
+///
+/// `commit` must be a hex object name of 4–40 characters — the shape
+/// [`head_sha`] returns, and the only thing ever recorded against a board.
+/// Anything else is refused before git runs, the way [`create_remote`] guards
+/// an empty repository name and [`tag_annotated`] an empty tag name: a stored
+/// value that has been blanked, truncated or mangled must never reach a
+/// command line where git could read it as an option or as a range.
+pub fn project_drift(dir: &Path, commit: &str) -> Result<Option<u32>> {
+    let d = dir
+        .to_str()
+        .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    let rev = commit.trim();
+    if rev.is_empty() {
+        return Err(Error::Other("commit sha is empty".into()));
+    }
+    if !(4..=40).contains(&rev.len()) || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::Other(format!("not a commit sha: {rev:?}")));
+    }
+
+    head_sha(dir)?;
+    if run(&["-C", d, "merge-base", "--is-ancestor", rev, "HEAD"]).is_err() {
+        return Ok(None);
+    }
+
+    let range = format!("{rev}..HEAD");
+    let out = run(&["-C", d, "rev-list", "--count", &range])?;
+    let n = out
+        .trim()
+        .parse()
+        .map_err(|_| Error::Other(format!("git rev-list --count printed {out:?}")))?;
+    Ok(Some(n))
+}
+
 // ---------- gh (GitHub CLI) ----------
 
 /// Is the GitHub CLI on PATH? Its absence only hides the create-repo button.
@@ -1719,6 +1797,117 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         tag_annotated(&dir, "flash/2026-08-12T1430", "flashed").unwrap();
         // No origin remote at all: git exits non-zero.
         assert!(!push_tag(&dir, "flash/2026-08-12T1430", |_| {}).unwrap());
+    }
+
+    // ----- flashed-commit provenance -----
+
+    #[test]
+    fn head_sha_is_the_full_forty_char_sha_rev_parse_reports() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Head");
+        let sha = head_sha(&dir).unwrap();
+        assert_eq!(sha.len(), 40, "sha was {sha:?}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "sha was {sha:?}");
+        let expected = run(&["-C", dir.to_str().unwrap(), "rev-parse", "HEAD"]).unwrap();
+        assert_eq!(sha, expected.trim());
+    }
+
+    /// Unlike [`repo_state`], which answers `NoGit` because describing a
+    /// directory is its whole job, this one lets git refuse: there is no sha
+    /// to hand back, and the flash path records nothing rather than something
+    /// invented.
+    #[test]
+    fn head_sha_lets_git_refuse_a_directory_that_is_not_a_repository() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("loose");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(head_sha(&dir).is_err());
+    }
+
+    #[test]
+    fn project_drift_is_zero_against_head_itself() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Same");
+        let sha = head_sha(&dir).unwrap();
+        assert_eq!(project_drift(&dir, &sha).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn project_drift_counts_the_commits_made_since() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Moved");
+        let flashed = head_sha(&dir).unwrap();
+        for n in 0..3 {
+            std::fs::write(dir.join(format!("f{n}.h")), "#pragma once\n").unwrap();
+            assert_eq!(commit(&dir, "since").unwrap(), CommitOutcome::Committed);
+        }
+        assert_eq!(project_drift(&dir, &flashed).unwrap(), Some(3));
+        // An abbreviated sha names the same commit and gets the same answer.
+        assert_eq!(project_drift(&dir, &flashed[..12]).unwrap(), Some(3));
+    }
+
+    /// The recorded sha names nothing here — the repository was re-cloned, or
+    /// the sha was never this project's to begin with. `None`, not an error
+    /// and not a reassuring `0`.
+    #[test]
+    fn project_drift_cannot_compare_an_unknown_commit() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Unknown");
+        assert_eq!(
+            project_drift(&dir, "0123456789abcdef0123456789abcdef01234567").unwrap(),
+            None
+        );
+    }
+
+    /// The other half of "cannot compare", and the reason an existence check
+    /// alone would not do: after a force-push or a rebase the recorded commit
+    /// is still in the object store but no longer leads to HEAD, and
+    /// `<commit>..HEAD` would answer with the size of the rewritten branch —
+    /// a confident, meaningless number.
+    #[test]
+    fn project_drift_cannot_compare_a_commit_no_longer_reachable_from_head() {
+        let tmp = TempDir::new().unwrap();
+        let dir = repo_with_identity(&tmp, "Rewritten");
+        let d = dir.to_str().unwrap();
+        let baseline = head_sha(&dir).unwrap();
+        std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
+        commit(&dir, "flashed from here").unwrap();
+        let flashed = head_sha(&dir).unwrap();
+
+        run(&["-C", d, "reset", "--hard", "--quiet", &baseline]).unwrap();
+        assert!(
+            run(&["-C", d, "cat-file", "-t", &flashed]).is_ok(),
+            "premise: the object itself survives the rewind"
+        );
+        assert_eq!(project_drift(&dir, &flashed).unwrap(), None);
+    }
+
+    /// Refused in Rust before git is spawned, the same shape as
+    /// [`tag_annotated`]'s empty-name guard. The fixture directory is not a
+    /// repository at all, so anything that leaked through to git would come
+    /// back as a `ToolFailed` about *that* instead of the messages asserted
+    /// here — which is what makes this an assertion that git never ran.
+    #[test]
+    fn project_drift_refuses_an_empty_or_malformed_commit_before_git_runs() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("never-used");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for blank in ["", "   "] {
+            let err = project_drift(&dir, blank).unwrap_err().to_string();
+            assert!(err.contains("empty"), "{blank:?} gave {err}");
+        }
+        for bad in [
+            "HEAD",
+            "abc",
+            "--upload-pack=touch /tmp/pwned",
+            "deadbeef..HEAD",
+            "v1.0.0",
+            "0123456789abcdef0123456789abcdef012345678",
+        ] {
+            let err = project_drift(&dir, bad).unwrap_err().to_string();
+            assert!(err.contains("not a commit sha"), "{bad:?} gave {err}");
+        }
     }
 
     // ----- gh remote -----
