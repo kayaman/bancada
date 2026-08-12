@@ -65,17 +65,17 @@ export function checkRename(
   if (!t) return { ok: false, reason: "name the new path" };
   if (t === from) return { ok: false, reason: "the path is unchanged" };
   if (t.startsWith("/"))
-    return { ok: false, reason: "use a path inside the sketch, not an absolute one" };
+    return { ok: false, reason: "use a path inside the project, not an absolute one" };
   const segments = t.split("/");
   if (segments.some((s) => s === ".."))
-    return { ok: false, reason: "the path cannot leave the sketch (..)" };
+    return { ok: false, reason: "the path cannot leave the project (..)" };
   if (segments.some((s) => s.trim() === ""))
     return { ok: false, reason: "the path has an empty segment" };
   const prot = protectedPaths(sketchDir);
   if (prot.has(from))
-    return { ok: false, reason: `${from} is required by the sketch and cannot be renamed` };
+    return { ok: false, reason: `${from} is required by the build and cannot be renamed` };
   if (prot.has(t))
-    return { ok: false, reason: `${t} is reserved — the sketch needs it as-is` };
+    return { ok: false, reason: `${t} is reserved — the build needs it as-is` };
   if (isDescendant(t, from))
     return { ok: false, reason: `cannot move ${from} inside itself` };
   if (files.some((f) => f.rel_path === t))

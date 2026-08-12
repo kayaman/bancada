@@ -133,7 +133,7 @@ export default function BoardsManager({
 
   const doPin = async (core: CoreView) => {
     if (!sketchDir || !profile) {
-      notify("Open a sketch with a sketch.yaml profile first", true);
+      notify("Open a project with a sketch.yaml profile first", true);
       return;
     }
     setWorking(true);

@@ -174,7 +174,7 @@ export default function FileTree({
       <div className="tree-header">
         <button
           className="btn icon"
-          title={`New file in ${anchor || "the sketch"}…`}
+          title={`New file in ${anchor || "the project"}…`}
           disabled={!sketchDir}
           onClick={() => beginCreate(anchor, "file")}
         >
@@ -182,7 +182,7 @@ export default function FileTree({
         </button>
         <button
           className="btn icon"
-          title={`New folder in ${anchor || "the sketch"}…`}
+          title={`New folder in ${anchor || "the project"}…`}
           disabled={!sketchDir}
           onClick={() => beginCreate(anchor, "dir")}
         >
@@ -284,7 +284,7 @@ export default function FileTree({
             style={{ paddingLeft: pad }}
             title={
               isProt
-                ? `${node.relPath} — required by the sketch; cannot be renamed, moved or deleted`
+                ? `${node.relPath} — required by the build; cannot be renamed, moved or deleted`
                 : node.relPath
             }
             onClick={() => {
@@ -307,7 +307,7 @@ export default function FileTree({
         );
       })}
       {files.length === 0 && (
-        <div className="empty-hint">Open a sketch folder to begin.</div>
+        <div className="empty-hint">Open a project folder to begin.</div>
       )}
       <TreeContextMenu
         isDir={(p) => dirSet.has(p)}

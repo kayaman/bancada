@@ -68,7 +68,7 @@ export default function GitPill(props: Props) {
           }
         }}
         placeholder="commit message"
-        title="Checkpoint everything in this sketch"
+        title="Checkpoint everything in this project"
       />
       <button
         className="btn small primary"

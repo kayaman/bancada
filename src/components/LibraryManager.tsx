@@ -123,7 +123,7 @@ export default function LibraryManager({
 
   const addLocal = async () => {
     if (!sketchDir || !profile) {
-      notify("Open a sketch with a sketch.yaml profile first", true);
+      notify("Open a project with a sketch.yaml profile first", true);
       return;
     }
     const dir = await open({ directory: true, title: "Choose a library folder" });
@@ -188,7 +188,7 @@ export default function LibraryManager({
 
   const addRemote = async () => {
     if (!sketchDir) {
-      notify("Open a sketch first — the library is vendored into it", true);
+      notify("Open a project first — the library is vendored into it", true);
       return;
     }
     if (!alias.trim() || !chosenRef) return;
@@ -295,7 +295,7 @@ export default function LibraryManager({
           New
         </button>
         <div className="spacer" />
-        <button className="btn small" onClick={addLocal} title="Add a local/proprietary library folder to this sketch's profile (sketch.yaml dir: entry)">
+        <button className="btn small" onClick={addLocal} title="Add a local/proprietary library folder to this project's profile (sketch.yaml dir: entry)">
           + Local…
         </button>
       </div>
@@ -426,7 +426,7 @@ export default function LibraryManager({
 
           {!sketchDir && (
             <div className="empty-hint">
-              Open a sketch first — the library is vendored into it and pinned in
+              Open a project first — the library is vendored into it and pinned in
               its <code>bancada.yaml</code>.
             </div>
           )}
@@ -439,7 +439,7 @@ export default function LibraryManager({
 
           <div className="lib-pinned">
             <div className="panel-tabs">
-              <span className="scope-dim">Pinned in this sketch</span>
+              <span className="scope-dim">Pinned in this project</span>
               <div className="spacer" />
               <button
                 className="btn small"
