@@ -52,6 +52,9 @@ fn live_claude_replies_pong_and_parses_as_system_init_and_result() {
         system_prompt_extra: "You are being exercised by an automated test. \
             Reply with exactly the text: pong"
             .to_string(),
+        // A fresh session, not a resumed one — this scenario has no prior
+        // transcript for the CLI to continue from.
+        resume_session_id: None,
     };
 
     let mut child = Command::new("claude")
