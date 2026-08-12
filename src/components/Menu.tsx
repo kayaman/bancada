@@ -7,13 +7,30 @@ interface Props {
   /** Anchor button whose mousedown must not count as outside — otherwise a
    *  second click on the anchor closes then immediately reopens. */
   anchorRef?: React.RefObject<HTMLElement | null>;
+  /**
+   * ARIA role for the popover. `"menu"` — the default — is only valid when
+   * every child is a `menuitem`; a popover holding inputs must pass
+   * `"group"` instead, or screen readers enter menu navigation and skip the
+   * fields entirely. See `GitPill`, whose popover is a small form.
+   */
+  role?: "menu" | "group";
+  /** Accessible name. Required with `role="group"`, which has no implicit one. */
+  ariaLabel?: string;
   children: React.ReactNode;
 }
 
 /** Generic popover shell: fixed-position at (x, y), clamped to the viewport;
  *  closes on outside press, Escape or window blur. The caller renders the
  *  `.ctx-item` children and decides when the menu exists at all. */
-export default function Menu({ x, y, onClose, anchorRef, children }: Props) {
+export default function Menu({
+  x,
+  y,
+  onClose,
+  anchorRef,
+  role = "menu",
+  ariaLabel,
+  children,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
 
@@ -50,7 +67,8 @@ export default function Menu({ x, y, onClose, anchorRef, children }: Props) {
     <div
       ref={ref}
       className="ctx-menu"
-      role="menu"
+      role={role}
+      aria-label={ariaLabel}
       style={{ left: pos?.x ?? x, top: pos?.y ?? y }}
       onContextMenu={(e) => e.preventDefault()}
     >

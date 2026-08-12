@@ -9,6 +9,7 @@ import {
   suggestedMessage,
   syncDisabledReason,
 } from "../gitStatus";
+import { reasonOf } from "../check";
 import { checkRepoName, publishBlockedReason } from "../publishRepo";
 
 interface Props {
@@ -66,10 +67,9 @@ export default function GitPill(props: Props) {
   const dirtyCount = state.kind === "root" || state.kind === "nested" ? state.dirty.length : 0;
   const tagNote = flashTaggingNote(state);
 
-  const nameCheck = checkRepoName(repoName);
   const publishReason =
     publishBlockedReason(state, visibility, props.ghAvailable) ??
-    (nameCheck.ok ? null : nameCheck.reason);
+    reasonOf(checkRepoName(repoName));
   const publish = () => {
     props.onCreateRemote(repoName.trim(), visibility, description.trim() || null);
     close();
@@ -167,7 +167,15 @@ export default function GitPill(props: Props) {
         {label}
       </button>
       {anchor && (
-        <Menu x={anchor.x} y={anchor.y} onClose={close} anchorRef={btnRef}>
+        <Menu
+          x={anchor.x}
+          y={anchor.y}
+          onClose={close}
+          anchorRef={btnRef}
+          // Not a menu: this popover holds commit, publish and remote inputs.
+          role="group"
+          ariaLabel="Git actions"
+        >
           {secrets.length > 0 && (
             <div className="git-pop-warning" role="note">
               ⚠ tracked despite .gitignore: {secrets.join(", ")}

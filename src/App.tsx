@@ -1794,7 +1794,7 @@ export default function App() {
         onNewProject={() => showPane("new")}
         onDuplicateProject={() => showPane("duplicate")}
         onRenameProject={() => showPane("rename")}
-        onUsage={() => showPane("usage")}
+        onOpenUsage={() => showPane("usage")}
         onCreateProfile={() => showPane(null, "bootstrap")}
         onAddProfile={() => showPane(null, "add")}
         onRetargetProfile={() => showPane(null, "retarget")}

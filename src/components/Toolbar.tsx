@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import type { DetectedPort, RepoState, SketchYaml, Visibility } from "../api";
 import { portOptions } from "../ports";
 import { defaultRepoName } from "../publishRepo";
+import { buildBlockedReason, retargetBlockedReason } from "../toolbarModel";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
 import ProjectMenu from "./ProjectMenu";
@@ -21,7 +22,7 @@ interface Props {
   onNewProject: () => void;
   onRenameProject: () => void;
   onDuplicateProject: () => void;
-  onUsage: () => void;
+  onOpenUsage: () => void;
   onCreateProfile: () => void;
   onAddProfile: () => void;
   onRetargetProfile: () => void;
@@ -44,6 +45,16 @@ interface Props {
 
 export default function Toolbar(props: Props) {
   const profiles = Object.keys(props.sketchYaml?.profiles ?? {});
+  // A disabled control must say why — the rule `gitStatus.syncDisabledReason`
+  // was written for. These three used to show a static description instead.
+  const build = {
+    sketchDir: props.sketchDir,
+    selectedPort: props.selectedPort,
+    busy: props.busy,
+  };
+  const verifyReason = buildBlockedReason("verify", build);
+  const flashReason = buildBlockedReason("flash", build);
+  const retargetReason = retargetBlockedReason(profiles, props.profile);
   // tauri.conf.json is the single source of truth for the version; outside a
   // Tauri shell (plain vite in a browser) the call rejects and the span
   // simply never renders.
@@ -120,8 +131,8 @@ export default function Toolbar(props: Props) {
                 <button
                   className="btn icon"
                   onClick={props.onRetargetProfile}
-                  disabled={profiles.length === 0 || !props.profile}
-                  title="Change this profile's board"
+                  disabled={retargetReason !== null}
+                  title={retargetReason ?? "Change this profile's board"}
                   aria-label="Change profile board"
                 >
                   ✎
@@ -180,7 +191,7 @@ export default function Toolbar(props: Props) {
       <div className="toolbar-group toolbar-group-build">
         <button
           className="btn icon"
-          onClick={props.onUsage}
+          onClick={props.onOpenUsage}
           title="Token usage and cost, across all projects"
           aria-label="Usage"
         >
@@ -189,16 +200,16 @@ export default function Toolbar(props: Props) {
         <button
           className="btn"
           onClick={props.onVerify}
-          disabled={props.busy || !props.sketchDir}
-          title="Compile (verify)"
+          disabled={verifyReason !== null}
+          title={verifyReason ?? "Compile (verify)"}
         >
           ✓ Verify
         </button>
         <button
           className="btn primary"
           onClick={props.onUpload}
-          disabled={props.busy || !props.sketchDir || !props.selectedPort}
-          title="Compile and flash to the board"
+          disabled={flashReason !== null}
+          title={flashReason ?? "Compile and flash to the board"}
         >
           → Flash
         </button>

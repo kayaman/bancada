@@ -5,6 +5,11 @@
 
 import type { SketchFile } from "./api";
 
+/**
+ * Like [`Check`](./check.ts), but success carries the normalised path —
+ * the caller needs it, and computing it twice is how the two copies
+ * would drift. The failure branch is identical on purpose.
+ */
 export type NewFileCheck =
   | { ok: true; relPath: string }
   | { ok: false; reason: string };

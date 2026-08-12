@@ -5,10 +5,10 @@
 // — this exists for friendlier messages without a round trip.
 
 import type { RepoState, Visibility } from "./api";
+import type { Check } from "./check";
 import { parentName } from "./gitStatus";
 
-export type { Visibility };
-export type Check = { ok: true } | { ok: false; reason: string };
+export type { Visibility, Check };
 
 /** Default repo name from a project path — was inlined in Toolbar.tsx. */
 export function defaultRepoName(sketchDir: string): string {

@@ -5,7 +5,9 @@
 // backend does the move — this exists for friendlier messages without a
 // round trip.
 
-export type Check = { ok: true } | { ok: false; reason: string };
+import type { Check } from "./check";
+
+export type { Check };
 
 export type RenamePlan = {
   destDir: string; // sibling of the current dir, with the new name

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { chatList, renameProject } from "../api";
 import type { RepoState } from "../api";
+import { reasonOf } from "../check";
 import { checkProjectName, renamePlan } from "../projectRename";
 
 interface Props {
@@ -50,7 +51,11 @@ export default function RenameProject({
 
   const check = checkProjectName(name, sketchDir);
   const plan = check.ok ? renamePlan(sketchDir, name) : null;
-  const reason = name.trim() && !check.ok ? check.reason : null;
+  const reason = reasonOf(check);
+  // Shown inline only once something has been typed — scolding an untouched
+  // field is noise. The disabled button still gets the full reason, because a
+  // disabled control that says nothing is the thing this rule exists to stop.
+  const inlineReason = name.trim() ? reason : null;
 
   const rename = async () => {
     // Guard as DuplicateProject does: Enter bypasses the disabled button, and a
@@ -107,9 +112,9 @@ export default function RenameProject({
           />
         </label>
 
-        {reason && (
+        {inlineReason && (
           <div className="git-pop-warning" role="note">
-            {reason}
+            {inlineReason}
           </div>
         )}
 

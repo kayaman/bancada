@@ -25,6 +25,37 @@ export interface MenuItem {
   disabledReason?: string;
 }
 
+/**
+ * Why Verify or Flash cannot run right now, or null when it can.
+ *
+ * Both buttons were disabled with a static tooltip describing the action, so
+ * a greyed-out Flash never said whether it wanted a project, a port, or just
+ * patience. `gitStatus.syncDisabledReason` exists because of exactly that
+ * lesson — a disabled control must say why.
+ *
+ * Ordered most-fundamental first: with nothing open, the missing port is not
+ * the thing to tell someone about.
+ */
+export function buildBlockedReason(
+  action: "verify" | "flash",
+  s: { sketchDir: string | null; selectedPort: string | null; busy: boolean },
+): string | null {
+  if (!s.sketchDir) return "open a project first";
+  if (s.busy) return "a build is already running";
+  if (action === "flash" && !s.selectedPort) return "select a serial port";
+  return null;
+}
+
+/** Why the profile's board cannot be changed right now, or null. */
+export function retargetBlockedReason(
+  profiles: string[],
+  profile: string | null,
+): string | null {
+  if (profiles.length === 0) return "this project has no sketch.yaml profile yet";
+  if (!profile) return "select a profile first";
+  return null;
+}
+
 /** The project button's label: the open project's name, or the invitation. */
 export function projectButtonLabel(sketchDir: string | null): string {
   const name = sketchDir?.split("/").filter(Boolean).pop();

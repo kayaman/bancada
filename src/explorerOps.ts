@@ -3,8 +3,9 @@
 // to keep buffers, dirty flags and the open file coherent across ops.
 
 import type { SketchFile } from "./api";
+import type { Check } from "./check";
 
-export type PathCheck = { ok: true } | { ok: false; reason: string };
+export type { Check };
 
 /** New path for `p` after renaming `from` → `to`; null when unaffected. */
 export function pathAfterRename(
@@ -60,7 +61,7 @@ export function checkRename(
   to: string,
   files: SketchFile[],
   sketchDir: string,
-): PathCheck {
+): Check {
   const t = to.trim();
   if (!t) return { ok: false, reason: "name the new path" };
   if (t === from) return { ok: false, reason: "the path is unchanged" };

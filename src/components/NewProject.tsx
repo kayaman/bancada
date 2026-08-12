@@ -103,7 +103,10 @@ export default function NewProject({
     });
 
   const create = async () => {
-    if (!name.trim() || !parent || !fqbn) return;
+    // `working` guards the same hazard DuplicateProject and RenameProject
+    // guard: Enter in the name field bypasses the disabled button, so two
+    // quick presses would fire two createProject calls at the same path.
+    if (working || !name.trim() || !parent || !fqbn) return;
     setWorking(true);
     try {
       // Pin explicitly rather than leaving versions floating.
