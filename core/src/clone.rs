@@ -99,7 +99,7 @@ pub fn clone_project(
         .is_symlink()
     {
         return Err(Error::Other(format!(
-            "the main sketch {} is a symlink — clone the project that owns the real file instead",
+            "the main sketch {} is a symlink — duplicate the project that owns the real file instead",
             src_dir.join(&main_ino).display()
         )));
     }
@@ -111,7 +111,7 @@ pub fn clone_project(
 
     if dest == src {
         return Err(Error::Other(
-            "the clone would overwrite the source project — choose a different name or destination"
+            "the duplicate would overwrite the source project — choose a different name or destination"
                 .into(),
         ));
     }
@@ -160,16 +160,16 @@ pub fn clone_project(
     match ghlib::git(&["-C", &staging.to_string_lossy(), "init"]) {
         Ok(_) => {}
         Err(Error::ToolMissing(_)) => {
-            warnings.push("git not found — clone created without a repository".into());
+            warnings.push("git not found — the duplicate was created without a repository".into());
         }
         Err(Error::ToolFailed { stderr, .. }) => {
             warnings.push(format!(
-                "git init failed — clone created without a repository: {stderr}"
+                "git init failed — the duplicate was created without a repository: {stderr}"
             ));
         }
         Err(e) => {
             warnings.push(format!(
-                "git init failed — clone created without a repository: {e}"
+                "git init failed — the duplicate was created without a repository: {e}"
             ));
         }
     }
@@ -268,7 +268,7 @@ fn copy_dir(
             if is_skipped_dir(&name_s) {
                 if name_s == ".bancada" {
                     warnings.push(
-                        "`.bancada/` (vendored libraries) was not copied — run gh restore in the clone to re-fetch them"
+                        "`.bancada/` (vendored libraries) was not copied — run gh restore to re-fetch them"
                             .into(),
                     );
                 }
@@ -560,8 +560,12 @@ mod tests {
         assert!(!made.dir.join("src/deep/build").exists());
         assert_eq!(read(made.dir.join("src/deep/keep.cpp")), "keep\n");
         assert_eq!(read(made.dir.join("tools/build")), "#!/bin/sh\n");
+        // copy_dir is shared with the rename path, so its warnings must not
+        // claim a clone happened.
         assert!(
-            made.warnings.iter().any(|w| w.contains("gh restore")),
+            made.warnings
+                .iter()
+                .any(|w| w.contains("gh restore") && !w.contains("clone")),
             "{:?}",
             made.warnings
         );
