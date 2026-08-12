@@ -112,6 +112,29 @@ pub fn board_name(dp: &DetectedPort) -> Option<&str> {
     Some(first.name.as_str())
 }
 
+/// What was last flashed to a board, and from where.
+///
+/// The board itself cannot tell you what is running on it, so the registry
+/// remembers: plugging a board in then leads back to the project that produced
+/// its firmware. `tag` is the `flash/<timestamp>` tag written into that project
+/// at flash time, so the exact tree is recoverable even after the branch moves
+/// on; `commit` is kept alongside it because a tag can be deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashRecord {
+    /// Absolute path of the project directory that was flashed.
+    pub project_dir: String,
+    /// The git tag written at flash time, e.g. `flash/2026-08-12T1430`.
+    pub tag: String,
+    /// Absent on a detached HEAD, so optional — and defaulted, because a record
+    /// written before this field existed must still parse.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// HEAD sha at flash time.
+    pub commit: String,
+    /// Epoch seconds. Supplied by the caller, never read from a clock here.
+    pub at: u64,
+}
+
 /// One remembered board. Every field beyond the id is optional or defaulted so
 /// the file survives being written by an older build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +160,10 @@ pub struct FleetEntry {
     pub vid: Option<String>,
     #[serde(default)]
     pub pid: Option<String>,
+    /// The most recent flash, and only that one: the `flash/*` tags in the
+    /// project are the history, this is just the pointer back into it.
+    #[serde(default)]
+    pub last_flash: Option<FlashRecord>,
     /// Epoch seconds. Supplied by the caller, never read from a clock here.
     pub first_seen: u64,
     pub last_seen: u64,
@@ -263,6 +290,9 @@ impl Fleet {
                     last_port: address,
                     vid,
                     pid,
+                    // A sighting learns nothing about firmware; only a flash
+                    // fills this in, and re-sighting must never clear it.
+                    last_flash: None,
                     first_seen: now,
                     last_seen: now,
                 });
@@ -298,6 +328,42 @@ impl Fleet {
             e.fqbns.push(fqbn.to_string());
         }
         Ok(())
+    }
+
+    /// Record what was just flashed to a board, replacing any previous record.
+    ///
+    /// Only the latest is kept. The history lives in the project as `flash/*`
+    /// tags, which are durable and shareable; duplicating it per board would be
+    /// an unbounded log inside a file that is rewritten on every hotplug.
+    pub fn note_flash(&mut self, id: &str, rec: FlashRecord) -> Result<()> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
+        self.boards[i].last_flash = Some(rec);
+        Ok(())
+    }
+
+    /// Follow a project that moved. Returns how many boards were repointed.
+    ///
+    /// Without this, renaming a project leaves every board it was flashed from
+    /// pointing at a path that no longer exists, and the way back to the source
+    /// of the running firmware is lost.
+    ///
+    /// Matching is **exact**. Rewriting descendants would mean guessing where
+    /// one project ends and a nested sketch begins, and guessing wrong points a
+    /// board at a directory that was never flashed — worse than a stale path,
+    /// which at least fails visibly.
+    pub fn repoint_project(&mut self, old_dir: &str, new_dir: &str) -> usize {
+        let mut changed = 0;
+        for e in &mut self.boards {
+            if let Some(rec) = e.last_flash.as_mut() {
+                if rec.project_dir == old_dir {
+                    rec.project_dir = new_dir.to_string();
+                    changed += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Fold what esptool learned into the registry.
@@ -341,6 +407,7 @@ impl Fleet {
                     e.last_port = e.last_port.take().or(old.last_port);
                     e.vid = e.vid.take().or(old.vid);
                     e.pid = e.pid.take().or(old.pid);
+                    e.last_flash = e.last_flash.take().or(old.last_flash);
                     e.first_seen = e.first_seen.min(old.first_seen);
                     for f in old.fqbns {
                         if !e.fqbns.contains(&f) {
@@ -360,6 +427,7 @@ impl Fleet {
                     last_port: None,
                     vid: None,
                     pid: None,
+                    last_flash: None,
                     first_seen: now,
                     last_seen: now,
                 });
@@ -871,6 +939,217 @@ mod tests {
         assert_eq!(f.boards[0].last_seen, 300);
     }
 
+    // ---------- what was last flashed ----------
+
+    fn flash_from(project_dir: &str) -> FlashRecord {
+        FlashRecord {
+            project_dir: project_dir.to_string(),
+            tag: "flash/2026-08-12T1430".into(),
+            branch: Some("main".into()),
+            commit: "9f2c1ab".into(),
+            at: 1_500,
+        }
+    }
+
+    #[test]
+    fn note_flash_overwrites_the_previous_record() {
+        // Only the last flash is kept; the `flash/*` tags are the history.
+        let (mut f, _) = fleet_with_esp(1);
+        let id = "44:1b:f6:ce:a3:b8";
+        f.note_flash(id, flash_from("/home/m/blink")).unwrap();
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/blink"
+        );
+
+        let mut later = flash_from("/home/m/sonar");
+        later.tag = "flash/2026-08-12T1901".into();
+        later.commit = "0ddba11".into();
+        later.at = 1_900;
+        f.note_flash(id, later).unwrap();
+
+        let rec = f.boards[0].last_flash.as_ref().unwrap();
+        assert_eq!(rec.project_dir, "/home/m/sonar");
+        assert_eq!(rec.tag, "flash/2026-08-12T1901");
+        assert_eq!(rec.commit, "0ddba11");
+        assert_eq!(rec.at, 1_900);
+    }
+
+    #[test]
+    fn noting_a_flash_on_an_unknown_board_is_an_error() {
+        let (mut f, _) = fleet_with_esp(1);
+        let err = f
+            .note_flash("nope", flash_from("/home/m/blink"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no board with id `nope`"), "got: {err}");
+    }
+
+    #[test]
+    fn a_detached_head_flash_records_no_branch() {
+        let (mut f, _) = fleet_with_esp(1);
+        let mut rec = flash_from("/home/m/blink");
+        rec.branch = None;
+        f.note_flash("44:1b:f6:ce:a3:b8", rec).unwrap();
+        assert_eq!(f.boards[0].last_flash.as_ref().unwrap().branch, None);
+    }
+
+    #[test]
+    fn sighting_a_board_does_not_disturb_its_last_flash() {
+        // The scan path runs on a 2 s hotplug poll and must not touch this.
+        let (mut f, id) = fleet_with_esp(1000);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/blink"))
+            .unwrap();
+        let before = f.boards[0].last_flash.clone();
+
+        f.sight(&id, &esp_port(), Some("Ozobot DRVKit"), 2000);
+        assert_eq!(f.boards[0].last_flash, before);
+
+        let ports = vec![DetectedPort {
+            port: esp_port(),
+            matching_boards: vec![],
+        }];
+        sight_all(&mut f, &ports, 3000);
+        assert_eq!(f.boards[0].last_flash, before);
+    }
+
+    // ---------- following a renamed project ----------
+
+    #[test]
+    fn repoint_project_rewrites_only_exact_matches() {
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let ser = serial_port();
+        let esp_id = identify(&esp).unwrap();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&esp_id, &esp, None, 10);
+        f.sight(&ser_id, &ser, None, 20);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/blink"))
+            .unwrap();
+        f.note_flash("3477325620", flash_from("/home/m/blink-old"))
+            .unwrap();
+
+        assert_eq!(f.repoint_project("/home/m/blink", "/home/m/beacon"), 1);
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/beacon"
+        );
+        assert_eq!(
+            f.boards[1].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/blink-old",
+            "a longer path that merely starts with the old one is untouched"
+        );
+    }
+
+    #[test]
+    fn repoint_project_does_not_follow_descendants() {
+        // Exact match only: a nested sketch is its own project, and rewriting
+        // it would point the board at a directory that was never flashed.
+        let (mut f, _) = fleet_with_esp(1);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/blink/nested"))
+            .unwrap();
+        assert_eq!(f.repoint_project("/home/m/blink", "/home/m/beacon"), 0);
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/blink/nested"
+        );
+    }
+
+    #[test]
+    fn repoint_project_counts_every_board_it_changed() {
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let ser = serial_port();
+        let esp_id = identify(&esp).unwrap();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&esp_id, &esp, None, 10);
+        f.sight(&ser_id, &ser, None, 20);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/blink"))
+            .unwrap();
+        f.note_flash("3477325620", flash_from("/home/m/blink"))
+            .unwrap();
+        assert_eq!(f.repoint_project("/home/m/blink", "/home/m/beacon"), 2);
+    }
+
+    #[test]
+    fn repoint_project_leaves_boards_with_no_flash_record_alone() {
+        let (mut f, _) = fleet_with_esp(1);
+        assert_eq!(f.repoint_project("/home/m/blink", "/home/m/beacon"), 0);
+        assert_eq!(f.boards[0].last_flash, None);
+    }
+
+    #[test]
+    fn identifying_carries_a_last_flash_onto_a_new_mac_record() {
+        // The serial record is migrated wholesale; anything not named in the
+        // merge is silently dropped, and losing this loses the way back to the
+        // project running on the board.
+        let mut f = Fleet::default();
+        let port = serial_port();
+        let id = identify(&port).unwrap();
+        f.sight(&id, &port, None, 100);
+        f.note_flash("3477325620", flash_from("/home/m/blink"))
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1B:F6:CE:A3:B8", None, 200)
+            .unwrap();
+
+        assert_eq!(f.boards.len(), 1);
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/blink"
+        );
+    }
+
+    #[test]
+    fn identifying_fills_a_missing_last_flash_from_the_serial_record() {
+        // The MAC record exists but has never been flashed: fill its gap.
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let esp_id = identify(&esp).unwrap();
+        f.sight(&esp_id, &esp, None, 50);
+        let ser = serial_port();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&ser_id, &ser, None, 60);
+        f.note_flash("3477325620", flash_from("/home/m/blink"))
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1b:f6:ce:a3:b8", None, 70)
+            .unwrap();
+
+        assert_eq!(f.boards.len(), 1);
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/blink"
+        );
+    }
+
+    #[test]
+    fn identifying_prefers_the_mac_records_own_last_flash() {
+        // Both have one: the MAC record is the stronger identity and its record
+        // is the more recent truth about what is actually running.
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let esp_id = identify(&esp).unwrap();
+        f.sight(&esp_id, &esp, None, 50);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/beacon"))
+            .unwrap();
+        let ser = serial_port();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&ser_id, &ser, None, 60);
+        f.note_flash("3477325620", flash_from("/home/m/blink"))
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1b:f6:ce:a3:b8", None, 70)
+            .unwrap();
+
+        assert_eq!(f.boards.len(), 1);
+        assert_eq!(
+            f.boards[0].last_flash.as_ref().unwrap().project_dir,
+            "/home/m/beacon",
+            "MAC record wins"
+        );
+    }
+
     // ---------- forget ----------
 
     #[test]
@@ -924,5 +1203,63 @@ mod tests {
         let p = tmp.path().join("fleet.json");
         std::fs::write(&p, r#"{"boards":[]}"#).unwrap();
         assert_eq!(Fleet::load(&p).unwrap().version, FLEET_VERSION);
+    }
+
+    #[test]
+    fn a_flash_record_round_trips_through_save_and_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("fleet.json");
+
+        let (mut f, _) = fleet_with_esp(1000);
+        f.note_flash("44:1b:f6:ce:a3:b8", flash_from("/home/m/blink"))
+            .unwrap();
+        f.save(&p).unwrap();
+
+        let back = Fleet::load(&p).unwrap();
+        assert_eq!(back.boards, f.boards);
+        let rec = back.boards[0].last_flash.as_ref().unwrap();
+        assert_eq!(rec.project_dir, "/home/m/blink");
+        assert_eq!(rec.tag, "flash/2026-08-12T1430");
+        assert_eq!(rec.branch.as_deref(), Some("main"));
+        assert_eq!(rec.commit, "9f2c1ab");
+        assert_eq!(rec.at, 1_500);
+    }
+
+    #[test]
+    fn an_entry_without_a_last_flash_key_still_loads() {
+        // Every fleet.json written before this field existed looks like this.
+        // Without `#[serde(default)]` the whole file would be refused and the
+        // panel would show an error instead of the user's boards.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("fleet.json");
+        std::fs::write(
+            &p,
+            r#"{"version":1,"boards":[{"id":"44:1b:f6:ce:a3:b8","id_kind":"mac",
+               "first_seen":10,"last_seen":20}]}"#,
+        )
+        .unwrap();
+        let f = Fleet::load(&p).unwrap();
+        assert_eq!(f.boards.len(), 1);
+        assert_eq!(f.boards[0].last_flash, None);
+    }
+
+    #[test]
+    fn a_flash_record_without_a_branch_key_still_loads() {
+        // Same rule one level down: an optional field inside FlashRecord must
+        // default too, or an older record refuses the whole file.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("fleet.json");
+        std::fs::write(
+            &p,
+            r#"{"version":1,"boards":[{"id":"44:1b:f6:ce:a3:b8","id_kind":"mac",
+               "first_seen":10,"last_seen":20,
+               "last_flash":{"project_dir":"/home/m/blink",
+                 "tag":"flash/2026-08-12T1430","commit":"9f2c1ab","at":1500}}]}"#,
+        )
+        .unwrap();
+        let f = Fleet::load(&p).unwrap();
+        let rec = f.boards[0].last_flash.as_ref().unwrap();
+        assert_eq!(rec.branch, None);
+        assert_eq!(rec.project_dir, "/home/m/blink");
     }
 }
