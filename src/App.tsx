@@ -1934,18 +1934,18 @@ export default function App() {
             ) : (
               <>
                 <button
-                  className={sideTab === "boards" ? "tab active" : "tab"}
-                  onClick={() => setHardwareTab("boards")}
-                  title="Install and update board platforms (arduino-cli cores)"
-                >
-                  Boards
-                </button>
-                <button
                   className={sideTab === "fleet" ? "tab active" : "tab"}
                   onClick={() => setHardwareTab("fleet")}
                   title="The physical boards Bancada has seen, remembered by MAC address"
                 >
                   Fleet
+                </button>
+                <button
+                  className={sideTab === "boards" ? "tab active" : "tab"}
+                  onClick={() => setHardwareTab("boards")}
+                  title="Install and update board platforms (arduino-cli cores)"
+                >
+                  Boards
                 </button>
               </>
             )}
