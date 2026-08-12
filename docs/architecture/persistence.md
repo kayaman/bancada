@@ -63,7 +63,7 @@ Rules:
 - Empty sessions never write a file.
 - Corrupt lines are skipped silently on replay — one bad line must not lose a
   whole conversation.
-- **Pruned to 50 chats per sketch**, on new-chat creation.
+- **Pruned to 50 chats per project**, on new-chat creation.
 - Filenames arriving from the webview are validated as plain `*.ndjson`
   basenames (`valid_chat_file`) before any file operation.
 
@@ -147,8 +147,8 @@ Two details that matter:
 at its recorded commit; if the tag has moved, that is a **refusal**, not a
 silent rebuild.
 
-**Clone writes `.gitignore` into the staging directory** — before the atomic
-rename — so credential ignore rules exist before any possible commit. A clone
+**Duplicate writes `.gitignore` into the staging directory** — before the atomic
+rename — so credential ignore rules exist before any possible commit. A copy
 that failed halfway must never leave a directory that would commit secrets.
 
 ---

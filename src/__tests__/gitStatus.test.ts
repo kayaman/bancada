@@ -28,12 +28,12 @@ describe("pillLabel", () => {
     expect(pillLabel(null)).toBeNull();
   });
   it("shows clean, changed, and ahead/behind states", () => {
-    expect(pillLabel(root())).toBe("✓ clean");
+    expect(pillLabel(root())).toBe("clean");
     expect(
       pillLabel(root({ dirty: [{ path: "a.ino", status: ".M" }] })),
     ).toBe("1 changed");
-    expect(pillLabel(root({ ahead: 2, behind: 1 }))).toBe("✓ clean ↑2 ↓1");
-    expect(pillLabel(root({ ahead: 2 }))).toBe("✓ clean ↑2");
+    expect(pillLabel(root({ ahead: 2, behind: 1 }))).toBe("clean ↑2 ↓1");
+    expect(pillLabel(root({ ahead: 2 }))).toBe("clean ↑2");
   });
   it("names the other states", () => {
     expect(pillLabel({ kind: "no_git" })).toBe("no git");

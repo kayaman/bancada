@@ -22,7 +22,9 @@ export function pillLabel(state: RepoState | null): string | null {
       if (state.detached) {
         label = state.dirty.length === 0 ? "detached" : `detached · ${state.dirty.length} changed`;
       } else {
-        label = state.dirty.length === 0 ? "✓ clean" : `${state.dirty.length} changed`;
+        // No glyph on "clean": `✓` is Verify's on this same bar, and the pill
+        // already signals the other state by colour (`.git-pill.attention`).
+        label = state.dirty.length === 0 ? "clean" : `${state.dirty.length} changed`;
       }
       if (state.ahead > 0) label += ` ↑${state.ahead}`;
       if (state.behind > 0) label += ` ↓${state.behind}`;

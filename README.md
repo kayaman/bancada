@@ -9,7 +9,7 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 
 - **arduino-cli** — boards, cores, builds, uploads, library registry (all via `--json`)
 - **esptool** — ESP-specific utilities (read MAC, chip info)
-- **git** / **gh** — project version control and one-button private repo creation
+- **git** / **gh** — project version control and one-button repo creation
 - **claude** — the AI Assistant panel
 
 ```
@@ -17,7 +17,7 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  91 invoke commands · 7 events · 3 Channels
+          src/api.ts:  94 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
@@ -29,7 +29,7 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 ```
 
 **Full architecture documentation: [docs/architecture/](docs/architecture/README.md)** —
-layer map, the IPC contract, the runtime model, and six end-to-end data flows.
+layer map, the IPC contract, the runtime model, and seven end-to-end data flows.
 
 ## Prerequisites (openSUSE Tumbleweed)
 
@@ -50,7 +50,7 @@ pip install --user esptool
 # git (>= 2.25 for sparse checkout) — used to fetch pinned libraries from a repo
 sudo zypper install git
 
-# gh (GitHub CLI) — optional: powers the one-button "create private repo"
+# gh (GitHub CLI) — optional: powers the one-button "Create on GitHub"
 # in the git pill; without it, paste any git remote URL instead.
 sudo zypper install gh   # then: gh auth login
 
@@ -114,6 +114,18 @@ scaffolded library, a fetched library and a newly created project actually
 
 ## What works in this scaffold
 
+- **The project menu** — `📁 <name> ▾` in the toolbar is the one project
+  affordance: it names what is open and holds Open, Recent, New, Duplicate and
+  Rename. Everything else on the bar is about the *target* (profile, port), the
+  repository, or building
+- **Rename project** — renames the folder *and* its main `.ino`, which have to
+  move together, and carries across everything keyed to the old path: the
+  Assistant chat history, the recorded token spend, and the recents entry. It
+  is refused while an Assistant session is live, because the session pins the
+  old path in places that cannot be rewritten after it starts
+- **Duplicate project** — copies a project under a new name into a fresh git
+  repository, retitling the main `.ino` and repointing local library paths.
+  Never copies the source's history
 - **New Project** — name it, pick a board from the installed platforms (the
   attached board is preselected), optionally tick registry libraries, and get a
   sketch with a `sketch.yaml` profile that compiles immediately. Driven entirely
@@ -121,11 +133,11 @@ scaffolded library, a fetched library and a newly created project actually
   platform version is resolved from what is installed and library dependencies
   are resolved by the engine. The location defaults to the sketchbook and then
   remembers wherever you last created one
-- Open a sketch folder → file tree, main `.ino` auto-opens in the editor
+- Open a project (📁 menu) → file tree, main `.ino` auto-opens in the editor
   (CodeMirror 6, C++ mode, Ctrl+S to save)
 - Board/port detection with live rescan (`arduino-cli board list`)
 - Build profiles from `sketch.yaml` (default profile pre-selected)
-- Verify / Upload with **live streaming build output** (compile falls back to
+- Verify / Flash with **live streaming build output** (compile falls back to
   nothing-selected errors gracefully; upload requires a port)
 - Library manager:
   - search the Arduino registry, install/remove (global sketchbook)
@@ -172,8 +184,15 @@ scaffolded library, a fetched library and a newly created project actually
 - **Editor tabs** — multiple files open at once, dirty markers, and a
   close-again-to-discard step so unsaved work is never dropped by one click
 - **Git pill** — repository state at a glance in the toolbar, with commit,
-  sync, `git init`, and one-button private repo creation through `gh`. Warns
-  before committing anything that looks like a tracked secret
+  sync, `git init`, and one-button repo creation through `gh` — private or
+  public, with a description, initializing the repository first if the project
+  has none. Warns before committing anything that looks like a tracked secret,
+  and *refuses* to publish publicly when one is already tracked
+- **Flash provenance** — every flash that changes the code checkpoints the
+  project and writes an annotated `flash/<timestamp>` git tag recording the
+  port, profile/FQBN and board, then pushes it. One tag per distinct code
+  state, not per flash. Nothing in that path can fail a flash: it reports to
+  the build console and gets out of the way
 - **Scope** — a software oscilloscope in the Debugging tab, with two sources:
   a **plotter** that parses numeric values out of the existing serial stream
   (any board), and an **ADC** mode where companion firmware on an ESP32 streams
@@ -235,7 +254,7 @@ narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
 
 - **`verify`** — the same compile path as the **Verify** button; compiles
   only, never flashes.
-- **`upload`** — the same `compile -u` path as the **Upload** button,
+- **`upload`** — the same `compile -u` path as the **Flash** button,
   gated by the **Allow uploads** switch (below). It takes **no port
   argument**: it flashes the board selected in the UI, with the
   profile/FQBN the session was started with — the agent cannot pick a
@@ -299,7 +318,7 @@ and everything that is *not* enforced — is documented in
 - Profile editor UI (create/edit `sketch.yaml` platforms visually)
 - More esptool utilities: flash erase, flash size, filesystem image upload
 - Board options in the FQBN (`CDCOnBoot=cdc`) chosen from a picker
-- Multi-sketch workspaces
+- Multi-project workspaces
 
 ## Repo layout
 

@@ -135,7 +135,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## 5. First run
 
-Launch **Bancada** from the app menu (or `bancada` in a terminal). Open
-a sketch folder or create a New Project, pick a board, and Verify. If
+Launch **Bancada** from the app menu (or `bancada` in a terminal). From the
+📁 project menu, open a project or create a new one, pick a board, and
+Verify. If
 the board picker is empty, install a core (section 3); if flashing says
 the port is busy, revisit section 4.

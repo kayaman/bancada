@@ -1,6 +1,6 @@
 # Data flows
 
-Six actions traced end to end. If you read one page in this set, read this one —
+Seven actions traced end to end. If you read one page in this set, read this one —
 it is where the layers stop being abstract.
 
 ---

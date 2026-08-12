@@ -221,11 +221,14 @@ struct AppState {
     device_browse: Mutex<Option<DeviceBrowse>>,
     /// Embedded `claude` session — another sibling slot, one at a time.
     agent: Mutex<Option<AgentSession>>,
-    /// Serialises the three *sketch build* paths — user Verify
-    /// (`compile_sketch`), user Upload (`upload_sketch`) and the agent's MCP
-    /// `verify` tool — which share one arduino-cli build cache and were
-    /// previously kept apart only by the frontend's `busy` flag (which
-    /// agent-initiated builds bypass entirely).
+    /// Serialises the four *build* paths — user Verify (`compile_sketch`),
+    /// user Flash (`upload_sketch`) and the agent's MCP `verify` and `upload`
+    /// tools — which share one arduino-cli build cache and were previously
+    /// kept apart only by the frontend's `busy` flag (which agent-initiated
+    /// builds bypass entirely).
+    ///
+    /// `rename_project` is the fifth holder, for a different reason: it moves
+    /// the very tree those four compile from, so it must not run beside them.
     ///
     /// Deliberately *not* every arduino-cli invocation in the process:
     /// `install_core`, `uninstall_core`, `update_core_index`,

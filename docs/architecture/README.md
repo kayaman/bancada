@@ -6,7 +6,7 @@ Bancada is an Arduino workbench built with **Tauri 2 + Rust + React**. It does
 not reimplement the toolchain — it drives `arduino-cli`, `esptool`, `git`, `gh`
 and `claude` as subprocesses and parses their output.
 
-Roughly 15k lines of Rust in `bancada-core`, a 6.3k-line Tauri layer, and 24k
+Roughly 16k lines of Rust in `bancada-core`, a 6.7k-line Tauri layer, and 22k
 lines of TypeScript.
 
 ---
@@ -20,7 +20,7 @@ lines of TypeScript.
 │   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/               │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  src/api.ts — the ONLY IPC module
-              91 invoke commands · 7 events · 3 Channels
+              94 invoke commands · 7 events · 3 Channels
 ┌───────────────────────────────┴───────────────────────────────────────┐
 │ src-tauri  (crate `bancada`)                                          │
 │   lib.rs — commands, AppState, threads, event emission                │
@@ -73,7 +73,7 @@ Read in this order the first time.
 | [runtime-model](runtime-model.md) | `AppState`, the locks, the threads, shutdown, cancellation. |
 | [persistence](persistence.md) | Every file Bancada writes, and the rules for adding one. |
 | [agent-safety](agent-safety.md) | What the AI Assistant is actually confined to. |
-| [data-flows](data-flows.md) | Six actions traced end to end. **The best single page.** |
+| [data-flows](data-flows.md) | Seven actions traced end to end. **The best single page.** |
 
 Elsewhere in `docs/`: [scope-architecture](../scope-architecture.md) (the
 oscilloscope wire protocol in byte detail), [INSTALL](../INSTALL.md),
@@ -111,7 +111,7 @@ Each is deliberate, and each looks like a bug until you know why.
 Named honestly, so a newcomer does not read them as intentional design and pile
 on. No refactor is proposed here.
 
-### `src-tauri/src/lib.rs` is 6,312 lines
+### `src-tauri/src/lib.rs` is 6,658 lines
 
 All 94 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
@@ -125,10 +125,10 @@ rustdoc header is doing the work a module tree would otherwise do.
 `EmitFn` seam intact — it is the only reason ~69 unit tests can live in this
 file.
 
-### `src/App.tsx` is 2,199 lines
+### `src/App.tsx` is 2,217 lines
 
 It owns nearly all cross-panel state and every subscription, and passes ~30
-props to `Toolbar` alone. The mitigation is real — ~14 pure-logic modules have
+props to `Toolbar` alone. The mitigation is real — 17 pure-logic modules have
 been extracted, and that is where the tested behaviour lives — but the
 orchestration itself has no harness.
 
@@ -146,10 +146,12 @@ at it. **Keep it that way.**
 
 ### Stale comments outlive the code
 
-The `build_gate` field comment says it serialises "the three sketch build
-paths"; there are four `try_build_gate` call sites, because the MCP `upload`
-tool was added later. The module-head rustdoc is correct. Small, but it is the
-failure mode to watch for in a codebase that documents this heavily.
+The `build_gate` field comment said it serialised "the three sketch build
+paths" long after the MCP `upload` tool made it four, and `rename_project`
+later made it five. It has been corrected — but it stood wrong through two
+additions, and that is the failure mode to watch for in a codebase that
+documents this heavily. A count in prose is a claim that rots silently;
+prefer naming the rule over counting the callers.
 
 ### No CI, and the version lives in four files
 

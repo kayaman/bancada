@@ -26,9 +26,9 @@ providers, no context, and no global store.
 
 ## 1. The shell
 
-`src/App.tsx` is 2,199 lines and is the de-facto orchestrator: it owns nearly
+`src/App.tsx` is 2,217 lines and is the de-facto orchestrator: it owns nearly
 all cross-panel state and registers every backend subscription. Its render tree
-begins around line 1749.
+begins around line 1783.
 
 Five composition rules are encoded there and are easy to break by accident:
 
@@ -135,7 +135,10 @@ So anything worth testing has been extracted into a plain `.ts` module:
 | `conflicts.ts` | the agent/user edit-conflict guard used before send, verify and upload |
 | `ports.ts` | visible boards, flash-target mismatch, port options |
 | `portWatch.ts` | hotplug arrival diffing |
-| `gitStatus.ts` | the git pill's entire vocabulary |
+| `gitStatus.ts` | the git pill's entire vocabulary, incl. why flashes are untagged |
+| `publishRepo.ts` | repo-name rules and why publishing is blocked |
+| `projectRename.ts` | project-name rules (mirrors `core::project::validate_project_name`) and the rename plan |
+| `toolbarModel.ts` | the project button's label; what the project menu offers, and what is disabled and why |
 | `boardSearch.ts` | board filtering and grouping |
 | `profileInit.ts` | profile form modes and submit plans |
 | `usageDashboard.ts` | totals and display names |
@@ -157,10 +160,10 @@ owns "now".**
 
 ## 4. The IPC layer
 
-`src/api.ts` (877 lines) is the only file importing `@tauri-apps/api/core` or
+`src/api.ts` (920 lines) is the only file importing `@tauri-apps/api/core` or
 `/event`. Elsewhere only `plugin-dialog` and `getVersion` appear.
 
-It holds the TypeScript mirrors of the Rust types, ~90 `invoke` wrappers, the
+It holds the TypeScript mirrors of the Rust types, 94 `invoke` wrappers, the
 three `Channel` openers, and the seven `listen` subscriptions. Full surface:
 [ipc-contract](ipc-contract.md).
 
@@ -227,7 +230,7 @@ the dumb `ObsLog` component.
 
 ## 6. Styling
 
-One stylesheet: `src/styles.css`, 2,730 lines, imported once. No CSS modules, no
+One stylesheet: `src/styles.css`, 2,807 lines, imported once. No CSS modules, no
 Tailwind, no CSS-in-JS.
 
 Design tokens in `:root` — `--bg`, `--bg-panel`, `--bg-raised`, `--bg-hover`,

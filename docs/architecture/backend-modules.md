@@ -10,7 +10,7 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
 ┌───────────────────────────┴──────────────────────────────────┐
-│ core  (crate `bancada-core`) — 22 modules, ~14.9k lines      │
+│ core  (crate `bancada-core`) — 22 modules, ~16.0k lines      │
 │   Pure of Tauri. Parsers, validators, policy, wire formats.  │
 │   Owns: no long-lived state, no knowledge that a UI exists   │
 └──────────────────────────────────────────────────────────────┘
@@ -41,8 +41,8 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | Module | LoC | Responsibility |
 |---|---|---|
 | `sketch.rs` | 1019 | `SketchYaml` / `Profile` / `PlatformDep` / `LibraryDep`, and `SketchProject` — the sketch on disk. File walk (`SKIP_DIRS`), profile create/add/retarget, library and platform pinning. **The only file schema Bancada itself owns.** |
-| `project.rs` | 406 | New-project policy: name validation, starter templates (`TEMPLATES`), profile naming from an FQBN, board-required libraries, default parent directory. |
-| `clone.rs` | 1158 | Clone a sketch under a new name. Staging directory + atomic rename, merged `.gitignore` written *into the staging dir* so credential ignore rules exist before any possible commit, best-effort `git init`. Skips `.bancada` and `.claude`. |
+| `project.rs` | 852 | Project policy: name validation, starter templates (`TEMPLATES`), profile naming from an FQBN, board-required libraries, default parent directory — **and `rename_project`**, which moves the folder and its main `.ino` together and rolls the `.ino` back if the directory move fails. |
+| `clone.rs` | 1169 | Copy a project under a new name — **"Duplicate" in the UI**; the module keeps the older name. Staging directory + atomic rename, merged `.gitignore` written *into the staging dir* so credential ignore rules exist before any possible commit, best-effort `git init`. Skips `.bancada` and `.claude`. Its `retitle_main_ino` and `rewrite_sketch_yaml` are `pub(crate)` and shared with `project::rename_project`, so their warnings name no caller. |
 | `files.rs` | 389 | Explorer mutations: `validate_rel_path`, protected-path checks, collision and descendant guards. **Delete goes to the OS trash** (`trash::delete`), never `fs::remove`. |
 
 ### Libraries
@@ -56,7 +56,7 @@ Tauri layer is uniformly `.map_err(err_str)`.
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `git.rs` | 1437 | `git` and `gh`. Gitignore policy (`GITIGNORE_REQUIRED`, `merged_gitignore`), `parse_status_v2`, `suggested_message`, `tracked_secrets`, `repo_state`, commit/sync, and `gh repo create`. The `gh` path deliberately retains the stderr tail, because that is where `gh` explains auth problems ("run: gh auth login"). |
+| `git.rs` | 1805 | `git` and `gh`. Gitignore policy (`GITIGNORE_REQUIRED`, `merged_gitignore`), `parse_status_v2`, `suggested_message`, `tracked_secrets`, `repo_state`, commit/sync, and `gh repo create` with `Visibility` + description. Also the flash-provenance primitives — `flash_tag_name` (pure, takes unix seconds from the caller), `tag_annotated`, `flash_tags_at_head`, `push_tag`. The `gh` path deliberately retains the stderr tail, because that is where `gh` explains auth problems ("run: gh auth login"). |
 
 ### Hardware
 
@@ -85,9 +85,9 @@ Tauri layer is uniformly `.map_err(err_str)`.
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `chatlog.rs` | 722 | Assistant transcripts as NDJSON under `<chats_root>/<sketch_key>/`. `sketch_key` is an fnv1a-64 hex digest plus a sanitised basename. Listing, loading, per-project totals, pruning. |
-| `usage.rs` | 372 | Cumulative per-project cost/token/turn accounting (`usage.json`, versioned). Survives chat pruning, which is why it is separate from `chatlog`. |
-| `settings.rs` | 189 | `AppSettings` — last sketch and open file, last project parent, recent projects (`MAX_RECENT = 10`). |
+| `chatlog.rs` | 801 | Assistant transcripts as NDJSON under `<chats_root>/<sketch_key>/`. `sketch_key` is an fnv1a-64 hex digest plus a sanitised basename. Listing, loading, per-project totals, pruning, and `rename_key` — **both halves of the key change when a project is renamed**, so without it the transcripts stay on disk and become unreachable. |
+| `usage.rs` | 537 | Cumulative per-project cost/token/turn accounting (`usage.json`, versioned). Survives chat pruning, which is why it is separate from `chatlog`. `ProjectUsage.key` carries the map key so callers never re-hash the display path; `rename_project_key` moves an entry rather than letting a rename split it in two. |
+| `settings.rs` | 244 | `AppSettings` — last project and open file, last project parent, recent projects (`MAX_RECENT = 10`). `replace_recent` swaps an entry **in place**: a rename is not a visit and should not reorder the list. |
 
 All four take their paths and their clock from the caller — see
 [conventions §1](conventions.md#the-injection-corollary).
@@ -96,7 +96,7 @@ All four take their paths and their clock from the caller — see
 
 ## 2. `src-tauri` — the Tauri layer
 
-One crate, one module: `src-tauri/src/lib.rs`, 6,312 lines. `main.rs` is six
+One crate, one module: `src-tauri/src/lib.rs`, 6,658 lines. `main.rs` is six
 lines and calls `bancada_lib::run()`.
 
 Its first 142 lines are rustdoc, and they are the canonical prose spec for the

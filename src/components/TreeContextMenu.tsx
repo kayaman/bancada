@@ -63,7 +63,7 @@ export default function TreeContextMenu({
       {item("New Folder…", () => onNewFolder(parentDir))}
       {target !== null && onRename && (
         <>
-          <div className="ctx-sep" />
+          <div className="ctx-sep" role="separator" />
           {item("Rename…", () => onRename(target), prot, protTitle)}
         </>
       )}

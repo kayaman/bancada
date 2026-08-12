@@ -151,7 +151,7 @@ Paths come from the OS save dialog; `save_binary_file` takes base64.
 ### Chat log — 5
 `chat_append` · `chat_list` · `chat_load` · `chat_delete` · `chat_totals`
 
-`chat_append` also drives usage accounting and prunes to 50 chats per sketch.
+`chat_append` also drives usage accounting and prunes to 50 chats per project.
 
 All five are **path-addressed**: they take the open sketch's directory and hash
 it to a `sketch_key` internally. That is safe here — a live caller's path is

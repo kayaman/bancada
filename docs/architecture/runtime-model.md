@@ -70,7 +70,7 @@ Four entry points drive the same arduino-cli build cache for one sketch:
 | Entry point | Triggered by |
 |---|---|
 | `compile_sketch` | the Verify button |
-| `upload_sketch` | the Upload button |
+| `upload_sketch` | the Flash button |
 | MCP `verify` | the agent |
 | MCP `upload` | the agent |
 
@@ -88,10 +88,10 @@ touch the platform and library trees, not a sketch's build cache, and
 serialising them behind a long compile would make the Boards and Libraries
 panels fail for no benefit.
 
-> **Note for contributors:** the doc comment on the `build_gate` field says it
-> serialises "the three sketch build paths". That comment is stale — it predates
-> the MCP `upload` tool. There are four `try_build_gate` call sites, and the
-> module-head rustdoc correctly says four.
+There are **five** `try_build_gate` call sites. Four are builds — user Verify,
+user Flash, and the agent's MCP `verify` and `upload`. The fifth is
+`rename_project`, which holds the gate for a different reason: it moves the
+very tree the other four compile from, so it must not run beside them.
 
 ---
 

@@ -17,7 +17,12 @@ export default function NewFileInput({ title, onSubmit }: Props) {
   };
   if (!open) {
     return (
-      <button className="btn icon" title={title} onClick={() => setOpen(true)}>
+      <button
+        className="btn icon"
+        title={title}
+        aria-label={title}
+        onClick={() => setOpen(true)}
+      >
         ＋
       </button>
     );

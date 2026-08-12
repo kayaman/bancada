@@ -64,9 +64,9 @@ export default function ProjectMenu(props: Props) {
   };
 
   // Recents load when the submenu opens, not the menu, so opening the menu is
-  // never gated on an IPC round trip. The guard is `RecentsMenu`'s: this
-  // handler awaits, and a double-click would otherwise pass the `subAnchor`
-  // check twice and leave the submenu open instead of toggled shut.
+  // never gated on an IPC round trip. The guard is needed because this handler
+  // awaits: a double-click would otherwise pass the `subAnchor` check twice
+  // and leave the submenu open instead of toggled shut.
   const toggleRecent = async () => {
     if (loadingRef.current) return;
     if (subAnchor) {
@@ -139,7 +139,7 @@ export default function ProjectMenu(props: Props) {
               ▸
             </span>
           </button>
-          <div className="ctx-sep" />
+          <div className="ctx-sep" role="separator" />
           {rest.map(row)}
           {subAnchor && (
             <Menu
