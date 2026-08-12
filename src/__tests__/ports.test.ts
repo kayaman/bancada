@@ -1,6 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { flashTargetMismatch, nextSelectedPort, portOptions, visibleBoard } from "../ports";
-import type { DetectedPort, MatchingBoard } from "../api";
+import {
+  confidentBoardName,
+  flashTargetMismatch,
+  missingPortName,
+  nextSelectedPort,
+  portName,
+  portOptions,
+  portTitle,
+  visibleBoard,
+} from "../ports";
+import type {
+  DetectedPort,
+  FleetEntry,
+  FleetSnapshot,
+  MatchingBoard,
+} from "../api";
+
+/** A fleet that knows one board, currently on `lastPort`. */
+const fleetWith = (over: Partial<FleetEntry>, online = true): FleetSnapshot => {
+  const entry: FleetEntry = {
+    id: "3c:84:27:aa:bb:cc",
+    id_kind: "mac",
+    nickname: null,
+    chip_type: null,
+    board_name: null,
+    fqbns: [],
+    last_port: "/dev/ttyACM0",
+    vid: null,
+    pid: null,
+    first_seen: 0,
+    last_seen: 0,
+    ...over,
+  };
+  return { boards: [entry], online: online ? [entry.id] : [], unidentified: [] };
+};
 
 const port = (address: string, protocol = "serial"): DetectedPort => ({
   port: {
@@ -93,20 +126,133 @@ describe("visibleBoard", () => {
   });
 });
 
+describe("confidentBoardName", () => {
+  it("names a board matched on its own id", () => {
+    const p = withBoards("/dev/ttyACM0", [board("arduino:avr:uno")]);
+    expect(confidentBoardName(p)).toBe("uno");
+  });
+
+  it("refuses a family match, however tempting the sibling looks", () => {
+    // The regression: arduino-cli offers the umbrella plus one arbitrary
+    // member, so a plain ESP32-S3 dev board was being labelled "Ozobot
+    // DRVKit". Mirrors core::fleet::board_name — being wrong is worse than
+    // being silent, because this is what tells two boards apart.
+    const p = withBoards("/dev/ttyACM0", [
+      board("esp32:esp32:esp32_family", true),
+      board("esp32:esp32:ozobot_drvkit"),
+    ]);
+    expect(confidentBoardName(p)).toBeNull();
+    // visibleBoard still answers, because an FQBN to compile with is a
+    // different question from a name to read.
+    expect(visibleBoard(p)?.name).toBe("ozobot_drvkit");
+  });
+
+  it("refuses several named matches", () => {
+    const p = withBoards("/dev/ttyACM0", [board("a:b:one"), board("a:b:two")]);
+    expect(confidentBoardName(p)).toBeNull();
+  });
+
+  it("refuses a port with no matches at all", () => {
+    expect(confidentBoardName(withBoards("/dev/ttyUSB0", []))).toBeNull();
+  });
+});
+
+describe("portTitle", () => {
+  it("prefers the nickname the user chose", () => {
+    // The only one of these names the user picked, and the only thing that
+    // tells two identical clones apart.
+    const p = withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")]);
+    expect(portTitle(p, fleetWith({ nickname: "porch-light" }))).toBe("porch-light");
+  });
+
+  it("falls back to a board arduino-cli is sure about", () => {
+    const p = withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")]);
+    expect(portTitle(p, fleetWith({}))).toBe("esp32c6");
+  });
+
+  it("does not print an arbitrary family sibling as the name", () => {
+    const p = withBoards("/dev/ttyACM0", [
+      board("esp32:esp32:esp32_family", true),
+      board("esp32:esp32:ozobot_drvkit"),
+    ]);
+    expect(portTitle(p, fleetWith({ chip_type: "ESP32-S3" }))).toBe("ESP32-S3");
+    expect(portTitle(p)).toBe("USB serial bridge");
+  });
+
+  it("falls back to the board the fleet remembers", () => {
+    const p = withBoards("/dev/ttyACM0", []);
+    expect(portTitle(p, fleetWith({ board_name: "Arduino Uno" }))).toBe("Arduino Uno");
+  });
+
+  it("names a port with no identity honestly", () => {
+    expect(portTitle(withBoards("/dev/ttyACM0", []))).toBe("USB serial bridge");
+    expect(portTitle(port("/dev/ttyACM0", "network"))).toBe("Network port");
+  });
+
+  it("ignores a nickname on a board that is not online", () => {
+    // `last_port` is a memory, and the kernel reuses ttyACM0 for whatever is
+    // plugged in next — the nickname must not migrate onto the newcomer.
+    const p = withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")]);
+    expect(portTitle(p, fleetWith({ nickname: "porch-light" }, false))).toBe("esp32c6");
+  });
+
+  it("ignores a blank nickname", () => {
+    const p = withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")]);
+    expect(portTitle(p, fleetWith({ nickname: "   " }))).toBe("esp32c6");
+  });
+});
+
+describe("portName", () => {
+  it("puts the name first and the device path second", () => {
+    const p = withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")]);
+    expect(portName(p, fleetWith({ nickname: "porch-light" }))).toBe(
+      "porch-light · /dev/ttyACM0",
+    );
+  });
+
+  it("still names a bridge port", () => {
+    expect(portName(withBoards("/dev/ttyUSB0", []))).toBe(
+      "USB serial bridge · /dev/ttyUSB0",
+    );
+  });
+});
+
+describe("missingPortName", () => {
+  it("uses the fleet's memory when it has one", () => {
+    // Matched without the online check — the whole point is that it is gone.
+    expect(missingPortName("/dev/ttyACM0", fleetWith({ nickname: "esp32-spare" }, false))).toBe(
+      "esp32-spare · not attached",
+    );
+  });
+
+  it("falls back to the bare address", () => {
+    expect(missingPortName("/dev/ttyUSB7")).toBe("/dev/ttyUSB7 · not attached");
+  });
+});
+
 describe("portOptions", () => {
-  it("labels a port with its visible board name", () => {
+  it("labels a port with the standard name", () => {
     const opts = portOptions(
       [withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")])],
       null,
     );
     expect(opts).toEqual([
-      { address: "/dev/ttyACM0", label: "/dev/ttyACM0 (esp32c6)", missing: false },
+      { address: "/dev/ttyACM0", label: "esp32c6 · /dev/ttyACM0", missing: false },
     ]);
   });
 
-  it("labels a bridge port with its bare address", () => {
+  it("uses the nickname when the fleet knows one", () => {
+    const opts = portOptions(
+      [withBoards("/dev/ttyACM0", [board("esp32:esp32:esp32c6")])],
+      null,
+      fleetWith({ nickname: "porch-light" }),
+    );
+    expect(opts[0].label).toBe("porch-light · /dev/ttyACM0");
+  });
+
+  it("names a bridge port rather than showing a bare path", () => {
     const opts = portOptions([withBoards("/dev/ttyACM0", [])], null);
-    expect(opts[0].label).toBe("/dev/ttyACM0");
+    expect(opts[0].label).toBe("USB serial bridge · /dev/ttyACM0");
   });
 
   it("appends a flagged entry for a selected port that is not attached", () => {
@@ -115,7 +261,7 @@ describe("portOptions", () => {
     const opts = portOptions([withBoards("/dev/ttyACM0", [])], "/dev/ttyUSB7");
     expect(opts).toContainEqual({
       address: "/dev/ttyUSB7",
-      label: "/dev/ttyUSB7 (not attached)",
+      label: "/dev/ttyUSB7 · not attached",
       missing: true,
     });
   });

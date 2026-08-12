@@ -133,7 +133,7 @@ So anything worth testing has been extracted into a plain `.ts` module:
 | `fileTreeModel.ts` | tree building, visible nodes, expansion pruning |
 | `newFile.ts` | friendly filename pre-validation |
 | `conflicts.ts` | the agent/user edit-conflict guard used before send, verify and upload |
-| `ports.ts` | visible boards, flash-target mismatch, port options |
+| `ports.ts` | **how a port is named**, visible boards, flash-target mismatch, port options |
 | `portWatch.ts` | hotplug arrival diffing |
 | `gitStatus.ts` | the git pill's entire vocabulary, incl. why flashes are untagged |
 | `check.ts` | the one `{ok} \| {ok:false, reason}` shape, and `reasonOf` |
@@ -266,6 +266,35 @@ inline copy until the user has typed, but never the button's.
 Hiding is still right for a control that would be *meaningless*, not merely
 unavailable: the profile `＋`/`✎` pair and the git pill have nothing to refer
 to without a project.
+
+### Naming a port
+
+`/dev/ttyACM0` is whichever board enumerated first, so it is the *least* stable
+thing about a board and was the only thing most of the UI showed. One rule now,
+in `ports.ts`, used by every surface that names a port:
+
+**`portName` = `portTitle` · device path.** The title is the nickname the user
+chose, then a board arduino-cli is *sure* about, then what the fleet remembers,
+then an honest `USB serial bridge`.
+
+Two rules inside that are easy to undo:
+
+- **`confidentBoardName` is not `visibleBoard`.** A hidden sibling in
+  `matching_boards` means the match was family-wide on USB vid/pid, so the
+  non-hidden entry is an arbitrary member — which is how a plain ESP32-S3 was
+  labelled "Ozobot DRVKit". `visibleBoard` still returns it, because an FQBN to
+  *compile with* is a different question from a name to *read*. This mirrors
+  `core::fleet::board_name`, which has always refused it.
+- **A nickname is only used for a board confirmed online.** `last_port` is a
+  memory, and the kernel hands `ttyACM0` to whatever is plugged in next.
+
+`fleetDisplayName` mirrors `core::fleet::FleetEntry::display_name`. There were
+three copies of that chain and they had drifted — one dropped `chip_type`, one
+also dropped `board_name`, so "Forgot …" reported a bare MAC.
+
+Machine-facing strings keep the bare address: `arduino-cli` argv, the MCP
+tools, `esptool --port`. The Assistant is never given a port at all — it flashes
+whatever the UI has selected.
 
 ### Accessibility
 

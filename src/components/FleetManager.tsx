@@ -7,6 +7,7 @@ import {
   type DetectedPort,
   type FleetEntry,
 } from "../api";
+import { fleetDisplayName, portTitle } from "../ports";
 
 interface Props {
   /** The current port scan; drives which boards show as online. */
@@ -85,7 +86,7 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
     setWorking(true);
     try {
       setBoards(await forgetBoard(entry.id));
-      notify(`Forgot ${entry.nickname ?? entry.id}`);
+      notify(`Forgot ${fleetDisplayName(entry)}`);
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -114,8 +115,7 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
 
   const card = (entry: FleetEntry) => {
     const live = isOnline(entry.id);
-    const name =
-      entry.nickname || entry.board_name || entry.chip_type || entry.id;
+    const name = fleetDisplayName(entry);
     return (
       <div key={entry.id} className={live ? "fleet-card online" : "fleet-card"}>
         <div className="fleet-head">
@@ -259,8 +259,7 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
                 <div className="fleet-head">
                   <span className="fleet-dot" />
                   <span className="fleet-name-static">
-                    {dp.matching_boards.find((b) => !b.is_hidden)?.name ??
-                      "Unknown board"}
+                    {portTitle(dp)}
                   </span>
                 </div>
                 <div className="fleet-id">{dp.port.address}</div>

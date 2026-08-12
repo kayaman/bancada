@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import type { DetectedPort, RepoState, SketchYaml, Visibility } from "../api";
+import type {
+  DetectedPort,
+  FleetSnapshot,
+  RepoState,
+  SketchYaml,
+  Visibility,
+} from "../api";
 import { portOptions } from "../ports";
 import { defaultRepoName } from "../publishRepo";
 import { buildBlockedReason, retargetBlockedReason } from "../toolbarModel";
@@ -14,6 +20,8 @@ interface Props {
   profile: string | null;
   ports: DetectedPort[];
   selectedPort: string | null;
+  /** Last fleet snapshot, so ports are named by nickname where one exists. */
+  fleet: FleetSnapshot | null;
   busy: boolean;
   gitState: RepoState | null;
   ghAvailable: boolean;
@@ -150,7 +158,7 @@ export default function Toolbar(props: Props) {
             title="Serial port"
           >
             <option value="">select port…</option>
-            {portOptions(props.ports, props.selectedPort).map((o) => (
+            {portOptions(props.ports, props.selectedPort, props.fleet).map((o) => (
               <option key={o.address} value={o.address} disabled={o.missing}>
                 {o.label}
               </option>

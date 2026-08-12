@@ -95,7 +95,10 @@ describe("bridgeArrivals", () => {
     expect(bridgeArrivals([], s)).toEqual([
       {
         id: "/dev/ttyACM0",
-        name: "Serial Port (USB)",
+        // The shared bridge title, not `protocol_label` — that reads
+        // "Serial Port (USB)" for every bridge on the bench, so two arrivals
+        // announced themselves identically and neither matched the picker.
+        name: "USB serial bridge",
         port: "/dev/ttyACM0",
       },
     ]);

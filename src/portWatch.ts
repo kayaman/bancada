@@ -1,4 +1,5 @@
 import type { FleetSnapshot } from "./api";
+import { BRIDGE_TITLE, fleetDisplayName } from "./ports";
 
 /**
  * Unidentified (bridge) ports newly attached since the previous sync.
@@ -17,7 +18,10 @@ export function bridgeArrivals(
     .filter((p) => !seen.has(p.port.address))
     .map((p) => ({
       id: p.port.address,
-      name: p.port.protocol_label || "Serial port",
+      // Not `protocol_label`: it is "Serial Port (USB)" for every bridge on
+      // the bench, so two arrivals announced themselves identically. The
+      // shared title at least matches what the picker calls them.
+      name: BRIDGE_TITLE,
       port: p.port.address,
     }));
 }
@@ -48,7 +52,9 @@ export function arrivals(
       const b = snap.boards.find((e) => e.id === id);
       return {
         id,
-        name: b?.nickname ?? b?.board_name ?? id,
+        // The shared chain, not a fourth copy of it — chip_type was the rung
+        // this one used to skip.
+        name: b ? fleetDisplayName(b) : id,
         port: b?.last_port ?? null,
       };
     });

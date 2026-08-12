@@ -1,4 +1,115 @@
-import type { DetectedPort, MatchingBoard } from "./api";
+import type { DetectedPort, FleetEntry, FleetSnapshot, MatchingBoard } from "./api";
+
+/** Separator between a port's name and its device path. */
+const SEP = " · ";
+
+/** What a serial port with no board-specific identity is called. */
+export const BRIDGE_TITLE = "USB serial bridge";
+
+/**
+ * Join a board's name to a device path in the standard order — name first,
+ * path second. The path is dropped when there isn't one rather than rendering
+ * an empty tail.
+ */
+export function withPath(title: string, address: string | null): string {
+  return address ? `${title}${SEP}${address}` : title;
+}
+
+/** The fleet entry currently sitting on `address`, if the fleet knows one.
+ *
+ *  Matched on `last_port` **and** confirmed online: `last_port` is a memory of
+ *  where a board was seen, and the kernel reuses `ttyACM0` for whatever is
+ *  plugged in next. Without the online check a nickname would migrate onto
+ *  whichever board inherited the path. */
+function entryOn(address: string, fleet?: FleetSnapshot | null): FleetEntry | null {
+  if (!fleet) return null;
+  const online = new Set(fleet.online);
+  return fleet.boards.find((b) => b.last_port === address && online.has(b.id)) ?? null;
+}
+
+/**
+ * What a remembered board is called. **Mirrors
+ * `core::fleet::FleetEntry::display_name`** — every rung, in the same order.
+ *
+ * Three copies of this chain had drifted apart: the fleet card kept all four,
+ * the arrival toast dropped `chip_type`, and the "Forgot …" toast dropped
+ * `board_name` too, so forgetting a named board reported a bare MAC.
+ */
+export function fleetDisplayName(b: FleetEntry): string {
+  return (
+    b.nickname?.trim() ||
+    b.board_name?.trim() ||
+    b.chip_type?.trim() ||
+    b.id
+  );
+}
+
+/**
+ * A board name only when arduino-cli's match is actually about *this* board.
+ *
+ * **Mirrors `core::fleet::board_name`, deliberately.** A hidden sibling in the
+ * list means the match was made on a family-wide USB vid/pid, so the non-hidden
+ * entry arduino-cli offers alongside it is an arbitrary member of that family —
+ * which is how a plain ESP32-S3 dev board gets confidently labelled "Ozobot
+ * DRVKit". Several named matches mean the same thing.
+ *
+ * This is **not** `visibleBoard`, and the difference matters: for choosing an
+ * FQBN to compile with, the arbitrary sibling is the best guess available. For
+ * a *name the user reads to tell two boards apart*, being wrong is worse than
+ * being silent — the Rust side has refused this for as long as the fleet has
+ * existed, and the toolbar was the one place still printing it.
+ */
+export function confidentBoardName(p: DetectedPort): string | null {
+  if (p.matching_boards.some((b) => b.is_hidden)) return null;
+  const named = p.matching_boards.filter((b) => b.name !== "");
+  return named.length === 1 ? named[0].name : null;
+}
+
+/**
+ * What a board is called, without its device path.
+ *
+ * In order: the nickname the user chose, a board name arduino-cli is actually
+ * sure about, the board name the fleet remembers, and finally an honest
+ * description of a port with no identity at all. The nickname wins because it
+ * is the only one of these the user picked, and the only thing that tells two
+ * identical clones apart.
+ */
+export function portTitle(p: DetectedPort, fleet?: FleetSnapshot | null): string {
+  const entry = entryOn(p.port.address, fleet);
+  if (entry?.nickname?.trim()) return entry.nickname.trim();
+  const board = confidentBoardName(p);
+  if (board) return board;
+  if (entry?.board_name?.trim()) return entry.board_name.trim();
+  if (entry?.chip_type?.trim()) return entry.chip_type.trim();
+  return p.port.protocol === "network" ? "Network port" : BRIDGE_TITLE;
+}
+
+/**
+ * **The one way a port is named in this UI.** Board first, device path second:
+ * the name is what a person thinks in, the path is what they occasionally need.
+ *
+ * Every surface that shows a port goes through this — the picker, the status
+ * bar, the serial tab, notifications — so the same board reads the same way
+ * everywhere. Machine-facing strings (the MCP tools, `arduino-cli` argv) keep
+ * the bare address; a friendly name is for people.
+ */
+export function portName(p: DetectedPort, fleet?: FleetSnapshot | null): string {
+  return withPath(portTitle(p, fleet), p.port.address);
+}
+
+/**
+ * The same, for a port that is selected but no longer attached — a board that
+ * was unplugged, or one pinned in `sketch.yaml`. There is no `DetectedPort` to
+ * describe, so the fleet's memory is all there is.
+ */
+export function missingPortName(
+  address: string,
+  fleet?: FleetSnapshot | null,
+): string {
+  const remembered = fleet?.boards.find((b) => b.last_port === address);
+  const title = remembered?.nickname?.trim() || remembered?.board_name?.trim();
+  return title ? `${title}${SEP}not attached` : `${address}${SEP}not attached`;
+}
 
 /**
  * The board identity a user (or a compile) should see for a port.
@@ -42,19 +153,17 @@ export interface PortOption {
 export function portOptions(
   ports: DetectedPort[],
   selected: string | null,
+  fleet?: FleetSnapshot | null,
 ): PortOption[] {
-  const opts = ports.map((p) => {
-    const b = visibleBoard(p);
-    return {
-      address: p.port.address,
-      label: b ? `${p.port.address} (${b.name})` : p.port.address,
-      missing: false,
-    };
-  });
+  const opts = ports.map((p) => ({
+    address: p.port.address,
+    label: portName(p, fleet),
+    missing: false,
+  }));
   if (selected && !ports.some((p) => p.port.address === selected)) {
     opts.push({
       address: selected,
-      label: `${selected} (not attached)`,
+      label: missingPortName(selected, fleet),
       missing: true,
     });
   }

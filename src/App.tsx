@@ -6,7 +6,14 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
-import { flashTargetMismatch, nextSelectedPort, visibleBoard } from "./ports";
+import {
+  flashTargetMismatch,
+  missingPortName,
+  nextSelectedPort,
+  portName,
+  visibleBoard,
+  withPath,
+} from "./ports";
 import { checkNewEntry } from "./newFile";
 import { useExplorerStore } from "./explorerStore";
 import {
@@ -166,6 +173,9 @@ export default function App() {
 
   // The toolbar pill's whole world; null while no sketch is open.
   const [gitState, setGitState] = useState<api.RepoState | null>(null);
+  /** Last fleet snapshot, so a port can be named by its nickname rather than
+   *  by a device path the kernel hands out in plug order. */
+  const [fleet, setFleet] = useState<api.FleetSnapshot | null>(null);
   const [ghOk, setGhOk] = useState(false);
   const gitStateRefreshRef = useRef<(dir: string) => void>(() => {});
 
@@ -544,16 +554,27 @@ export default function App() {
             prevUnidentifiedRef.current = snap.unidentified.map(
               (p) => p.port.address,
             );
+            // Kept so every port the UI names can use the nickname the user
+            // chose — see ports.portName.
+            setFleet(snap);
             if (fresh.length > 0)
               notify(
                 `⚡ ${fresh
-                  .map((a) => (a.port ? `${a.name} (${a.port})` : a.name))
+                  .map((a) => withPath(a.name, a.port))
                   .join(", ")} attached`,
               );
           })
           .catch(() => {});
       })
       .catch((e) => notify(String(e), true));
+  };
+
+  /** The selected port, named the way the picker names it. Falls back to
+   *  the bare address when nothing is selected. */
+  const selectedPortName = () => {
+    if (!selectedPort) return "no port";
+    const p = ports.find((d) => d.port.address === selectedPort);
+    return p ? portName(p, fleet) : missingPortName(selectedPort, fleet);
   };
 
   /** Switch profile; if it pins a port in sketch.yaml, select that port too. */
@@ -1038,11 +1059,11 @@ export default function App() {
     const detected = detectedFqbn();
     if (flashTargetMismatch(profileFqbn, detected)) {
       notify(
-        `⚠ ${selectedPort} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
+        `⚠ ${selectedPortName()} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
         true,
       );
     } else {
-      notify(`Building and flashing to ${selectedPort}…`);
+      notify(`Building and flashing to ${selectedPortName()}…`);
     }
     try {
       // Compiles as part of the flash — a sketch that fails to build stops
@@ -1299,7 +1320,7 @@ export default function App() {
           notify("Companion firmware compile failed", true);
           return false;
         }
-        notify(`Flashing companion firmware to ${selectedPort}…`);
+        notify(`Flashing companion firmware to ${selectedPortName()}…`);
         const u = await api.uploadSketch(dir, selectedPort, chipProfile);
         notify(
           u.success
@@ -1788,6 +1809,7 @@ export default function App() {
         profile={profile}
         ports={ports}
         selectedPort={selectedPort}
+        fleet={fleet}
         busy={busy}
         onOpenProject={openSketch}
         onOpenRecent={(dir) => void loadSketch(dir)}
