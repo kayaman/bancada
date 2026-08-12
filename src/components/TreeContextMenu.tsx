@@ -46,6 +46,7 @@ export default function TreeContextMenu({
   ) => (
     <button
       className="ctx-item"
+      role="menuitem"
       disabled={disabled}
       title={title}
       onClick={() => {

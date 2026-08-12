@@ -100,7 +100,7 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
           </button>
           <span className="usage-title">{replay.title}</span>
           <div className="spacer" />
-          <button className="btn small" onClick={onClose} title="Close">
+          <button className="btn small" onClick={onClose} title="Close" aria-label="Close">
             ✕
           </button>
         </div>
@@ -132,10 +132,10 @@ export default function UsageDashboard({ onClose, openBottomTab }: Props) {
           </span>
         )}
         <div className="spacer" />
-        <button className="btn small" onClick={refresh} title="Refresh">
+        <button className="btn small" onClick={refresh} title="Refresh" aria-label="Refresh">
           ⟳
         </button>
-        <button className="btn small" onClick={onClose} title="Close">
+        <button className="btn small" onClick={onClose} title="Close" aria-label="Close">
           ✕
         </button>
       </div>

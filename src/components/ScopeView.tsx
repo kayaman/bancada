@@ -1008,6 +1008,7 @@ export default function ScopeView({
                 className="btn small"
                 onClick={() => setMeasOpen(false)}
                 title="Collapse measurements"
+                aria-label="Collapse measurements"
               >
                 ▸
               </button>
@@ -1052,6 +1053,7 @@ export default function ScopeView({
             className="scope-measure-toggle"
             onClick={() => setMeasOpen(true)}
             title="Show measurements"
+            aria-label="Show measurements"
           >
             ◂
           </button>

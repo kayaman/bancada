@@ -359,6 +359,7 @@ export default function AgentPanel({
           className={debugOpen ? "btn small primary" : "btn small"}
           onClick={() => setDebugOpen((o) => !o)}
           title="Raw agent event log (all stream-json events, including unmodelled ones)"
+          aria-label="Raw agent event log"
         >
           🐛
         </button>
@@ -791,6 +792,7 @@ function HistListView({
             className="btn small icon"
             onClick={() => onContinue(e.file)}
             title="Continue this chat with the assistant"
+            aria-label="Continue this chat with the assistant"
           >
             ▶
           </button>
@@ -798,6 +800,7 @@ function HistListView({
             className="btn small danger icon"
             onClick={() => onDelete(e.file)}
             title="Delete this saved chat"
+            aria-label="Delete this saved chat"
           >
             🗑
           </button>
