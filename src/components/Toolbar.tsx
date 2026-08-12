@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import type { DetectedPort, RepoState, SketchYaml } from "../api";
+import type { DetectedPort, RepoState, SketchYaml, Visibility } from "../api";
 import { portOptions } from "../ports";
+import { defaultRepoName } from "../publishRepo";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
 import RecentsMenu from "./RecentsMenu";
@@ -18,6 +19,7 @@ interface Props {
   onOpenSketch: () => void;
   onOpenRecent: (dir: string) => void;
   onNewProject: () => void;
+  onRenameProject: () => void;
   onCloneProject: () => void;
   onUsage: () => void;
   onCreateProfile: () => void;
@@ -31,7 +33,12 @@ interface Props {
   onGitCommit: (message: string) => void;
   onGitSync: () => void;
   onGitInit: () => void;
-  onGitCreateRemote: (name: string) => void;
+  onGitInitHere: () => void;
+  onGitCreateRemote: (
+    name: string,
+    visibility: Visibility,
+    description: string | null,
+  ) => void;
   onGitSetRemote: (url: string) => void;
 }
 
@@ -74,6 +81,16 @@ export default function Toolbar(props: Props) {
         >
           ＋ New Project…
         </button>
+
+        {props.sketchDir && (
+          <button
+            className="btn"
+            onClick={props.onRenameProject}
+            title="Rename this project — the folder, its sketch, and its history"
+          >
+            ✎ Rename…
+          </button>
+        )}
 
         <button
           className="btn"
@@ -177,10 +194,11 @@ export default function Toolbar(props: Props) {
             state={props.gitState}
             busy={props.busy}
             ghAvailable={props.ghAvailable}
-            defaultRepoName={props.sketchDir.split("/").filter(Boolean).pop() ?? ""}
+            defaultRepoName={defaultRepoName(props.sketchDir)}
             onCommit={props.onGitCommit}
             onSync={props.onGitSync}
             onInit={props.onGitInit}
+            onInitHere={props.onGitInitHere}
             onCreateRemote={props.onGitCreateRemote}
             onSetRemote={props.onGitSetRemote}
           />

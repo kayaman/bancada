@@ -39,6 +39,10 @@ never guesses a path.
 `core::settings::AppSettings` — last sketch and open file, last project parent,
 and the recent-projects list capped at `MAX_RECENT = 10`.
 
+All paths here are absolute, so a project rename invalidates them.
+`replace_recent(old, new)` swaps the entry **in place**, keeping its position:
+a rename is not a visit, and should not reorder the list.
+
 ### `chats/<sketch_key>/*.ndjson`
 
 Assistant transcripts, **one file per chat**.
@@ -63,6 +67,16 @@ Rules:
 - Filenames arriving from the webview are validated as plain `*.ndjson`
   basenames (`valid_chat_file`) before any file operation.
 
+**Renaming a project changes both halves of the key** — the hash, because the
+path changed, and the basename. `chatlog::rename_key(chats_root, old, new)`
+moves the directory so the transcripts stay reachable; without it they would
+remain on disk and be unreachable from the UI, which reads as data loss.
+It refuses an occupied destination rather than merging.
+
+The `meta` line inside each transcript keeps the **old** `sketchDir` after a
+rename, deliberately: it records where that conversation actually happened.
+See the caveat under `usage.json`.
+
 ### `usage.json`
 
 Cumulative per-project cost, tokens, turns and session counts. Versioned
@@ -77,6 +91,21 @@ Two ordering rules protect the totals from double-counting:
   not exist, and saved immediately — so backfill can never run twice.
 - `chat_append` loads the store **before** appending the line, for the same
   reason.
+
+`rename_project` calls `UsageStore::rename_project_key`, which moves the entry
+and repoints its `sketch_dir`, merging rather than clobbering if the target
+somehow exists. Without it a renamed project shows up twice in the dashboard —
+its whole history under the old name, and $0 under the new one.
+
+> **Known gap.** `ProjectUsage.sketch_dir` is both a display string *and* the
+> value the dashboard hands back to `chat_list_usage`/`chat_load`, which
+> re-hash it into a `sketch_key`. `usage::backfill` seeds that field from the
+> transcripts' `meta` lines, which keep the pre-rename path. So if `usage.json`
+> is ever deleted *after* a rename, backfill re-seeds the old path, and the
+> dashboard row drills into a key that no longer exists — silently empty
+> sessions. The fix is for `usage_overview` to return the map key it already
+> has, instead of the two chat commands re-deriving it from a display path.
+> Not yet done.
 
 ### `fleet.json`
 

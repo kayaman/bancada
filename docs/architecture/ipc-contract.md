@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **91** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **93** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (91)
+## 2. Commands (93)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -63,14 +63,30 @@ authority**.
 The middle three stream to `build://line` — they are long-running and share the
 build console with compiles.
 
-### Projects — 3
-`create_project` · `list_sketch_templates` · `clone_project`
+### Projects — 4
+`create_project` · `list_sketch_templates` · `clone_project` · `rename_project`
 
 `create_project` runs `sketch new` → `write_main_ino` → `profile create` →
 `profile lib add` per library → `ensure_under_git`. **Library and git failures
 are non-fatal** and are reported in the returned
 `CreatedProject { library_errors, under_git, git_error }` — a project with a
 failed optional library is still a project.
+
+`rename_project` moves the folder *and* its main `.ino`, which the explorer's
+`rename_sketch_entry` refuses to touch (`files.rs::is_protected`). It then
+carries across the state keyed to the old path: the chat directory and the
+usage entry, both keyed by `chatlog::sketch_key(path)` — whose hash *and*
+basename halves change on a rename — plus the recent-projects entry.
+
+Two refusals worth knowing. It is **refused outright while an Assistant
+session is live**: the session pins the old path in four places that cannot be
+rewritten after the child is spawned (see [agent-safety](agent-safety.md)). And
+it holds the **build gate** for the move, so it cannot race a compile or flash
+reading the tree it is relocating.
+
+The state moves run after the directory rename and are best-effort — by then
+the project has moved, and failing the call would leave the frontend pointing
+at a path that no longer exists. Each failure comes back in `warnings`.
 
 ### Git-hosted libraries (`bancada.yaml`) — 4
 `gh_list_versions` · `gh_manifest` · `gh_add_library` · `gh_restore`
@@ -85,11 +101,28 @@ Both `async`, both `spawn_blocking`, both take the **non-blocking** build gate
 and stream every `OutputLine` as `build://line`. Contention returns
 `"build already in progress"`. See [runtime-model](runtime-model.md).
 
-### Git and GitHub — 7
-`git_state` · `git_commit` · `git_init` · `git_sync` · `git_create_remote` ·
-`git_set_remote` · `gh_available`
+A successful `upload_sketch` also calls `tag_flash` before releasing the gate —
+checkpoint, tag, push. So does the agent's MCP `upload`. See
+[data-flows](data-flows.md) for the trace, and note that **nothing in that path
+can fail the flash**: every step reports to `build://line` and returns.
 
-The last four stream to `build://line`.
+### Git and GitHub — 8
+`git_state` · `git_commit` · `git_init` · `git_init_here` · `git_sync` ·
+`git_create_remote` · `git_set_remote` · `gh_available`
+
+`git_create_remote`, `git_set_remote` and `git_sync` stream to `build://line`.
+
+`git_init_here` is `git_init` without its "already under git" refusal: it
+initializes a *nested* sketch as a repository in its own right, which
+`ensure_under_git` deliberately declines to do. Tags are per-repository, so a
+nested sketch needs this before its flashes can be tagged — at the cost of an
+embedded repository the parent will report as such.
+
+`git_create_remote` takes `visibility` and an optional `description`, and
+initializes a repository first when the sketch is `no_git` — publishing an
+unversioned sketch is one action. It **refuses a public repo whose
+`tracked_secrets` is non-empty**: `.gitignore` does not untrack what is already
+in the index, and the frontend's identical check is only a courtesy.
 
 ### Serial monitor — 4
 `start_monitor` · `set_selected_target` · `stop_monitor` · `monitor_send`

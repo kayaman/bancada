@@ -625,9 +625,32 @@ describe("git commands", () => {
     expect(called()).toEqual(["git_sync", { sketchDir: "/s" }]);
   });
 
-  it("gitCreateRemote passes sketchDir and name", async () => {
-    await api.gitCreateRemote("/s", "proj");
-    expect(called()).toEqual(["git_create_remote", { sketchDir: "/s", name: "proj" }]);
+  it("renameProject passes sketchDir and newName", async () => {
+    await api.renameProject("/s", "porch-light");
+    expect(called()).toEqual(["rename_project", { sketchDir: "/s", newName: "porch-light" }]);
+  });
+
+  it("gitInitHere passes sketchDir", async () => {
+    await api.gitInitHere("/s");
+    expect(called()).toEqual(["git_init_here", { sketchDir: "/s" }]);
+  });
+
+  it("gitCreateRemote passes sketchDir, name, visibility and description", async () => {
+    await api.gitCreateRemote("/s", "proj", "public", "a bench thing");
+    expect(called()).toEqual([
+      "git_create_remote",
+      { sketchDir: "/s", name: "proj", visibility: "public", description: "a bench thing" },
+    ]);
+  });
+
+  it("gitCreateRemote sends an absent description as an explicit null", async () => {
+    // Option<String> must arrive as null, never omitted — see the settings
+    // commands above for why.
+    await api.gitCreateRemote("/s", "proj", "private", null);
+    expect(called()).toEqual([
+      "git_create_remote",
+      { sketchDir: "/s", name: "proj", visibility: "private", description: null },
+    ]);
   });
 
   it("gitSetRemote passes sketchDir and url", async () => {

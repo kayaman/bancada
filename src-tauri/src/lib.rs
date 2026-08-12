@@ -958,6 +958,103 @@ async fn clone_project(
     .map_err(err_str)?
 }
 
+#[derive(serde::Serialize)]
+struct RenamedProject {
+    dir: String,
+    name: String,
+    warnings: Vec<String>,
+}
+
+/// Rename the open project, carrying across everything keyed to its old path.
+///
+/// **Refused while an Assistant session is live.** `agent_start` bakes the
+/// sketch path into four places that cannot be changed after the child is
+/// spawned: its working directory (a kernel-held inode), the system prompt,
+/// the canonical `permissions.deny` rules in a 0600 temp file, and the
+/// `--agent-guard` hook's argv. Containment does still fail closed after a
+/// rename — `path_is_confined` resolves the old root to nothing and rejects
+/// every write — but the deny rules are the layer that has to hold even when
+/// hooks are switched off, and they would then anchor a directory that no
+/// longer exists. Stopping the session first is exactly what a project switch
+/// already does.
+///
+/// Holds the build gate for the whole move, so a rename cannot race a compile
+/// or a flash reading the tree it is relocating.
+///
+/// The three state moves run *after* the directory rename and are best-effort.
+/// By then the project has moved; refusing to report that because a chat
+/// directory would not budge would leave the frontend pointing at a path that
+/// no longer exists. Anything that fails comes back as a warning instead.
+#[tauri::command]
+async fn rename_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sketch_dir: String,
+    new_name: String,
+) -> Result<RenamedProject, String> {
+    if state
+        .agent
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        return Err(
+            "stop the Assistant session first — it is pinned to this project's current folder"
+                .into(),
+        );
+    }
+
+    let gate = state.build_gate.clone();
+    let old_dir = sketch_dir.clone();
+    let made = tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_build_gate(&gate)?;
+        bancada_core::project::rename_project(Path::new(&sketch_dir), &new_name).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)??;
+
+    let new_dir = made.dir.to_string_lossy().into_owned();
+    let mut warnings = made.warnings;
+
+    // Chats and usage are both keyed by `sketch_key(path)`, and *both* halves
+    // of that key change with the rename. Without these two moves the
+    // project's transcripts and cost totals are still on disk but unreachable.
+    let old_key = bancada_core::chatlog::sketch_key(&old_dir);
+    let new_key = bancada_core::chatlog::sketch_key(&new_dir);
+
+    if let Err(e) = chats_root(&app).and_then(|root| {
+        bancada_core::chatlog::rename_key(&root, &old_key, &new_key).map_err(err_str)
+    }) {
+        warnings.push(format!("chat history stayed under the old name: {e}"));
+    }
+
+    match load_usage(&app) {
+        Ok((path, mut store)) => {
+            store.rename_project_key(&old_key, &new_key, &new_dir);
+            if let Err(e) = store.save(&path) {
+                warnings.push(format!("usage totals stayed under the old name: {e}"));
+            }
+        }
+        Err(e) => warnings.push(format!("usage totals stayed under the old name: {e}")),
+    }
+
+    if let Err(e) = update_settings(&app, |s| {
+        s.replace_recent(&old_dir, &new_dir);
+        // Cleared rather than carried: the caller reloads the project next,
+        // which sets both fields properly. Leaving the old path here would
+        // survive a crash in between and point at nothing.
+        s.set_last_sketch(new_dir.clone(), None);
+    }) {
+        warnings.push(format!("recent projects still list the old path: {e}"));
+    }
+
+    Ok(RenamedProject {
+        dir: new_dir,
+        name: made.name,
+        warnings,
+    })
+}
+
 // ---------- remote (git) libraries ----------
 
 /// Versions available for an alias, newest first, the library's own tag
@@ -1137,17 +1234,32 @@ async fn upload_sketch(
     let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = try_build_gate(&gate)?;
+        let emit_line = |line: OutputLine| {
+            let _ = app.emit("build://line", &line);
+        };
         let result = cli
             .upload(
                 &sketch_dir,
                 profile.as_deref(),
                 fqbn.as_deref(),
                 &port,
-                |line| {
-                    let _ = app.emit("build://line", &line);
-                },
+                &emit_line,
             )
             .map_err(err_str)?;
+        // Still inside the build gate: the checkpoint and tag describe the
+        // tree that was just flashed, and nothing else may compile against
+        // it until they are written.
+        if result.success {
+            let board = board_display_name(&app, &port);
+            tag_flash(
+                &sketch_dir,
+                profile.as_deref(),
+                fqbn.as_deref(),
+                &port,
+                board.as_deref(),
+                &emit_line,
+            );
+        }
         Ok(result)
     })
     .await
@@ -1208,17 +1320,80 @@ async fn git_sync(
     .map_err(err_str)?
 }
 
+/// Publish the sketch to a fresh GitHub repository, initializing one locally
+/// first when the sketch is not yet under git.
+///
+/// Publishing an unversioned sketch is one action, not two. The ordering is
+/// safe because `init_repo` writes the credential `.gitignore` *before* its
+/// baseline commit, so nothing in `GITIGNORE_REQUIRED` can reach the history
+/// that is about to be pushed.
+///
+/// Publishing *publicly* with credentials already tracked is refused outright
+/// rather than warned about: `.gitignore` does not untrack a file that is
+/// already in the index, and the frontend's identical check is a courtesy —
+/// this is the authority.
 #[tauri::command]
 async fn git_create_remote(
     app: AppHandle,
     sketch_dir: String,
     name: String,
+    visibility: bancada_core::git::Visibility,
+    description: Option<String>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        bancada_core::git::create_remote(Path::new(&sketch_dir), &name, |line| {
+        use bancada_core::git;
+        let dir = Path::new(&sketch_dir);
+
+        // Refuse before mutating anything, so a rejected publish leaves no
+        // half-made repository behind.
+        let state = git::repo_state(dir).map_err(err_str)?;
+        if let git::RepoState::Root {
+            tracked_secrets, ..
+        } = &state
+        {
+            if visibility == git::Visibility::Public && !tracked_secrets.is_empty() {
+                return Err(format!(
+                    "refusing to publish publicly: {} already tracked — untrack them first",
+                    tracked_secrets.join(", ")
+                ));
+            }
+        }
+        if matches!(state, git::RepoState::NoGit) {
+            git::init_repo(dir).map_err(err_str)?;
+        }
+
+        git::create_remote(dir, &name, visibility, description.as_deref(), |line| {
             let _ = app.emit("build://line", &line);
         })
         .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Initialize the sketch directory as a repository in its own right, even
+/// though an ancestor is already a work tree.
+///
+/// `git_init` refuses this case and `ensure_under_git` skips it deliberately:
+/// a sketch normally lives *inside* a repository, and inventing a second one
+/// is not what a freshly scaffolded project wants. It is what a sketch whose
+/// flashes should be tagged wants, though — tags are per-repository, so a tag
+/// in the parent would record the whole tree rather than this sketch. The
+/// parent will report the result as an embedded repository, which is why the
+/// offer that leads here says so first.
+#[tauri::command]
+async fn git_init_here(sketch_dir: String) -> Result<bancada_core::git::RepoState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use bancada_core::git;
+        let dir = Path::new(&sketch_dir);
+        if matches!(
+            git::repo_state(dir).map_err(err_str)?,
+            git::RepoState::Root { .. }
+        ) {
+            return Err("this sketch is already a repository".to_string());
+        }
+        git::init_repo(dir).map_err(err_str)?;
+        git::repo_state(dir).map_err(err_str)
     })
     .await
     .map_err(err_str)?
@@ -1239,6 +1414,140 @@ async fn git_set_remote(app: AppHandle, sketch_dir: String, url: String) -> Resu
 #[tauri::command]
 fn gh_available() -> bool {
     bancada_core::git::gh_available()
+}
+
+/// Record a successful flash as an annotated `flash/<stamp>` tag in the
+/// sketch's repository, checkpointing first so the tag names exactly the code
+/// that reached the board.
+///
+/// Called after every successful upload, from both the toolbar's
+/// `upload_sketch` and the agent's MCP `upload`. **Nothing here can fail the
+/// flash.** Every step that goes wrong writes one line to the Build console
+/// and returns, for the same reason `note_board_fqbn` is a silent no-op:
+/// bookkeeping must not turn a good flash into an error. The push is both the
+/// most likely step to fail — a bench is often offline — and the least
+/// important, so it fails last and loudest-but-harmlessly.
+///
+/// A tag is written only when the flash carried *new* code. `commit` reports
+/// `NothingToCommit` for a clean tree; if HEAD already carries a `flash/*`
+/// tag, this is a re-flash of an already-recorded state and a second tag would
+/// say nothing the first does not. A clean tree with no such tag — code
+/// committed by hand, then flashed — still gets one.
+///
+/// `board` is the fleet's display name for the port when the caller could
+/// resolve it cheaply. The MCP path passes `None`: `McpToolCtx` deliberately
+/// holds no `AppHandle`, so it cannot reach `fleet.json`, and a `board_list`
+/// subprocess inside the flash path (under the build gate) is not worth a
+/// line of tag metadata.
+fn tag_flash(
+    sketch_dir: &str,
+    profile: Option<&str>,
+    fqbn: Option<&str>,
+    port: &str,
+    board: Option<&str>,
+    on_line: &dyn Fn(OutputLine),
+) {
+    use bancada_core::git;
+    use bancada_core::types::OutputStream;
+
+    let note = |line: String| {
+        on_line(OutputLine {
+            stream: OutputStream::Stdout,
+            line,
+        })
+    };
+
+    let dir = Path::new(sketch_dir);
+    let (remote, suggested) = match git::repo_state(dir) {
+        Ok(git::RepoState::Root {
+            remote,
+            suggested_message,
+            ..
+        }) => (remote, suggested_message),
+        Ok(git::RepoState::NoGit) => {
+            note("flash not tagged: this sketch is not a git repository".into());
+            return;
+        }
+        Ok(git::RepoState::Nested { root, .. }) => {
+            note(format!(
+                "flash not tagged: the repository root is {root}, not this sketch"
+            ));
+            return;
+        }
+        Err(e) => {
+            note(format!("flash not tagged: {e}"));
+            return;
+        }
+    };
+
+    let message = format!(
+        "{suggested}\n\nCheckpointed automatically before flashing to {port}."
+    );
+    match git::commit(dir, &message) {
+        Ok(git::CommitOutcome::Committed) => {}
+        Ok(git::CommitOutcome::NothingToCommit) => match git::flash_tags_at_head(dir) {
+            Ok(tags) if !tags.is_empty() => {
+                note(format!(
+                    "flash not tagged: this code is already tagged {}",
+                    tags.join(", ")
+                ));
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                note(format!("flash not tagged: {e}"));
+                return;
+            }
+        },
+        Err(e) => {
+            note(format!("flash not tagged: could not checkpoint — {e}"));
+            return;
+        }
+    }
+
+    let now = now_secs();
+    let name = git::flash_tag_name(now);
+    // Both are recorded when both are known: `upload_args` prefers the
+    // profile, so which one is present says how the board was resolved.
+    let mut body = format!("flashed to {port}\n");
+    if let Some(profile) = profile {
+        body.push_str(&format!("profile: {profile}\n"));
+    }
+    if let Some(fqbn) = fqbn {
+        body.push_str(&format!("fqbn: {fqbn}\n"));
+    }
+    if let Some(board) = board {
+        body.push_str(&format!("board: {board}\n"));
+    }
+    body.push_str(&format!("bancada: {}\n", env!("CARGO_PKG_VERSION")));
+
+    if let Err(e) = git::tag_annotated(dir, &name, &body) {
+        note(format!("flash not tagged: {e}"));
+        return;
+    }
+    note(format!("tagged {name}"));
+
+    if remote.is_none() {
+        return;
+    }
+    match git::push_tag(dir, &name, |line| on_line(line)) {
+        Ok(true) => note(format!("pushed {name}")),
+        Ok(false) => note(format!("{name} stays local: push failed — see above")),
+        Err(e) => note(format!("{name} stays local: push failed — {e}")),
+    }
+}
+
+/// The fleet's display name for whatever is on `port`, read straight from
+/// `fleet.json`. A file read, not a `board_list` subprocess: this runs inside
+/// the flash path under the build gate, and an unknown board is a `None`, not
+/// a delay.
+fn board_display_name(app: &AppHandle, port: &str) -> Option<String> {
+    let (_, fleet) = load_fleet(app).ok()?;
+    fleet
+        .boards
+        .iter()
+        .find(|b| b.last_port.as_deref() == Some(port))
+        .map(|b| b.display_name().to_string())
 }
 
 // ---------- serial monitor ----------
@@ -3271,6 +3580,25 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
             emit_agent(serde_json::json!({
                 "type": "upload_done", "success": result.success
             }));
+            // The agent's flashes are tagged exactly like the user's — the
+            // record is of what reached the board, not of who sent it. Still
+            // under the build gate, and still unable to fail the flash.
+            if result.success {
+                tag_flash(
+                    &ctx.sketch_dir,
+                    ctx.profile.as_deref(),
+                    ctx.fqbn.as_deref(),
+                    &target.port,
+                    None,
+                    &|line| {
+                        if !ctx.is_cancelled() {
+                            if let Ok(value) = serde_json::to_value(&line) {
+                                emit("build://line", value);
+                            }
+                        }
+                    },
+                );
+            }
             let summary =
                 agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
             let text = format!(
@@ -4105,7 +4433,9 @@ pub fn run() {
             upload_sketch,
             git_state,
             git_commit,
+            rename_project,
             git_init,
+            git_init_here,
             git_sync,
             git_create_remote,
             git_set_remote,

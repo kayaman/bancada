@@ -179,6 +179,25 @@ misleading:
   leaves it holding the build gate until it finishes.
 - **Layer 4 is after-the-fact** by construction (§2).
 
+### Why `rename_project` refuses while a session is live
+
+The confinement anchor is a **path string, fixed at spawn time**. `agent_start`
+bakes it into four places, none of which can be rewritten afterwards: the
+child's working directory (a kernel-held inode), the system prompt, the
+canonical `permissions.deny` rules in a 0600 temp file, and the
+`--agent-guard` hook's argv.
+
+Rename the project underneath a live session and containment still *fails
+closed* — `path_is_confined` resolves the old root to a directory that no
+longer exists, so every write is denied and the session bricks rather than
+escapes. But layer 1 is the layer that must hold even when hooks are switched
+off, and it would then be anchoring nothing. The guarantee is voided quietly,
+which is worse than the session breaking loudly.
+
+So the rename is refused outright rather than patched up, and the message says
+to stop the session first — which is what a project switch already does
+(`teardownAgentSession("project switched")`).
+
 ---
 
 ## 6. Changing any of this

@@ -250,6 +250,61 @@ to support it would be worse than refusing.
 
 ---
 
+## 7. A flash becomes a tag
+
+```
+Toolbar "Flash"                          agent's MCP `upload` tool
+      │                                            │
+      └─▶ upload_sketch ────┐          ┌──── run_upload
+                            ▼          ▼
+                     try_build_gate()  (non-blocking; BUILD_BUSY on contention)
+                            │
+                     ArduinoCli::upload()     arduino-cli compile -u -p <port>
+                            │  every OutputLine ─▶ "build://line"
+                            ▼
+                     result.success? ── no ─▶ done (a failed flash is data,
+                            │                        not an error)
+                           yes
+                            ▼
+                     tag_flash(sketch_dir, profile, fqbn, port, board)
+                            │
+                            ├─ repo_state()   NoGit / Nested ─▶ note, stop
+                            │                 (the scope's /tmp firmware dir
+                            │                  lands here — no special case)
+                            ├─ commit()       "<suggested>\n\nCheckpointed
+                            │                  automatically before flashing…"
+                            │      NothingToCommit + HEAD already flash-tagged
+                            │              └─▶ note, stop (same code, same tag)
+                            ├─ flash_tag_name(now_secs())   flash/2026-08-12T1430
+                            ├─ tag_annotated()   -c tag.gpgSign=false
+                            │                    body: port · profile · fqbn ·
+                            │                          board · bancada version
+                            └─ push_tag()        git push origin <tag>
+                                                 skipped when there is no remote
+                            │
+                            ▼  every step reports to "build://line"
+                     the gate is released
+```
+
+**Nothing in `tag_flash` can fail the flash.** Every step that goes wrong
+writes one line and returns — the precedent is `note_board_fqbn`, whose doc
+says bookkeeping must not turn a good flash into an error. The push is both the
+likeliest step to fail (a bench is often offline) and the least important.
+
+**The tag is written under the build gate**, still held from the upload, so
+nothing can compile against the tree between the flash and the record of it.
+
+**One tag per distinct code state, not per flash.** A clean tree whose HEAD
+already carries a `flash/*` tag is a re-flash of something already recorded.
+A clean tree *without* one — code committed by hand, then flashed — still gets
+a tag.
+
+`core` cannot do any of this itself: it has no clock and no app paths. So
+`flash_tag_name` takes `u64` unix seconds from the caller, exactly as `fleet`
+takes `now` — the layering rule, applied to time.
+
+---
+
 ## Patterns to reuse
 
 Every flow above is an instance of one of four shapes. New work should pick one

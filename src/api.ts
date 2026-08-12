@@ -304,6 +304,8 @@ export type RepoState =
 
 export type CommitOutcome = "committed" | "nothing_to_commit";
 export type SyncOutcome = "synced" | "dirty_tree" | "diverged" | "no_remote" | "not_root";
+/** Mirror of core::git::Visibility. */
+export type Visibility = "private" | "public";
 
 /** The git pill's whole world — see core::git::repo_state. */
 export const gitState = (sketchDir: string) =>
@@ -313,11 +315,24 @@ export const gitCommit = (sketchDir: string, message: string) =>
 /** Init + credential .gitignore + baseline commit; returns the fresh state. */
 export const gitInit = (sketchDir: string) =>
   invoke<RepoState>("git_init", { sketchDir });
+/**
+ * Init the sketch as its own repository even though an ancestor is already a
+ * work tree — what `git_init` refuses. Tags are per-repository, so this is
+ * what a nested sketch needs before its flashes can be tagged.
+ */
+export const gitInitHere = (sketchDir: string) =>
+  invoke<RepoState>("git_init_here", { sketchDir });
 /** fetch → rebase → push; output streams to build://line. */
 export const gitSync = (sketchDir: string) =>
   invoke<SyncOutcome>("git_sync", { sketchDir });
-export const gitCreateRemote = (sketchDir: string, name: string) =>
-  invoke<void>("git_create_remote", { sketchDir, name });
+/** Publish to a fresh GitHub repo, initializing one locally first if needed. */
+export const gitCreateRemote = (
+  sketchDir: string,
+  name: string,
+  visibility: Visibility,
+  description: string | null,
+) =>
+  invoke<void>("git_create_remote", { sketchDir, name, visibility, description });
 export const gitSetRemote = (sketchDir: string, url: string) =>
   invoke<void>("git_set_remote", { sketchDir, url });
 export const ghAvailable = () => invoke<boolean>("gh_available");
@@ -500,6 +515,20 @@ export interface ClonedProject {
 /** Copy a local sketch into a new project (fresh git repo; see clone_project). */
 export const cloneProject = (srcDir: string, destParent: string, newName: string) =>
   invoke<ClonedProject>("clone_project", { srcDir, destParent, newName });
+
+/** Mirror of core::project::RenamedProject. */
+export interface RenamedProject {
+  dir: string;
+  name: string;
+  warnings: string[];
+}
+/**
+ * Rename the open project in place: the folder, its main `.ino`, and the
+ * chat/usage/recents state keyed to the old path. Refused while an Assistant
+ * session is live — see rename_project.
+ */
+export const renameProject = (sketchDir: string, newName: string) =>
+  invoke<RenamedProject>("rename_project", { sketchDir, newName });
 
 // ---------- remote (git) libraries ----------
 

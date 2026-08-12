@@ -5,7 +5,7 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ src-tauri  (crate `bancada`, lib `bancada_lib`)              │
-│   lib.rs — 91 commands, AppState, threads, events, MCP       │
+│   lib.rs — 93 commands, AppState, threads, events, MCP       │
 │   Owns: processes · threads · mutexes · files · the window   │
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
@@ -105,7 +105,7 @@ event taxonomy, the agent safety model, the build gate and the MQTT contract.
 
 ### What it owns
 
-- **The 91 commands** — see [ipc-contract](ipc-contract.md).
+- **The 93 commands** — see [ipc-contract](ipc-contract.md).
 - **`AppState`** — five independent session slots plus the build gate. See
   [runtime-model](runtime-model.md).
 - **Every thread** — hotplug watcher, monitor readers, scope reader, MQTT

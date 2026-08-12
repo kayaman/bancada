@@ -1,13 +1,15 @@
 import { useCallback, useRef, useState } from "react";
 import Menu from "./Menu";
-import type { RepoState } from "../api";
+import type { RepoState, Visibility } from "../api";
 import {
+  flashTaggingNote,
   parentName,
   pillLabel,
   popoverMode,
   suggestedMessage,
   syncDisabledReason,
 } from "../gitStatus";
+import { checkRepoName, publishBlockedReason } from "../publishRepo";
 
 interface Props {
   state: RepoState | null;
@@ -18,7 +20,9 @@ interface Props {
   onCommit: (message: string) => void;
   onSync: () => void;
   onInit: () => void;
-  onCreateRemote: (name: string) => void;
+  /** Init a nested sketch as a repository of its own — see git_init_here. */
+  onInitHere: () => void;
+  onCreateRemote: (name: string, visibility: Visibility, description: string | null) => void;
   onSetRemote: (url: string) => void;
 }
 
@@ -30,6 +34,8 @@ export default function GitPill(props: Props) {
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
   const [message, setMessage] = useState("");
   const [repoName, setRepoName] = useState("");
+  const [visibility, setVisibility] = useState<Visibility>("private");
+  const [description, setDescription] = useState("");
   const [url, setUrl] = useState("");
 
   const label = pillLabel(props.state);
@@ -46,6 +52,10 @@ export default function GitPill(props: Props) {
     else if (state.kind === "nested") setMessage(suggestedMessage(state.dirty));
     else setMessage("");
     setRepoName(props.defaultRepoName);
+    // Private every time the popover opens: publishing publicly should be a
+    // decision made now, never one inherited from the last sketch.
+    setVisibility("private");
+    setDescription("");
     const r = btnRef.current?.getBoundingClientRect();
     if (r) setAnchor({ x: r.left, y: r.bottom + 4 });
   };
@@ -54,6 +64,67 @@ export default function GitPill(props: Props) {
   const syncReason = syncDisabledReason(state);
   const secrets = state.kind === "root" ? state.tracked_secrets : [];
   const dirtyCount = state.kind === "root" || state.kind === "nested" ? state.dirty.length : 0;
+  const tagNote = flashTaggingNote(state);
+
+  const nameCheck = checkRepoName(repoName);
+  const publishReason =
+    publishBlockedReason(state, visibility, props.ghAvailable) ??
+    (nameCheck.ok ? null : nameCheck.reason);
+  const publish = () => {
+    props.onCreateRemote(repoName.trim(), visibility, description.trim() || null);
+    close();
+  };
+
+  // Offered from `setup_remote` and from `init` alike: a sketch that is not
+  // yet under git should reach GitHub in one action, not by initializing on
+  // one trip and finding this row on the next. The backend inits first.
+  const publishBlock = props.ghAvailable && (
+    <>
+      <div className="git-pop-row">
+        <input
+          className="input"
+          value={repoName}
+          onChange={(e) => setRepoName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && publishReason === null && !props.busy) publish();
+          }}
+          placeholder="repository name"
+          title="Created on your GitHub account"
+        />
+        <button
+          className={`btn small ${visibility === "public" ? "toggled" : ""}`}
+          disabled={props.busy}
+          title={
+            visibility === "public"
+              ? "Anyone can read this repository. Click to make it private."
+              : "Only you can read this repository. Click to make it public."
+          }
+          onClick={() => setVisibility(visibility === "public" ? "private" : "public")}
+        >
+          {visibility}
+        </button>
+      </div>
+      <div className="git-pop-row">
+        <input
+          className="input"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && publishReason === null && !props.busy) publish();
+          }}
+          placeholder="description (optional)"
+        />
+        <button
+          className="btn small"
+          disabled={props.busy || publishReason !== null}
+          title={publishReason ?? `Create and push a ${visibility} repository`}
+          onClick={publish}
+        >
+          Create on GitHub
+        </button>
+      </div>
+    </>
+  );
 
   const commitRow = (
     <div className="git-pop-row">
@@ -102,17 +173,25 @@ export default function GitPill(props: Props) {
               ⚠ tracked despite .gitignore: {secrets.join(", ")}
             </div>
           )}
+          {tagNote && (
+            <div className="git-pop-note" role="note">
+              {tagNote}
+            </div>
+          )}
           {mode === "init" && (
-            <button
-              className="ctx-item"
-              disabled={props.busy}
-              onClick={() => {
-                props.onInit();
-                close();
-              }}
-            >
-              Initialize repository
-            </button>
+            <>
+              <button
+                className="ctx-item"
+                disabled={props.busy}
+                onClick={() => {
+                  props.onInit();
+                  close();
+                }}
+              >
+                Initialize repository
+              </button>
+              {publishBlock}
+            </>
           )}
           {mode === "nested" && state.kind === "nested" && (
             <>
@@ -123,6 +202,17 @@ export default function GitPill(props: Props) {
               >
                 sync is up to the {parentName(state.root)} repo
               </div>
+              <button
+                className="ctx-item"
+                disabled={props.busy}
+                title="Creates a repository inside the parent one. The parent will list this sketch as an embedded repository."
+                onClick={() => {
+                  props.onInitHere();
+                  close();
+                }}
+              >
+                Give this sketch its own repository
+              </button>
             </>
           )}
           {(mode === "actions" || mode === "setup_remote") && commitRow}
@@ -141,27 +231,7 @@ export default function GitPill(props: Props) {
           )}
           {mode === "setup_remote" && (
             <>
-              {props.ghAvailable && (
-                <div className="git-pop-row">
-                  <input
-                    className="input"
-                    value={repoName}
-                    onChange={(e) => setRepoName(e.target.value)}
-                    placeholder="repository name"
-                    title="Created private on your GitHub account"
-                  />
-                  <button
-                    className="btn small"
-                    disabled={props.busy || !repoName.trim()}
-                    onClick={() => {
-                      props.onCreateRemote(repoName.trim());
-                      close();
-                    }}
-                  >
-                    Create on GitHub
-                  </button>
-                </div>
-              )}
+              {publishBlock}
               <div className="git-pop-row">
                 <input
                   className="input"

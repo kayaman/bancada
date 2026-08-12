@@ -4,13 +4,13 @@
 // The backend refuses a bad name, a non-root sketch and a missing `gh` too
 // — this exists for friendlier messages without a round trip.
 
-import type { RepoState } from "./api";
+import type { RepoState, Visibility } from "./api";
 import { parentName } from "./gitStatus";
 
-export type Visibility = "private" | "public";
+export type { Visibility };
 export type Check = { ok: true } | { ok: false; reason: string };
 
-/** Default repo name from a sketch path. Currently inlined at Toolbar.tsx:180. */
+/** Default repo name from a sketch path — was inlined in Toolbar.tsx. */
 export function defaultRepoName(sketchDir: string): string {
   return sketchDir.split("/").filter(Boolean).pop() ?? "";
 }

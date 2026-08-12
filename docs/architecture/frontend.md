@@ -10,7 +10,7 @@ providers, no context, and no global store.
 ├─ ProfileInit (conditional row) ────────────────────────────────────┤
 ├─ main ─────────────────────────────────────────────────────────────┤
 │ ┌ sidebar ─────────┐ ┌ editor-area ────────────────────────────┐   │
-│ │ Software│Hardware│ │ NewProject | CloneProject | Usage       │   │
+│ │ Software│Hardware│ │ New | Clone | Rename | Usage | editor   │   │
 │ │ ──────────────── │ │   …or…                                  │   │
 │ │ Files│Libraries  │ │ EditorTabs + CodeMirror                 │   │
 │ │ Boards│Fleet     │ │                                         │   │
@@ -30,7 +30,14 @@ providers, no context, and no global store.
 all cross-panel state and registers every backend subscription. Its render tree
 begins around line 1749.
 
-Three composition rules are encoded there and are easy to break by accident:
+Four composition rules are encoded there and are easy to break by accident:
+
+**One editor-area form at a time.** `NewProject`, `CloneProject`,
+`RenameProject` and `UsageDashboard` are mutually exclusive, and the profile
+form is exclusive with all of them. That is expressed once, by `showPane(pane,
+profileMode?)` — call it rather than setting the booleans. The reset list used
+to be repeated at all seven call sites; adding a pane meant editing every one
+of them, and missing one would have shown two forms stacked.
 
 **Two-level tab hierarchy.** Both the sidebar and the bottom panel have a group
 switcher over per-group sub-tabs, and **each group remembers its last-used

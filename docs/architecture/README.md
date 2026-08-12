@@ -113,7 +113,7 @@ on. No refactor is proposed here.
 
 ### `src-tauri/src/lib.rs` is 6,312 lines
 
-All 91 commands live in one module. The seams are already visible — the handler
+All 93 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
 subsystems (scope, agent + MCP, mqtt, device-proxy, git, fleet, chat + usage),
 each with its own slot in `AppState` and its own threads.

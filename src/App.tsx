@@ -40,6 +40,7 @@ import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 import CloneProject from "./components/CloneProject";
+import RenameProject from "./components/RenameProject";
 import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
 import UsageDashboard from "./components/UsageDashboard";
 import MqttPanel from "./components/MqttPanel";
@@ -135,10 +136,28 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   /** When true the editor area shows the Clone Project form instead. */
   const [cloningProject, setCloningProject] = useState(false);
+  /** When true the editor area shows the Rename Project form instead. */
+  const [renamingProject, setRenamingProject] = useState(false);
   /** When true the editor area shows the usage dashboard instead. */
   const [showingUsage, setShowingUsage] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
+
+  /**
+   * The editor area hosts one form at a time. Opening any of them closes the
+   * rest — expressed once here rather than as a reset list repeated at every
+   * call site, which is how the fifth pane would have been forgotten.
+   */
+  const showPane = (
+    pane: "new" | "clone" | "rename" | "usage" | null,
+    profileMode: ProfileFormMode | null = null,
+  ) => {
+    setCreatingProject(pane === "new");
+    setCloningProject(pane === "clone");
+    setRenamingProject(pane === "rename");
+    setShowingUsage(pane === "usage");
+    setProfileForm(profileMode);
+  };
   // Live mirror of sketchDir for the App-level agent event listeners, which
   // are registered once (empty-dep effect) and would otherwise close over a
   // stale `null`.
@@ -584,10 +603,7 @@ export default function App() {
       setArmedTab(null);
       // Opening a sketch dismisses any open form — a leftover New Project or
       // Clone form would otherwise keep covering the editor.
-      setProfileForm(null);
-      setCreatingProject(false);
-      setCloningProject(false);
-      setShowingUsage(false);
+      showPane(null);
       const name = dir.split("/").pop();
       const target =
         (restoreFile && fs.find((f) => f.rel_path === restoreFile)) ||
@@ -1130,14 +1146,32 @@ export default function App() {
     }
   };
 
-  const gitCreateRemote = async (name: string) => {
+  /** Init a nested sketch as a repository of its own, so its flashes can be
+   *  tagged. Guarded like gitInit against a project switch mid-flight. */
+  const gitInitHere = async () => {
+    if (!sketchDir) return;
+    const dir = sketchDir;
+    try {
+      const s = await api.gitInitHere(dir);
+      if (dir === sketchDirRef.current) setGitState(s);
+      notify("✓ This sketch is now its own repository — flashes will be tagged");
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
+
+  const gitCreateRemote = async (
+    name: string,
+    visibility: api.Visibility,
+    description: string | null,
+  ) => {
     if (!sketchDir) return;
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify(`Creating private GitHub repo ${name}…`);
+    notify(`Creating ${visibility} GitHub repo ${name}…`);
     try {
-      await api.gitCreateRemote(sketchDir, name);
+      await api.gitCreateRemote(sketchDir, name, visibility, description);
       notify(`✓ Created and pushed to ${name}`);
     } catch (e) {
       notify(String(e), true);
@@ -1757,43 +1791,13 @@ export default function App() {
         busy={busy}
         onOpenSketch={openSketch}
         onOpenRecent={(dir) => void loadSketch(dir)}
-        onNewProject={() => {
-          setCreatingProject(true);
-          setCloningProject(false);
-          setProfileForm(null);
-          setShowingUsage(false);
-        }}
-        onCloneProject={() => {
-          setCloningProject(true);
-          setCreatingProject(false);
-          setProfileForm(null);
-          setShowingUsage(false);
-        }}
-        onUsage={() => {
-          setShowingUsage(true);
-          setCreatingProject(false);
-          setCloningProject(false);
-          setProfileForm(null);
-        }}
-        onCreateProfile={() => {
-          setProfileForm("bootstrap");
-          // The three editor-area forms are mutually exclusive.
-          setCreatingProject(false);
-          setCloningProject(false);
-          setShowingUsage(false);
-        }}
-        onAddProfile={() => {
-          setProfileForm("add");
-          setCreatingProject(false);
-          setCloningProject(false);
-          setShowingUsage(false);
-        }}
-        onRetargetProfile={() => {
-          setProfileForm("retarget");
-          setCreatingProject(false);
-          setCloningProject(false);
-          setShowingUsage(false);
-        }}
+        onNewProject={() => showPane("new")}
+        onCloneProject={() => showPane("clone")}
+        onRenameProject={() => showPane("rename")}
+        onUsage={() => showPane("usage")}
+        onCreateProfile={() => showPane(null, "bootstrap")}
+        onAddProfile={() => showPane(null, "add")}
+        onRetargetProfile={() => showPane(null, "retarget")}
         onSelectProfile={selectProfile}
         onSelectPort={setSelectedPort}
         onRefreshPorts={refreshPorts}
@@ -1804,6 +1808,7 @@ export default function App() {
         onGitCommit={gitCommit}
         onGitSync={gitSync}
         onGitInit={gitInit}
+        onGitInitHere={gitInitHere}
         onGitCreateRemote={gitCreateRemote}
         onGitSetRemote={gitSetRemote}
       />
@@ -2010,6 +2015,19 @@ export default function App() {
                 await loadSketch(dir);
               }}
               onCancel={() => setCloningProject(false)}
+              notify={notify}
+            />
+          ) : renamingProject && sketchDir ? (
+            <RenameProject
+              sketchDir={sketchDir}
+              gitState={gitState}
+              onRenamed={async (dir) => {
+                setRenamingProject(false);
+                // The old path is gone; loadSketch re-points everything that
+                // the backend migration did not (tabs, buffers, git state).
+                await loadSketch(dir);
+              }}
+              onCancel={() => setRenamingProject(false)}
               notify={notify}
             />
           ) : showingUsage ? (

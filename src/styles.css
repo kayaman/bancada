@@ -1739,6 +1739,31 @@ body {
   flex: 1;
 }
 
+/* Rename pane: a captioned path, and the list of what the rename carries
+   with it. Stated before it happens, because none of it is visible after. */
+.np-labelled {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.np-caption {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.np-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.np-note ul {
+  margin: 3px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
 .np-tmpl-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

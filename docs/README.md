@@ -20,12 +20,12 @@ end to end.
 - [system-context](architecture/system-context.md) — external engines, network peers, constraints
 - [conventions](architecture/conventions.md) — layering, testing, commits, releases
 - [backend-modules](architecture/backend-modules.md) — the 22 core modules and the Tauri layer
-- [ipc-contract](architecture/ipc-contract.md) — 91 commands, 7 events, 3 channels, the MCP surface
+- [ipc-contract](architecture/ipc-contract.md) — 93 commands, 7 events, 3 channels, the MCP surface
 - [frontend](architecture/frontend.md) — shell, state tiers, the pure-logic tier
 - [runtime-model](architecture/runtime-model.md) — `AppState`, locks, threads, shutdown
 - [persistence](architecture/persistence.md) — every file Bancada writes
 - [agent-safety](architecture/agent-safety.md) — the AI Assistant's confinement model
-- [data-flows](architecture/data-flows.md) — six traces through every layer
+- [data-flows](architecture/data-flows.md) — seven traces through every layer
 
 ## Subsystem contracts
 
