@@ -224,7 +224,7 @@ export default function AgentPanel({
         className="agent-panel"
         style={active ? undefined : { display: "none" }}
       >
-        <div className="agent-empty">Open a sketch first.</div>
+        <div className="agent-empty">Open a project first.</div>
       </section>
     );
   }
@@ -362,7 +362,7 @@ export default function AgentPanel({
         >
           🐛
         </button>
-        <button className="btn small" onClick={openHistory} title="Saved chats for this sketch">
+        <button className="btn small" onClick={openHistory} title="Saved chats for this project">
           🕘 History
         </button>
         <button
@@ -398,7 +398,7 @@ export default function AgentPanel({
           <span className="agent-back-hint">
             {histStore
               ? "Read-only replay of a saved chat."
-              : "Saved chats for this sketch — click one to read it."}
+              : "Saved chats for this project — click one to read it."}
           </span>
         </div>
       ) : (
@@ -774,7 +774,7 @@ function HistListView({
 }) {
   if (entries.length === 0) {
     return (
-      <div className="agent-empty">No saved chats for this sketch yet.</div>
+      <div className="agent-empty">No saved chats for this project yet.</div>
     );
   }
   return (

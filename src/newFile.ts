@@ -20,11 +20,11 @@ export function checkNewEntry(
   const name = raw.trim().replace(/\/+$/, "");
   if (!name) return { ok: false, reason: "name the entry to create" };
   if (name.startsWith("/"))
-    return { ok: false, reason: "use a path inside the sketch, not an absolute one" };
+    return { ok: false, reason: "use a path inside the project, not an absolute one" };
   const relPath = parentDir ? `${parentDir}/${name}` : name;
   const segments = relPath.split("/");
   if (segments.some((s) => s === ".."))
-    return { ok: false, reason: "the path cannot leave the sketch (..)" };
+    return { ok: false, reason: "the path cannot leave the project (..)" };
   if (segments.some((s) => s.trim() === ""))
     return { ok: false, reason: "the path has an empty segment" };
   if (existing.some((f) => f.rel_path === relPath))

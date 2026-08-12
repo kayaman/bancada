@@ -36,7 +36,7 @@ export default function TreeContextMenu({
         ? target
         : target.split("/").slice(0, -1).join("/");
   const prot = target !== null && isProtected(target);
-  const protTitle = prot ? `${target} is required by the sketch` : undefined;
+  const protTitle = prot ? `${target} is required by the build` : undefined;
 
   const item = (
     label: string,
