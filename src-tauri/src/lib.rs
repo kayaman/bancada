@@ -1041,6 +1041,20 @@ async fn rename_project(
         Err(e) => warnings.push(format!("usage totals stayed under the old name: {e}")),
     }
 
+    // Boards remember the project they were last flashed from. Without this
+    // a rename turns every one of those records into a path that is not
+    // there, and the offer on plug-in leads nowhere.
+    match load_fleet(&app) {
+        Ok((path, mut f)) => {
+            if f.repoint_project(&old_dir, &new_dir) > 0 {
+                if let Err(e) = f.save(&path) {
+                    warnings.push(format!("boards still point at the old path: {e}"));
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("boards still point at the old path: {e}")),
+    }
+
     if let Err(e) = update_settings(&app, |s| {
         s.replace_recent(&old_dir, &new_dir);
         // Cleared rather than carried: the caller reloads the project next,
@@ -1253,15 +1267,26 @@ async fn upload_sketch(
         // tree that was just flashed, and nothing else may compile against
         // it until they are written.
         if result.success {
-            let board = board_display_name(&app, &port);
-            tag_flash(
+            let fleet_file = fleet_path(&app).ok();
+            let board = fleet_file
+                .as_deref()
+                .and_then(|f| board_on_port(f, &port));
+            let flashed = tag_flash(
                 &sketch_dir,
                 profile.as_deref(),
                 fqbn.as_deref(),
                 &port,
-                board.as_deref(),
+                board.as_ref().map(|(_, name)| name.as_str()),
                 &emit_line,
             );
+            // Only when a tag was actually written: `None` covers the scope's
+            // $TMPDIR firmware and every other case where there is nothing
+            // true to record.
+            if let (Some(f), Some((id, _)), Some(info)) =
+                (fleet_file.as_deref(), &board, &flashed)
+            {
+                note_flash_on_board(f, id, &sketch_dir, info);
+            }
         }
         Ok(result)
     })
@@ -1419,6 +1444,43 @@ fn gh_available() -> bool {
     bancada_core::git::gh_available()
 }
 
+/// How far a project has moved since a board was flashed from it.
+///
+/// Three answers rather than two. "The folder is gone" and "that commit is
+/// not in this history" — a deleted tag, a re-clone, a force-push — are not
+/// the same as "no drift", and the banner words each differently. Collapsing
+/// either into `0` would make a stale board read as up to date, which is the
+/// one wrong thing this can say.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProjectDrift {
+    Missing,
+    Unknown,
+    Ahead { commits: u32 },
+}
+
+#[tauri::command]
+async fn git_project_drift(
+    sketch_dir: String,
+    commit: String,
+) -> Result<ProjectDrift, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&sketch_dir);
+        if !dir.is_dir() {
+            return ProjectDrift::Missing;
+        }
+        match bancada_core::git::project_drift(dir, &commit) {
+            Ok(Some(commits)) => ProjectDrift::Ahead { commits },
+            // A repository that cannot answer reads the same to the user as a
+            // commit it cannot find: either way the comparison is unavailable,
+            // and neither is an error they can act on.
+            Ok(None) | Err(_) => ProjectDrift::Unknown,
+        }
+    })
+    .await
+    .map_err(err_str)
+}
+
 /// Record a successful flash as an annotated `flash/<stamp>` tag in the
 /// sketch's repository, checkpointing first so the tag names exactly the code
 /// that reached the board.
@@ -1449,7 +1511,7 @@ fn tag_flash(
     port: &str,
     board: Option<&str>,
     on_line: &dyn Fn(OutputLine),
-) {
+) -> Option<FlashInfo> {
     use bancada_core::git;
     use bancada_core::types::OutputStream;
 
@@ -1461,25 +1523,29 @@ fn tag_flash(
     };
 
     let dir = Path::new(sketch_dir);
-    let (remote, suggested) = match git::repo_state(dir) {
+    // `branch` is free here — `repo_state` has already computed it, and a
+    // checkpoint commit cannot move it, so it stays valid below.
+    let (remote, suggested, branch, detached) = match git::repo_state(dir) {
         Ok(git::RepoState::Root {
             remote,
             suggested_message,
+            branch,
+            detached,
             ..
-        }) => (remote, suggested_message),
+        }) => (remote, suggested_message, branch, detached),
         Ok(git::RepoState::NoGit) => {
             note("flash not tagged: this sketch is not a git repository".into());
-            return;
+            return None;
         }
         Ok(git::RepoState::Nested { root, .. }) => {
             note(format!(
                 "flash not tagged: the repository root is {root}, not this sketch"
             ));
-            return;
+            return None;
         }
         Err(e) => {
             note(format!("flash not tagged: {e}"));
-            return;
+            return None;
         }
     };
 
@@ -1494,17 +1560,17 @@ fn tag_flash(
                     "flash not tagged: this code is already tagged {}",
                     tags.join(", ")
                 ));
-                return;
+                return None;
             }
             Ok(_) => {}
             Err(e) => {
                 note(format!("flash not tagged: {e}"));
-                return;
+                return None;
             }
         },
         Err(e) => {
             note(format!("flash not tagged: could not checkpoint — {e}"));
-            return;
+            return None;
         }
     }
 
@@ -1526,31 +1592,87 @@ fn tag_flash(
 
     if let Err(e) = git::tag_annotated(dir, &name, &body) {
         note(format!("flash not tagged: {e}"));
-        return;
+        return None;
     }
     note(format!("tagged {name}"));
 
-    if remote.is_none() {
-        return;
+    // Read after the checkpoint, so it is the commit that was actually
+    // flashed. A tag name is minute-resolution and can be deleted or moved;
+    // the sha is the only unambiguous pin, and it is one subprocess.
+    let commit = match git::head_sha(dir) {
+        Ok(sha) => sha,
+        Err(e) => {
+            note(format!("{name} written, but its commit could not be read — {e}"));
+            return None;
+        }
+    };
+
+    if remote.is_some() {
+        match git::push_tag(dir, &name, |line| on_line(line)) {
+            Ok(true) => note(format!("pushed {name}")),
+            Ok(false) => note(format!("{name} stays local: push failed — see above")),
+            Err(e) => note(format!("{name} stays local: push failed — {e}")),
+        }
     }
-    match git::push_tag(dir, &name, |line| on_line(line)) {
-        Ok(true) => note(format!("pushed {name}")),
-        Ok(false) => note(format!("{name} stays local: push failed — see above")),
-        Err(e) => note(format!("{name} stays local: push failed — {e}")),
-    }
+
+    Some(FlashInfo {
+        tag: name,
+        // `branch` is the raw `# branch.head` value, which is the literal
+        // string "(detached)" when HEAD is not on one — record nothing rather
+        // than a branch name that does not exist.
+        branch: (!detached).then_some(branch),
+        commit,
+        at: now,
+    })
+}
+
+/// What a flash produced, for the board's record. `None` from `tag_flash`
+/// means no tag was written and there is nothing to remember.
+struct FlashInfo {
+    tag: String,
+    branch: Option<String>,
+    commit: String,
+    at: u64,
 }
 
 /// The fleet's display name for whatever is on `port`, read straight from
 /// `fleet.json`. A file read, not a `board_list` subprocess: this runs inside
 /// the flash path under the build gate, and an unknown board is a `None`, not
 /// a delay.
-fn board_display_name(app: &AppHandle, port: &str) -> Option<String> {
-    let (_, fleet) = load_fleet(app).ok()?;
+fn board_on_port(fleet_file: &Path, port: &str) -> Option<(String, String)> {
+    let fleet = Fleet::load(fleet_file).ok()?;
     fleet
         .boards
         .iter()
         .find(|b| b.last_port.as_deref() == Some(port))
-        .map(|b| b.display_name().to_string())
+        .map(|b| (b.id.clone(), b.display_name().to_string()))
+}
+
+/// Record what was just flashed onto the board sitting on `port`.
+///
+/// Non-fatal in every direction, like everything else on this path: an
+/// unidentifiable board, a port the fleet has not seen, a file that will not
+/// write — all are silent. Bookkeeping must not turn a good flash into an
+/// error, and a board that forgets its project is a smaller loss than a flash
+/// that reports failure after succeeding.
+///
+/// Written here rather than on the scan path on purpose: `fleet_sync` skips
+/// its write unless a board is new or `last_seen` is stale, precisely so a
+/// 2 s hotplug poll does not churn the file. This runs once per upload.
+fn note_flash_on_board(fleet_file: &Path, board_id: &str, dir: &str, info: &FlashInfo) {
+    let Ok(mut fleet) = Fleet::load(fleet_file) else {
+        return;
+    };
+    let rec = fleet::FlashRecord {
+        project_dir: dir.to_string(),
+        tag: info.tag.clone(),
+        branch: info.branch.clone(),
+        commit: info.commit.clone(),
+        at: info.at,
+    };
+    if fleet.note_flash(board_id, rec).is_ok() {
+        let _ = fleet.save(fleet_file);
+    }
 }
 
 // ---------- serial monitor ----------
@@ -3005,6 +3127,10 @@ struct McpToolCtx {
     /// Shared with `AgentSession::verify_cancel`; see its doc. Checked by
     /// every tool handler, not just `verify`.
     cancelled: Arc<AtomicBool>,
+    /// `fleet.json`, so an agent flash records the board's project too.
+    /// A path rather than an `AppHandle`: this ctx is deliberately kept
+    /// free of the Tauri surface, and a path is all the fleet needs.
+    fleet_file: Option<PathBuf>,
 }
 
 impl McpToolCtx {
@@ -3602,7 +3728,7 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
             // record is of what reached the board, not of who sent it. Still
             // under the build gate, and still unable to fail the flash.
             if result.success {
-                tag_flash(
+                let flashed = tag_flash(
                     &ctx.sketch_dir,
                     ctx.profile.as_deref(),
                     ctx.fqbn.as_deref(),
@@ -3616,6 +3742,15 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
                         }
                     },
                 );
+                // The agent's flashes are recorded exactly like the user's.
+                // Skipping this would leave the board pointing at whatever
+                // project was flashed *before* — a confidently wrong answer,
+                // which is worse than none.
+                if let (Some(f), Some(info)) = (ctx.fleet_file.as_deref(), &flashed) {
+                    if let Some((id, _)) = board_on_port(f, &target.port) {
+                        note_flash_on_board(f, id.as_str(), &ctx.sketch_dir, info);
+                    }
+                }
             }
             let summary =
                 agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
@@ -4164,6 +4299,7 @@ fn agent_start(
         serial_cursor: AtomicU64::new(ring_head),
         session_pid: child_pid,
         cancelled: verify_cancel.clone(),
+        fleet_file: fleet_path(&app).ok(),
     };
     let listener_server = server.clone();
     let listener_emit = app_emitter(app.clone());
@@ -4455,6 +4591,7 @@ pub fn run() {
             rename_project,
             git_init,
             git_init_here,
+            git_project_drift,
             git_sync,
             git_create_remote,
             git_set_remote,
@@ -4834,6 +4971,9 @@ mod tests {
             serial_cursor: AtomicU64::new(cursor_start),
             session_pid: TEST_PID,
             cancelled,
+            // These tests drive the listener, not the fleet; a `None` keeps
+            // the flash-record write out of their way entirely.
+            fleet_file: None,
         };
         let thread_server = server.clone();
         let thread_events = events.clone();
@@ -6543,6 +6683,7 @@ mod tests {
             serial_cursor: AtomicU64::new(0),
             session_pid: TEST_PID,
             cancelled: Arc::new(AtomicBool::new(false)),
+            fleet_file: None,
         };
         let thread_server = server.clone();
         let thread_events = events.clone();

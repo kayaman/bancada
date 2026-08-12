@@ -17,7 +17,7 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  94 invoke commands · 7 events · 3 Channels
+          src/api.ts:  95 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │

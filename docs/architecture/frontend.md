@@ -136,6 +136,7 @@ So anything worth testing has been extracted into a plain `.ts` module:
 | `ports.ts` | **how a port is named**, visible boards, flash-target mismatch, port options |
 | `portWatch.ts` | hotplug arrival diffing |
 | `gitStatus.ts` | the git pill's entire vocabulary, incl. why flashes are untagged |
+| `boardOffer.ts` | whether to offer a plugged-in board's project back, and which |
 | `check.ts` | the one `{ok} \| {ok:false, reason}` shape, and `reasonOf` |
 | `publishRepo.ts` | repo-name rules and why publishing is blocked |
 | `projectRename.ts` | project-name rules (mirrors `core::project::validate_project_name`) and the rename plan |

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { cpp } from "@codemirror/lang-cpp";
 import { oneDark } from "@codemirror/theme-one-dark";
@@ -6,6 +6,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
+import { boardOffer } from "./boardOffer";
 import {
   flashTargetMismatch,
   missingPortName,
@@ -48,6 +49,7 @@ import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 import DuplicateProject from "./components/DuplicateProject";
 import RenameProject from "./components/RenameProject";
+import BoardOffer from "./components/BoardOffer";
 import ProfileInit, { type ProfileFormMode } from "./components/ProfileInit";
 import UsageDashboard from "./components/UsageDashboard";
 import MqttPanel from "./components/MqttPanel";
@@ -176,6 +178,18 @@ export default function App() {
   /** Last fleet snapshot, so a port can be named by its nickname rather than
    *  by a device path the kernel hands out in plug order. */
   const [fleet, setFleet] = useState<api.FleetSnapshot | null>(null);
+  /** Board ids the user has waved away this session. Not persisted — a
+   *  new session is a new bench, and the offer is cheap to re-answer. */
+  const [offerDismissed, setOfferDismissed] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  /** Board id → cooldown expiry (ms). A flash resets the board and it
+   *  re-enumerates, so without this the act of flashing would offer the
+   *  project you are already working in, every time. */
+  const flashCooldownRef = useRef<Map<string, number>>(new Map());
+  /** Set by a first Open click when opening would discard something. */
+  const [offerArmed, setOfferArmed] = useState(false);
+  const [offerDrift, setOfferDrift] = useState<api.ProjectDrift | null>(null);
   const [ghOk, setGhOk] = useState(false);
   const gitStateRefreshRef = useRef<(dir: string) => void>(() => {});
 
@@ -575,6 +589,85 @@ export default function App() {
     if (!selectedPort) return "no port";
     const p = ports.find((d) => d.port.address === selectedPort);
     return p ? portName(p, fleet) : missingPortName(selectedPort, fleet);
+  };
+
+  // A flash resets the board; it drops off the bus and comes back. Long
+  // enough to outlast that, short enough that a deliberate unplug/replug a
+  // minute later is heard.
+  const FLASH_COOLDOWN_MS = 60_000;
+
+  /** Board ids still inside their post-flash cooldown. */
+  const offerSuppressed = useMemo(() => {
+    const now = Date.now();
+    const live = new Set<string>();
+    for (const [id, until] of flashCooldownRef.current) {
+      if (until > now) live.add(id);
+    }
+    return live;
+    // Recomputed whenever the fleet does — the 2 s hotplug poll is what
+    // makes an expired cooldown take effect, and no offer can appear
+    // without a fleet change anyway.
+  }, [fleet]);
+
+  const offer = boardOffer(fleet, sketchDir, offerDismissed, offerSuppressed);
+
+  // Drift is one subprocess per offer, not per scan.
+  useEffect(() => {
+    if (!offer) {
+      setOfferDrift(null);
+      return;
+    }
+    let cancelled = false;
+    setOfferDrift(null);
+    api
+      .projectDrift(offer.rec.project_dir, offer.rec.commit)
+      .then((d) => {
+        if (!cancelled) setOfferDrift(d);
+      })
+      .catch(() => {
+        if (!cancelled) setOfferDrift({ kind: "missing" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [offer?.boardId, offer?.rec.project_dir, offer?.rec.commit]);
+
+  // A new board's offer starts unarmed — the warning belongs to the offer
+  // the user actually clicked, not to the next one.
+  useEffect(() => setOfferArmed(false), [offer?.boardId]);
+
+  /**
+   * Why opening this project now would lose something, or null.
+   *
+   * `loadSketch` discards unsaved buffers and tears down a live Assistant
+   * session without asking. Every other caller is a deliberate click; this
+   * one appears unbidden, so it arms first and commits on the second click —
+   * the same idiom a dirty tab close uses.
+   */
+  const offerOpenCost = (): string | null => {
+    if (dirtyFiles.size > 0) {
+      const n = dirtyFiles.size;
+      return `${n} unsaved file${n === 1 ? "" : "s"} would be discarded`;
+    }
+    const agent = agentStore.snapshot().status;
+    if (agent === "starting" || agent === "running")
+      return "the Assistant session would be stopped";
+    return null;
+  };
+
+  const acceptOffer = () => {
+    if (!offer) return;
+    const cost = offerOpenCost();
+    if (cost && !offerArmed) {
+      setOfferArmed(true);
+      return;
+    }
+    setOfferDismissed(new Set([...offerDismissed, offer.boardId]));
+    void loadSketch(offer.rec.project_dir);
+  };
+
+  const dismissOffer = () => {
+    if (offer) setOfferDismissed(new Set([...offerDismissed, offer.boardId]));
   };
 
   /** Switch profile; if it pins a port in sketch.yaml, select that port too. */
@@ -1100,6 +1193,17 @@ export default function App() {
           // board. Fire-and-forget — a good flash must not fail over this.
           if (usedFqbn) {
             api.noteBoardFqbn(selectedPort, usedFqbn).catch(() => {});
+          // Suppress this board's project offer for a while: it is about to
+          // re-enumerate, and offering the project just flashed from would
+          // be noise.
+          const flashed = fleet?.boards.find(
+            (b) => b.last_port === selectedPort,
+          );
+          if (flashed)
+            flashCooldownRef.current.set(
+              flashed.id,
+              Date.now() + FLASH_COOLDOWN_MS,
+            );
           }
         }, 1200);
       }
@@ -1861,6 +1965,24 @@ export default function App() {
           a build of the assistant's on-disk version with no sign their own
           edits were still unsaved. This stays until the conflict is
           actually resolved, and Verify/Upload refuse while it is up. */}
+      {offer && (
+        <BoardOffer
+          offer={offer}
+          drift={
+            offerDrift === null
+              ? undefined
+              : offerDrift.kind === "ahead"
+                ? offerDrift.commits
+                : null
+          }
+          missing={offerDrift?.kind === "missing"}
+          armed={offerArmed}
+          armedReason={offerOpenCost()}
+          onOpen={acceptOffer}
+          onDismiss={dismissOffer}
+        />
+      )}
+
       {conflicts.length > 0 && (
         <div className="conflict-banner" role="alert">
           <span className="conflict-banner-icon" aria-hidden="true">

@@ -209,6 +209,34 @@ export interface InstalledCore {
 /** How confidently a port identifies one specific physical board. */
 export type BoardIdKind = "mac" | "serial";
 
+/**
+ * How far a project has moved since a recorded commit.
+ *
+ * Three answers, not two: "the folder is gone" and "that commit is not in
+ * this repository" (a deleted tag, a re-clone, a force-push) are different
+ * from "no drift", and the banner words each of them differently.
+ */
+export type ProjectDrift =
+  | { kind: "missing" }
+  | { kind: "unknown" }
+  | { kind: "ahead"; commits: number };
+
+/** Commits between a board's recorded flash commit and the project's HEAD. */
+export const projectDrift = (sketchDir: string, commit: string) =>
+  invoke<ProjectDrift>("git_project_drift", { sketchDir, commit });
+
+/** Mirror of core::fleet::FlashRecord — what was last flashed to a board. */
+export interface FlashRecord {
+  project_dir: string;
+  /** The annotated tag written at flash time, e.g. `flash/2026-08-12T1430`. */
+  tag: string;
+  branch?: string | null;
+  /** HEAD sha at flash time. The only unambiguous pin — a tag can move. */
+  commit: string;
+  /** Epoch seconds. */
+  at: number;
+}
+
 /** A remembered physical board. */
 export interface FleetEntry {
   /** Normalised MAC (lower case, colon-separated), or the USB serial. */
@@ -225,6 +253,8 @@ export interface FleetEntry {
   /** Epoch seconds. */
   first_seen: number;
   last_seen: number;
+  /** Only the last flash is kept; the repository's tags are the history. */
+  last_flash?: FlashRecord | null;
 }
 
 /** One selectable board, flattened from `board listall`. */

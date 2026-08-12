@@ -122,6 +122,27 @@ Writes are **skipped unless a board is new or `last_seen` is stale** beyond a
 resolution threshold — otherwise a 2 s hotplug poll would rewrite the file
 forever.
 
+`last_flash` (a `FlashRecord`: project dir, tag, branch, commit sha, when) is
+the exception to that rule and must stay one: it is written **only on the
+flash path**, once per upload, never from `sight`/`sight_all`, and it must
+never enter the staleness test — that is what keeps the poll from churning.
+Only the last flash is kept; the repository's `flash/*` tags are the history,
+and they survive this file being deleted.
+
+Two traps it carries:
+
+- It is `#[serde(default)]`, like every field past the id. A required field
+  would make every existing `fleet.json` fail to parse, and `load` **refuses a
+  corrupt file rather than emptying it** — the panel would simply error.
+- `merge_identified` has two arms, and both name it explicitly. When a board
+  known only by a vendor serial gains a MAC through esptool Identify its
+  record is *migrated*, and anything not named in that merge is silently
+  dropped.
+
+A project rename repoints it (`Fleet::repoint_project`), for the same reason
+the chat and usage keys move: otherwise every board points at a path that is
+no longer there.
+
 ### `mqtt.json`
 
 Saved broker configurations. Passwords in URLs are redacted for display by

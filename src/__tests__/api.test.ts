@@ -640,6 +640,14 @@ describe("git commands", () => {
     expect(called()).toEqual(["rename_project", { sketchDir: "/s", newName: "porch-light" }]);
   });
 
+  it("projectDrift passes sketchDir and commit", async () => {
+    await api.projectDrift("/s", "a".repeat(40));
+    expect(called()).toEqual([
+      "git_project_drift",
+      { sketchDir: "/s", commit: "a".repeat(40) },
+    ]);
+  });
+
   it("gitInitHere passes sketchDir", async () => {
     await api.gitInitHere("/s");
     expect(called()).toEqual(["git_init_here", { sketchDir: "/s" }]);

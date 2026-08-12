@@ -1529,6 +1529,40 @@ body {
   flex: none;
 }
 
+/* Same strip as the conflict banner, in the accent rather than the error
+   palette: this one is an offer, not a problem. Unlike that banner it carries
+   controls, because it has to be answerable — it appears unbidden and must
+   not linger once the user has decided. */
+.board-offer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.board-offer-icon {
+  color: var(--accent);
+  flex: none;
+}
+
+.board-offer-text {
+  min-width: 0;
+}
+
+.board-offer-path {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.board-offer-warn {
+  color: var(--warn);
+}
+
 /* The host refused something and killed the child — deliberately the loudest
    thing in the panel, and nothing like a tool card, because it means a
    safety boundary fired rather than a session merely finishing. */

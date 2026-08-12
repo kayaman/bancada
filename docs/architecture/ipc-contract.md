@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **94** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **95** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (94)
+## 2. Commands (95)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -106,9 +106,20 @@ checkpoint, tag, push. So does the agent's MCP `upload`. See
 [data-flows](data-flows.md) for the trace, and note that **nothing in that path
 can fail the flash**: every step reports to `build://line` and returns.
 
-### Git and GitHub — 8
-`git_state` · `git_commit` · `git_init` · `git_init_here` · `git_sync` ·
-`git_create_remote` · `git_set_remote` · `gh_available`
+### Git and GitHub — 9
+`git_state` · `git_commit` · `git_init` · `git_init_here` ·
+`git_project_drift` · `git_sync` · `git_create_remote` · `git_set_remote` ·
+`gh_available`
+
+`git_project_drift` answers "how far has this project moved since the board
+was flashed", and returns **three** shapes rather than a number:
+`missing` (the folder is gone), `unknown` (that commit is not in this history
+— a deleted tag, a re-clone, a force-push), and `ahead { commits }`.
+Collapsing either refusal into `0` would make a stale board read as up to
+date, which is the one wrong thing it can say. `core::git::project_drift`
+probes with `merge-base --is-ancestor` rather than checking existence,
+because a rewritten history still *contains* the old sha and
+`<commit>..HEAD` would count the whole rewrite.
 
 `git_create_remote`, `git_set_remote` and `git_sync` stream to `build://line`.
 
