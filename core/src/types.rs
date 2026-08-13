@@ -268,6 +268,62 @@ pub struct BoardOption {
     pub platform_name: String,
 }
 
+// ---------- `arduino-cli board details --fqbn <fqbn> --json` ----------
+//
+// Only the configuration options are modelled. The same response also carries
+// `build_properties`, `programmers` and `tools_dependencies` — hundreds of
+// entries Bancada has no use for, and which would cost more to keep in sync
+// with arduino-cli than they are worth.
+
+/// A board's configuration options — the menus an FQBN can pin.
+///
+/// Without these a profile can only name a bare `esp32:esp32:esp32s3`, which
+/// silently accepts every core default. On an ESP32-S3 one of those defaults
+/// (`CDCOnBoot`) routes `Serial` to UART0 instead of the native USB port, so
+/// the board flashes fine and the serial monitor stays empty.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BoardDetails {
+    /// The *canonical* FQBN: arduino-cli echoes `esp32:esp32:esp32s3` even when
+    /// asked about `esp32:esp32:esp32s3:CDCOnBoot=cdc`, so this cannot be used
+    /// to read back which options were requested — only `selected` below can.
+    #[serde(default)]
+    pub fqbn: String,
+    #[serde(default)]
+    pub name: String,
+    /// Absent entirely for a board with no menus (an Arduino UNO has none),
+    /// not sent as an empty array.
+    #[serde(default)]
+    pub config_options: Vec<ConfigOption>,
+}
+
+/// One menu, e.g. `CDCOnBoot` / "USB CDC On Boot".
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ConfigOption {
+    /// The key as it appears in an FQBN — the `CDCOnBoot` of `CDCOnBoot=cdc`.
+    #[serde(default)]
+    pub option: String,
+    /// The IDE's menu title. For display only; never goes into an FQBN.
+    #[serde(default)]
+    pub option_label: String,
+    #[serde(default)]
+    pub values: Vec<ConfigValue>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ConfigValue {
+    /// The value as it appears in an FQBN — the `cdc` of `CDCOnBoot=cdc`.
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub value_label: String,
+    /// Whichever value the queried FQBN resolves to: the platform's default
+    /// unless the FQBN named one. arduino-cli sets the key **only** on that
+    /// value and omits it on the rest, so the default (false) is what marks
+    /// every unselected value — an explicit `false` is never sent.
+    #[serde(default)]
+    pub selected: bool,
+}
+
 // ---------- tests ----------
 
 /// These pin the contract with an *externally versioned* tool: arduino-cli's
@@ -557,6 +613,68 @@ mod tests {
             serde_json::from_str(r#"{"boards":[{"name":"X","fqbn":"a:b:c"}]}"#).unwrap();
         assert_eq!(r.boards[0].fqbn, "a:b:c");
         assert!(!r.boards[0].platform.release.installed, "defaults to false");
+    }
+
+    #[test]
+    fn board_details_marks_only_the_selected_value() {
+        // Trimmed from a real `board details --fqbn esp32:esp32:esp32s3`: the
+        // S3 reports 17 options, of which one is kept here. The shape that
+        // matters is `selected` — arduino-cli emits the key *only* on the
+        // chosen value and omits it entirely on the others, so anything that
+        // expects an explicit `"selected": false` reads every value as chosen.
+        let json = r#"{
+          "fqbn": "esp32:esp32:esp32s3",
+          "name": "ESP32S3 Dev Module",
+          "version": "3.3.11",
+          "config_options": [
+            {
+              "option": "CDCOnBoot",
+              "option_label": "USB CDC On Boot",
+              "values": [
+                { "value": "default", "value_label": "Disabled", "selected": true },
+                { "value": "cdc", "value_label": "Enabled" }
+              ]
+            }
+          ]
+        }"#;
+        let d: BoardDetails = serde_json::from_str(json).unwrap();
+        assert_eq!(d.fqbn, "esp32:esp32:esp32s3");
+        assert_eq!(d.name, "ESP32S3 Dev Module");
+        assert_eq!(d.config_options.len(), 1);
+        let opt = &d.config_options[0];
+        assert_eq!(opt.option, "CDCOnBoot");
+        assert_eq!(opt.option_label, "USB CDC On Boot");
+        assert_eq!(opt.values.len(), 2);
+        assert!(opt.values[0].selected, "the key is present and true");
+        assert!(
+            !opt.values[1].selected,
+            "an absent `selected` must read as false, not as chosen"
+        );
+        assert_eq!(opt.values[1].value, "cdc");
+        assert_eq!(opt.values[1].value_label, "Enabled");
+    }
+
+    #[test]
+    fn board_details_without_config_options_has_no_menus() {
+        // An Arduino UNO has no menus at all, so arduino-cli omits
+        // `config_options` rather than sending an empty array. Erroring here
+        // would make every option-less board unopenable.
+        let json = r#"{"fqbn":"arduino:avr:uno","name":"Arduino UNO","official":true}"#;
+        let d: BoardDetails = serde_json::from_str(json).unwrap();
+        assert_eq!(d.fqbn, "arduino:avr:uno");
+        assert!(d.config_options.is_empty());
+    }
+
+    #[test]
+    fn board_details_tolerates_a_value_without_a_label() {
+        // `value_label` is what the UI shows; falling back to an empty string
+        // beats refusing the whole board over one unlabelled menu entry.
+        let json = r#"{"config_options":[{"option":"o","values":[{"value":"v"}]}]}"#;
+        let d: BoardDetails = serde_json::from_str(json).unwrap();
+        let v = &d.config_options[0].values[0];
+        assert_eq!(v.value, "v");
+        assert_eq!(v.value_label, "");
+        assert_eq!(d.config_options[0].option_label, "");
     }
 
     #[test]
