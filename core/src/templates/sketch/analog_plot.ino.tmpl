@@ -1,0 +1,42 @@
+// {name} — reads one analog pin and plots it, raw against a smoothed copy.
+//
+// The smallest real measurement: a potentiometer between 3V3 and GND with
+// its wiper on the pin, or just a wire to see mains hum. Two channels rather
+// than one so the filter's effect is visible next to its input.
+//
+// The ADC's range differs by board — 0..1023 on AVR, 0..4095 on ESP32 — so
+// the plot's scale is the board's, not a voltage. Use the Scope's ADC source
+// for calibrated volts.
+
+#ifndef ANALOG_PIN
+#define ANALOG_PIN A0  // most boards; change if your ADC pin differs
+#endif
+
+const unsigned long SAMPLE_INTERVAL_MS = 20;
+const float SMOOTHING = 0.15;  // 0..1 — lower is smoother and lags more
+
+float smoothed = 0.0;
+bool primed = false;
+
+void setup() {
+  Serial.begin(115200);
+}
+
+void loop() {
+  const int raw = analogRead(ANALOG_PIN);
+
+  // Seed on the first reading rather than easing up from zero, which would
+  // otherwise draw a long fake ramp at startup.
+  if (!primed) {
+    smoothed = raw;
+    primed = true;
+  }
+  smoothed += (raw - smoothed) * SMOOTHING;
+
+  Serial.print("raw:");
+  Serial.print(raw);
+  Serial.print(" smooth:");
+  Serial.println(smoothed, 1);
+
+  delay(SAMPLE_INTERVAL_MS);
+}

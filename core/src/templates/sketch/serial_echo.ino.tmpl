@@ -1,0 +1,43 @@
+// {name} — echoes whatever you type back, numbered, and prints an uptime
+// line while idle.
+//
+// Blink proves the board can talk. This proves it can listen: the same path
+// the Serial Monitor's input box uses, and the one the AI Assistant's
+// `serial_send` tool drives. The heartbeat exists so an idle monitor never
+// looks like a dead one.
+//
+// No wiring and no board-specific calls.
+
+const unsigned long HEARTBEAT_MS = 5000;
+
+unsigned long lines = 0;
+unsigned long lastBeat = 0;
+
+void setup() {
+  Serial.begin(115200);
+  // Without this, readStringUntil blocks for a full second on every loop
+  // that has a partial line, and the heartbeat stutters.
+  Serial.setTimeout(50);
+  Serial.println("echo: ready — type a line and press Enter");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();  // drops the \r a CRLF sender leaves behind
+    if (line.length() > 0) {
+      lines++;
+      Serial.print("echo[");
+      Serial.print(lines);
+      Serial.print("]: ");
+      Serial.println(line);
+    }
+  }
+
+  if (millis() - lastBeat >= HEARTBEAT_MS) {
+    lastBeat = millis();
+    // A numeric label, so the Scope's Plotter source can draw this too.
+    Serial.print("uptime_s:");
+    Serial.println(millis() / 1000);
+  }
+}

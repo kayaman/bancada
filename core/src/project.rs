@@ -20,6 +20,9 @@ const TMPL_BLINK: &str = include_str!("templates/sketch/blink.ino.tmpl");
 const TMPL_I2C_SCAN: &str = include_str!("templates/sketch/i2c_scan.ino.tmpl");
 const TMPL_WIFI_SCAN: &str = include_str!("templates/sketch/wifi_scan.ino.tmpl");
 const TMPL_BOARD_INFO: &str = include_str!("templates/sketch/board_info.ino.tmpl");
+const TMPL_WAVEFORMS: &str = include_str!("templates/sketch/waveforms.ino.tmpl");
+const TMPL_ANALOG_PLOT: &str = include_str!("templates/sketch/analog_plot.ino.tmpl");
+const TMPL_SERIAL_ECHO: &str = include_str!("templates/sketch/serial_echo.ino.tmpl");
 
 /// A starter sketch a new project can begin life as.
 #[derive(Clone, Copy, serde::Serialize)]
@@ -38,6 +41,24 @@ pub const TEMPLATES: &[SketchTemplate] = &[
         label: "Blink",
         description: "The hardware hello-world: one upload proves the toolchain, the serial port and the board.",
         tmpl: TMPL_BLINK,
+    },
+    SketchTemplate {
+        id: "waveforms",
+        label: "Waveforms",
+        description: "Sine, triangle and sawtooth in plotter format — no wiring. The fastest way to see the Scope draw.",
+        tmpl: TMPL_WAVEFORMS,
+    },
+    SketchTemplate {
+        id: "analog-plot",
+        label: "Analog plot",
+        description: "Reads one ADC pin and plots it raw against a smoothed copy — a potentiometer is enough.",
+        tmpl: TMPL_ANALOG_PLOT,
+    },
+    SketchTemplate {
+        id: "serial-echo",
+        label: "Serial echo",
+        description: "Echoes what you type, numbered, with an idle heartbeat — proves the board listens, not just talks.",
+        tmpl: TMPL_SERIAL_ECHO,
     },
     SketchTemplate {
         id: "i2c-scan",
@@ -518,6 +539,41 @@ mod tests {
             s.contains("#if defined(ARDUINO_ARCH_ESP32)"),
             "runtime pin override exists only on ESP32 cores and must be guarded"
         );
+    }
+
+    #[test]
+    fn plotter_templates_emit_labelled_numbers() {
+        // The Scope's Plotter source parses `label:value` pairs out of the
+        // serial stream. A starter that prints prose gives it nothing to
+        // draw, which is indistinguishable from a broken scope.
+        for id in ["waveforms", "analog-plot"] {
+            let s = sketch_from_template(id, "PlotNode").unwrap();
+            assert!(s.contains("Serial.print(\""), "{id}: prints no labels");
+            assert!(s.contains(":\""), "{id}: no `label:` pair");
+        }
+    }
+
+    #[test]
+    fn universal_templates_avoid_core_specific_apis() {
+        // These four are offered for *any* board, so they must build on cores
+        // whose Serial has no printf (AVR, the Uno Q's BridgeMonitor) and
+        // which define no ESP32 conveniences. Verified against arduino:avr,
+        // esp32, esp8266 and arduino:zephyr — the same lesson `i2c-scan`
+        // learned by being retargeted onto a Uno Q.
+        for id in ["blink", "waveforms", "analog-plot", "serial-echo"] {
+            let s = sketch_from_template(id, "AnyNode").unwrap();
+            assert!(!s.contains("Serial.printf"), "{id}: printf is an ESP32-core extra");
+            assert!(!s.contains("ESP."), "{id}: ESP.* is ESP-only");
+            assert!(!s.contains("<WiFi.h>"), "{id}: WiFi is not universal");
+        }
+    }
+
+    #[test]
+    fn the_analog_template_guards_its_pin() {
+        // Same reasoning as blink's LED_BUILTIN guard: A0 is not universal,
+        // and a starter must not fail to compile on a board that lacks it.
+        let s = sketch_from_template("analog-plot", "AnalogNode").unwrap();
+        assert!(s.contains("#ifndef ANALOG_PIN"));
     }
 
     #[test]

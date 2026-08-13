@@ -133,6 +133,12 @@ scaffolded library, a fetched library and a newly created project actually
   platform version is resolved from what is installed and library dependencies
   are resolved by the engine. The location defaults to the sketchbook and then
   remembers wherever you last created one
+- **Starter sketches** — every new project begins as one of seven, not an
+  empty file: **Blink**, **Waveforms** (three software-generated traces, no
+  wiring — the fastest way to see the Scope draw), **Analog plot** (one ADC
+  pin, raw against smoothed), **Serial echo** (proves the board listens, not
+  just talks), plus the I2C, Wi-Fi and board-info probes. The first four
+  compile unchanged on AVR, ESP32, ESP8266 and the UNO Q
 - Open a project (📁 menu) → file tree, main `.ino` auto-opens in the editor
   (CodeMirror 6, C++ mode, Ctrl+S to save)
 - Board/port detection with live rescan (`arduino-cli board list`)

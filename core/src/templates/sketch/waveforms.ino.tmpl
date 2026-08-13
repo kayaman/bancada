@@ -1,0 +1,37 @@
+// {name} — three software-generated waveforms in Arduino Serial Plotter
+// format. No wiring and no ADC: the numbers are computed, not measured.
+//
+// Open the Debugging tab, choose the Scope, set Source to Plotter, and three
+// traces appear. That makes it the fastest way to prove the whole plotter
+// path — board, serial, parser, canvas — before a real signal is involved.
+// Nothing here is board-specific, so it runs anywhere Serial does.
+
+const unsigned long SAMPLE_INTERVAL_MS = 20;    // 50 samples/s — smooth, not a flood
+const float PERIOD_MS = 2000.0;                 // one full cycle every 2 s
+const float AMPLITUDE = 100.0;                  // all three share a range, so one plot fits
+
+void setup() {
+  Serial.begin(115200);
+}
+
+void loop() {
+  // 0.0 → 1.0 across one period. `millis()` wrapping after ~49 days lands on
+  // a period boundary only by luck; the discontinuity is one sample wide and
+  // costs nothing here.
+  const float phase = (millis() % (unsigned long)PERIOD_MS) / PERIOD_MS;
+
+  const float sine = sin(phase * TWO_PI) * AMPLITUDE;
+  // Up for the first half of the period, back down for the second.
+  const float triangle = (phase < 0.5 ? phase : 1.0 - phase) * 4.0 * AMPLITUDE - AMPLITUDE;
+  const float sawtooth = phase * 2.0 * AMPLITUDE - AMPLITUDE;
+
+  // `label:value` pairs — the plotter names each channel after its label.
+  Serial.print("sine:");
+  Serial.print(sine, 2);
+  Serial.print(" triangle:");
+  Serial.print(triangle, 2);
+  Serial.print(" sawtooth:");
+  Serial.println(sawtooth, 2);
+
+  delay(SAMPLE_INTERVAL_MS);
+}
