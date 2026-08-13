@@ -470,18 +470,7 @@ export default function App() {
         // auto-start effects need `selectedPort` to *change*, and the
         // port returns at the same address — often without the 2 s poll
         // ever observing the gap, so no ports://changed fires either.
-        const plan = recapturePlan({
-          wanted: monitorWantedRef.current,
-          busy: busyRef.current || agentFlashingRef.current,
-          attempt: recaptureAttemptRef.current,
-        });
-        if (!plan.retry) return;
-        recaptureAttemptRef.current += 1;
-        window.clearTimeout(recaptureTimerRef.current);
-        recaptureTimerRef.current = window.setTimeout(
-          () => void startMonitorQuietRef.current?.(),
-          plan.delayMs,
-        );
+        scheduleRecaptureRef.current?.();
       }),
       // The agent's serial_read auto-start: keep the Monitor toggle honest
       // (and monitorOnRef with it, so startMonitorQuiet never double-starts).
@@ -1215,7 +1204,9 @@ export default function App() {
             ? sketchYaml?.profiles?.[target.profile]?.fqbn
             : undefined);
         setTimeout(() => {
-          startMonitorQuiet();
+          // Re-arms the standing request the flash cleared, so a port
+          // that is still re-enumerating is chased rather than missed.
+          requestCapture();
           // Recorded after the re-enumeration wait for the same reason the
           // monitor is: the port has to be back before it can be resolved to a
           // board. Fire-and-forget — a good flash must not fail over this.
@@ -1355,13 +1346,44 @@ export default function App() {
   // ---------- serial monitor ----------
 
   /** Best-effort monitor start (auto-capture); errors stay off the status bar. */
+  /**
+   * Try again later, while the standing request holds.
+   *
+   * Driven by two different failures, which is the point: a monitor that
+   * *closed* (the child died with the port) and a start that *would not
+   * open* (the port is not back yet). A failed start emits no
+   * `serial://closed`, so hanging recovery off that event alone left the
+   * monitor dead after every flash.
+   */
+  const scheduleRecapture = useCallback(() => {
+    const plan = recapturePlan({
+      wanted: monitorWantedRef.current,
+      busy: busyRef.current || agentFlashingRef.current,
+      attempt: recaptureAttemptRef.current,
+    });
+    if (!plan.retry) return;
+    recaptureAttemptRef.current += 1;
+    window.clearTimeout(recaptureTimerRef.current);
+    recaptureTimerRef.current = window.setTimeout(
+      () => void startMonitorQuietRef.current?.(),
+      plan.delayMs,
+    );
+  }, []);
+
   const startMonitorQuiet = useCallback(async () => {
-    if (monitorOnRef.current || !selectedPort) return;
-    // Checked here and not only where a recapture is scheduled: the ladder
-    // decides a second or more before it acts, and a flash can start in
-    // between. Automatic capture must never take the port from esptool —
-    // the manual Start button (toggleMonitor) is the deliberate override.
+    if (monitorOnRef.current) return;
+    // Automatic capture must never take the port from esptool — the manual
+    // Start button (toggleMonitor) is the deliberate override. Checked here
+    // and not only where a recapture is scheduled, because the ladder
+    // decides a second or more before it acts and a flash can start in
+    // between.
     if (busyRef.current || agentFlashingRef.current) return;
+    // No port yet: a native-USB board takes a couple of seconds to come back
+    // after a reset. Keep asking rather than giving up silently.
+    if (!selectedPort) {
+      scheduleRecapture();
+      return;
+    }
     try {
       setSerialLines([]);
       await api.startMonitor(selectedPort, baudrate);
@@ -1371,14 +1393,31 @@ export default function App() {
       monitorWantedRef.current = true;
       recaptureAttemptRef.current = 0;
     } catch {
-      /* port busy or gone — the recapture ladder or a manual Start covers it */
+      // The port exists but will not open — still re-enumerating, or briefly
+      // held by a dying previous child. This is the case that used to end
+      // capture for good after a flash.
+      scheduleRecapture();
     }
-  }, [selectedPort, baudrate]);
+  }, [selectedPort, baudrate, scheduleRecapture]);
+
+  /**
+   * Ask for capture, and keep asking.
+   *
+   * The standing request has to be re-armed explicitly because the flash
+   * path cleared it to free the port for esptool.
+   */
+  const requestCapture = useCallback(() => {
+    monitorWantedRef.current = true;
+    recaptureAttemptRef.current = 0;
+    void startMonitorQuiet();
+  }, [startMonitorQuiet]);
 
   // The serial://closed handler is registered once, in an empty-dep effect,
   // so it cannot close over the current callback.
   const startMonitorQuietRef = useRef(startMonitorQuiet);
   startMonitorQuietRef.current = startMonitorQuiet;
+  const scheduleRecaptureRef = useRef(scheduleRecapture);
+  scheduleRecaptureRef.current = scheduleRecapture;
 
   // Capture by default: start the monitor whenever a port is (auto-)selected.
   useEffect(() => {
