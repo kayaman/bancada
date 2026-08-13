@@ -1,0 +1,18 @@
+profiles:
+  esp32:
+    fqbn: esp32:esp32:esp32
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+  # CDCOnBoot=cdc routes Serial to the native USB port. The firmware also
+  # mirrors the banner onto Serial0 (UART0) when CDC is on, so provisioning
+  # works from whichever of a DevKit's two USB-C sockets is plugged in.
+  esp32s3:
+    fqbn: esp32:esp32:esp32s3:CDCOnBoot=cdc
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+  esp32c3:
+    fqbn: esp32:esp32:esp32c3:CDCOnBoot=cdc
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+
+default_profile: esp32s3
