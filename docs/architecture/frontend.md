@@ -137,6 +137,7 @@ So anything worth testing has been extracted into a plain `.ts` module:
 | `portWatch.ts` | hotplug arrival diffing |
 | `gitStatus.ts` | the git pill's entire vocabulary, incl. why flashes are untagged |
 | `boardOffer.ts` | whether to offer a plugged-in board's project back, and which |
+| `monitorRecovery.ts` | when to re-take the serial port after capture is lost |
 | `check.ts` | the one `{ok} \| {ok:false, reason}` shape, and `reasonOf` |
 | `publishRepo.ts` | repo-name rules and why publishing is blocked |
 | `projectRename.ts` | project-name rules (mirrors `core::project::validate_project_name`) and the rename plan |

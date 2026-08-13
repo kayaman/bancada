@@ -7,6 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
+import { recapturePlan } from "./monitorRecovery";
 import {
   flashTargetMismatch,
   missingPortName,
@@ -244,6 +245,14 @@ export default function App() {
   // auto-resume fires from a closure created while the monitor was still on).
   const monitorOnRef = useRef(false);
   monitorOnRef.current = monitorOn;
+  /** The standing request for capture, as opposed to whether a child is
+   *  currently alive. Cleared only by an *explicit* stop — the Stop
+   *  button, the scope taking the port, the pre-flash handoff — so an
+   *  unexpected close can be told apart from one we asked for. */
+  const monitorWantedRef = useRef(false);
+  /** Recapture attempts since the last successful start. */
+  const recaptureAttemptRef = useRef(0);
+  const recaptureTimerRef = useRef<number | undefined>(undefined);
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
   // tab, cleared when that tab is opened; a group button carries the dot for
   // its hidden tabs.
@@ -454,7 +463,26 @@ export default function App() {
         if (bottomTabRef.current !== "serial")
           setUnseen((u) => ({ ...u, serial: true }));
       }),
-      api.onSerialClosed(() => setMonitorOn(false)),
+      api.onSerialClosed(() => {
+        setMonitorOn(false);
+        // A native-USB board re-enumerates on every reset, taking the
+        // monitor child with it. Nothing else brings it back: the
+        // auto-start effects need `selectedPort` to *change*, and the
+        // port returns at the same address — often without the 2 s poll
+        // ever observing the gap, so no ports://changed fires either.
+        const plan = recapturePlan({
+          wanted: monitorWantedRef.current,
+          busy: busyRef.current || agentFlashingRef.current,
+          attempt: recaptureAttemptRef.current,
+        });
+        if (!plan.retry) return;
+        recaptureAttemptRef.current += 1;
+        window.clearTimeout(recaptureTimerRef.current);
+        recaptureTimerRef.current = window.setTimeout(
+          () => void startMonitorQuietRef.current?.(),
+          plan.delayMs,
+        );
+      }),
       // The agent's serial_read auto-start: keep the Monitor toggle honest
       // (and monitorOnRef with it, so startMonitorQuiet never double-starts).
       api.onSerialStarted(() => setMonitorOn(true)),
@@ -1332,10 +1360,19 @@ export default function App() {
       setSerialLines([]);
       await api.startMonitor(selectedPort, baudrate);
       setMonitorOn(true);
+      // Capture is wanted from here until something explicitly stops it, and
+      // the ladder resets so the next dropout starts from 1 s again.
+      monitorWantedRef.current = true;
+      recaptureAttemptRef.current = 0;
     } catch {
-      /* port busy or gone — user can start manually */
+      /* port busy or gone — the recapture ladder or a manual Start covers it */
     }
   }, [selectedPort, baudrate]);
+
+  // The serial://closed handler is registered once, in an empty-dep effect,
+  // so it cannot close over the current callback.
+  const startMonitorQuietRef = useRef(startMonitorQuiet);
+  startMonitorQuietRef.current = startMonitorQuiet;
 
   // Capture by default: start the monitor whenever a port is (auto-)selected.
   useEffect(() => {
@@ -1401,6 +1438,11 @@ export default function App() {
 
   /** Stop the serial monitor if it is on (ADC streaming needs the port). */
   const stopMonitorIfOn = useCallback(async () => {
+    // Clear the intent even when no child is alive: the scope and the flash
+    // path both call this to claim the port, and a recapture already in
+    // flight would take it straight back off them.
+    monitorWantedRef.current = false;
+    window.clearTimeout(recaptureTimerRef.current);
     if (!monitorOn) return;
     await api.stopMonitor();
     setMonitorOn(false);

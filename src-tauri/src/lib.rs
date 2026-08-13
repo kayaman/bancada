@@ -1685,6 +1685,41 @@ fn note_flash_on_board(fleet_file: &Path, board_id: &str, dir: &str, info: &Flas
 /// the stdout thread emits `serial://closed` at EOF exactly as before. The
 /// reader threads own only the emitter Arc and the ring Arc — never the
 /// serial-owner mutex (they are killed under it; see `AppState::serial`).
+/// Read `src` line by line, decoding each **lossily**, until EOF.
+///
+/// A serial device emits arbitrary bytes, not UTF-8. `BufRead::lines()` yields
+/// `Err(InvalidData)` for a line that is not valid UTF-8, and the previous
+/// `.map_while(|l| l.ok())` ended the iterator there — so **one bad byte
+/// killed capture for good** while the monitor child stayed alive and kept
+/// holding the port. The console simply stopped, and the toggle flipped to
+/// "Start" with no error.
+///
+/// Which happens constantly: an ESP32's ROM bootloader prints at 74880 baud
+/// and reads as garbage at 115200, a reset mid-`print` truncates a sequence,
+/// a long cable picks up noise, and any wrong baud turns the whole stream
+/// into invalid UTF-8. None of that should end a session — `U+FFFD` in one
+/// line is the honest outcome.
+///
+/// EOF still ends the loop, so a genuinely dead child is still reported.
+fn read_lines_lossy(src: impl std::io::Read, mut on_line: impl FnMut(&str)) {
+    let mut reader = BufReader::new(src);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => return, // EOF — the child is gone
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                    buf.pop();
+                }
+                on_line(&String::from_utf8_lossy(&buf));
+            }
+            // A real I/O error on the pipe: the child is unreachable.
+            Err(_) => return,
+        }
+    }
+}
+
 fn spawn_monitor(
     cli: &ArduinoCli,
     port: &str,
@@ -1699,28 +1734,28 @@ fn spawn_monitor(
     let emit_out = emit.clone();
     let ring_out = ring.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+        read_lines_lossy(stdout, |line| {
             ring_out
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(bancada_core::types::OutputStream::Stdout, &line);
+                .push(bancada_core::types::OutputStream::Stdout, line);
             emit_out(
                 "serial://line",
                 serde_json::json!({ "stream": "stdout", "line": line }),
             );
-        }
+        });
         emit_out("serial://closed", serde_json::json!({}));
     });
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+        read_lines_lossy(stderr, |line| {
             ring.lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(bancada_core::types::OutputStream::Stderr, &line);
+                .push(bancada_core::types::OutputStream::Stderr, line);
             emit(
                 "serial://line",
                 serde_json::json!({ "stream": "stderr", "line": line }),
             );
-        }
+        });
     });
 
     Ok(child)
@@ -1740,7 +1775,7 @@ fn start_monitor(
     port: String,
     baudrate: u32,
 ) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     evict_owner(&mut guard);
 
     let child = spawn_monitor(
@@ -1776,7 +1811,7 @@ fn set_selected_target(
 
 #[tauri::command]
 fn stop_monitor(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     if matches!(guard.as_ref(), Some(SerialOwner::Monitor(_))) {
         evict_owner(&mut guard);
     }
@@ -1786,7 +1821,7 @@ fn stop_monitor(state: State<'_, AppState>) -> Result<(), String> {
 /// Transmit a line to the board through the monitor's stdin.
 #[tauri::command]
 fn monitor_send(state: State<'_, AppState>, data: String) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     let Some(SerialOwner::Monitor(child)) = guard.as_mut() else {
         return Err("serial monitor is not running".to_string());
     };
@@ -1887,7 +1922,7 @@ fn probe_at_baud(port: &str, baud: u32) -> Result<ScopeCaps, String> {
 #[tauri::command]
 async fn scope_probe(state: State<'_, AppState>, port: String) -> Result<ScopeCaps, String> {
     {
-        let guard = state.serial.lock().unwrap();
+        let guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(SerialOwner::Scope(_)) => return Err("stop the scope first".to_string()),
             Some(SerialOwner::Monitor(_)) => {
@@ -1995,7 +2030,7 @@ fn scope_start(
     cfg: scope::ScopeStreamCfg,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     evict_owner(&mut guard);
 
     let mut writer = open_scope_port(&port, baud, Duration::from_millis(100))?;
@@ -2020,7 +2055,7 @@ fn scope_start(
 /// Arm a device-triggered single-shot capture on the running scope session.
 #[tauri::command]
 fn scope_single(state: State<'_, AppState>, cfg: scope::ScopeSingleCfg) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     let Some(SerialOwner::Scope(session)) = guard.as_mut() else {
         return Err("scope is not running".to_string());
     };
@@ -2034,7 +2069,7 @@ fn scope_single(state: State<'_, AppState>, cfg: scope::ScopeSingleCfg) -> Resul
 /// Escape hatch: send a raw control line to the scope port.
 #[tauri::command]
 fn scope_send(state: State<'_, AppState>, line: String) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     let Some(SerialOwner::Scope(session)) = guard.as_mut() else {
         return Err("scope is not running".to_string());
     };
@@ -2048,7 +2083,7 @@ fn scope_send(state: State<'_, AppState>, line: String) -> Result<(), String> {
 /// Stop the scope session, if one is running. No-op for any other owner.
 #[tauri::command]
 fn scope_stop(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap();
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     if matches!(guard.as_ref(), Some(SerialOwner::Scope(_))) {
         evict_owner(&mut guard);
     }
@@ -2307,7 +2342,7 @@ async fn read_board_mac(
     state: State<'_, AppState>,
     port: String,
 ) -> Result<bancada_core::esptool::ChipInfo, String> {
-    evict_owner(&mut state.serial.lock().unwrap());
+    evict_owner(&mut state.serial.lock().unwrap_or_else(|e| e.into_inner()));
     tauri::async_runtime::spawn_blocking(move || {
         bancada_core::esptool::read_mac(&port).map_err(err_str)
     })
@@ -2441,7 +2476,7 @@ async fn identify_board(
     port: String,
     previous_id: Option<String>,
 ) -> Result<Vec<fleet::FleetEntry>, String> {
-    evict_owner(&mut state.serial.lock().unwrap());
+    evict_owner(&mut state.serial.lock().unwrap_or_else(|e| e.into_inner()));
     let info = tauri::async_runtime::spawn_blocking(move || {
         bancada_core::esptool::read_mac(&port).map_err(err_str)
     })
@@ -5356,6 +5391,47 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_bad_byte_does_not_end_serial_capture() {
+        // The regression: `lines().map_while(|l| l.ok())` ended the reader
+        // thread on the first non-UTF-8 line, while the monitor child stayed
+        // alive holding the port. The console simply stopped. An ESP32's ROM
+        // bootloader prints at 74880 baud and reads as garbage at 115200, so
+        // this arrived on ordinary hardware, not a contrived stream.
+        let mut src: Vec<u8> = Vec::new();
+        src.extend_from_slice(b"before\n");
+        src.extend_from_slice(&[0xff, 0xfe, b'\n']); // invalid UTF-8
+        src.extend_from_slice(b"after\n");
+
+        let mut seen = Vec::new();
+        read_lines_lossy(std::io::Cursor::new(src), |l| seen.push(l.to_string()));
+
+        assert_eq!(seen.len(), 3, "capture stopped early: {seen:?}");
+        assert_eq!(seen[0], "before");
+        assert_eq!(seen[2], "after", "lines after the bad byte were lost");
+        assert!(seen[1].contains('\u{fffd}'), "expected lossy decode: {:?}", seen[1]);
+    }
+
+    #[test]
+    fn serial_capture_ends_only_at_eof() {
+        // EOF must still end the loop — that is what reports a dead child.
+        let mut seen = Vec::new();
+        read_lines_lossy(std::io::Cursor::new(b"one\ntwo".to_vec()), |l| {
+            seen.push(l.to_string())
+        });
+        // A final line with no trailing newline is still delivered.
+        assert_eq!(seen, ["one", "two"]);
+    }
+
+    #[test]
+    fn serial_capture_strips_crlf() {
+        let mut seen = Vec::new();
+        read_lines_lossy(std::io::Cursor::new(b"a\r\nb\n".to_vec()), |l| {
+            seen.push(l.to_string())
+        });
+        assert_eq!(seen, ["a", "b"]);
+    }
+
     #[test]
     fn serial_send_writes_the_line_to_the_monitor_stdin() {
         let dir = tempfile::tempdir().unwrap();
