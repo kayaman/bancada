@@ -1221,13 +1221,14 @@ export default function App() {
           // board. Fire-and-forget — a good flash must not fail over this.
           if (usedFqbn) {
             api.noteBoardFqbn(selectedPort, usedFqbn).catch(() => {});
-          // Suppress this board's project offer for a while: it is about to
-          // re-enumerate, and offering the project just flashed from would
-          // be noise.
+          }
+          // Outside the FQBN branch on purpose: the board re-enumerates
+          // whether or not one was resolved, and offering the project just
+          // flashed from would be noise either way.
           const flashed = fleet?.boards.find(
             (b) => b.last_port === selectedPort,
           );
-          if (flashed)
+          if (flashed) {
             flashCooldownRef.current.set(
               flashed.id,
               Date.now() + FLASH_COOLDOWN_MS,
@@ -1356,6 +1357,11 @@ export default function App() {
   /** Best-effort monitor start (auto-capture); errors stay off the status bar. */
   const startMonitorQuiet = useCallback(async () => {
     if (monitorOnRef.current || !selectedPort) return;
+    // Checked here and not only where a recapture is scheduled: the ladder
+    // decides a second or more before it acts, and a flash can start in
+    // between. Automatic capture must never take the port from esptool —
+    // the manual Start button (toggleMonitor) is the deliberate override.
+    if (busyRef.current || agentFlashingRef.current) return;
     try {
       setSerialLines([]);
       await api.startMonitor(selectedPort, baudrate);
@@ -1404,6 +1410,12 @@ export default function App() {
   const toggleMonitor = async () => {
     try {
       if (monitorOn) {
+        // An explicit stop, exactly like stopMonitorIfOn's — and the flash
+        // path calls *this* one to free the port. Without clearing the
+        // intent here, the recapture ladder took the port straight back off
+        // esptool mid-flash.
+        monitorWantedRef.current = false;
+        window.clearTimeout(recaptureTimerRef.current);
         await api.stopMonitor();
         setMonitorOn(false);
       } else {
