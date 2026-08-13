@@ -46,6 +46,7 @@ end to end.
 
 Newest first. One file per release, user-facing.
 
+- [0.17.0](RELEASE-NOTES-0.17.0.md) — boards remember their project, new starters, serial monitor fixes
 - [0.16.0](RELEASE-NOTES-0.16.0.md) — project lifecycle, flash provenance, one project menu
 - [0.15.1](RELEASE-NOTES-0.15.1.md) — architecture documentation
 - [0.15.0](RELEASE-NOTES-0.15.0.md) — device browser
