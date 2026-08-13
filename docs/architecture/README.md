@@ -20,7 +20,7 @@ lines of TypeScript.
 │   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/               │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  src/api.ts — the ONLY IPC module
-              95 invoke commands · 7 events · 3 Channels
+              96 invoke commands · 7 events · 3 Channels
 ┌───────────────────────────────┴───────────────────────────────────────┐
 │ src-tauri  (crate `bancada`)                                          │
 │   lib.rs — commands, AppState, threads, event emission                │
@@ -113,7 +113,7 @@ on. No refactor is proposed here.
 
 ### `src-tauri/src/lib.rs` is 6,658 lines
 
-All 95 commands live in one module. The seams are already visible — the handler
+All 96 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
 subsystems (scope, agent + MCP, mqtt, device-proxy, git, fleet, chat + usage),
 each with its own slot in `AppState` and its own threads.

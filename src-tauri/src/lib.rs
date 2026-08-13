@@ -802,6 +802,24 @@ async fn list_all_boards(
         .map_err(err_str)?
 }
 
+/// The configuration menus a board exposes, so a profile can pin more than a
+/// bare FQBN.
+///
+/// Note `selected` tracks the *query*: asked with a bare board id it reports
+/// the platform's defaults, and asked with an option-bearing FQBN it reports
+/// that FQBN's choices. The response's own `fqbn` is canonical and has the
+/// options stripped, so it cannot be used to read a profile's pins back.
+#[tauri::command]
+async fn board_details(
+    state: State<'_, AppState>,
+    fqbn: String,
+) -> Result<bancada_core::types::BoardDetails, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || cli.board_details(&fqbn).map_err(err_str))
+        .await
+        .map_err(err_str)?
+}
+
 #[derive(serde::Serialize)]
 struct CreatedProject {
     dir: String,
@@ -4612,6 +4630,7 @@ pub fn run() {
             sketchbook_dir,
             default_project_parent,
             list_all_boards,
+            board_details,
             create_project,
             list_sketch_templates,
             clone_project,

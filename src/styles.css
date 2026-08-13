@@ -2770,6 +2770,47 @@ body {
   outline-offset: 1px;
 }
 
+/* Board options popover: one row per menu the board exposes. Capped and
+   scrollable because an ESP32-S3 alone offers seventeen. */
+.board-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  max-height: 320px;
+  overflow-y: auto;
+  min-width: 320px;
+}
+
+.board-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.board-option-label {
+  white-space: nowrap;
+}
+
+.board-option .select {
+  flex: none;
+  max-width: 150px;
+}
+
+/* What actually lands in sketch.yaml — only the non-defaults. */
+.board-options-fqbn {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
 /* Rows inside the pill's popover: input + button as one unit. */
 .git-pop-row {
   display: flex;

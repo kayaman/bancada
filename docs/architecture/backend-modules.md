@@ -5,7 +5,7 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ src-tauri  (crate `bancada`, lib `bancada_lib`)              │
-│   lib.rs — 95 commands, AppState, threads, events, MCP       │
+│   lib.rs — 96 commands, AppState, threads, events, MCP       │
 │   Owns: processes · threads · mutexes · files · the window   │
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
@@ -31,9 +31,9 @@ Tauri layer is uniformly `.map_err(err_str)`.
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `cli.rs` | 1021 | The `arduino-cli` wrapper. `ArduinoCli { bin }` defaults to `"arduino-cli"` on PATH. Three invocation modes: `run_json` (appends `--json`, deserialises stdout), `run_ok` (side-effect commands that reject `--json`), `run_streaming` (two reader threads → one `mpsc` → `OutputLine` callback). `monitor()` returns a live `Child` with piped stdio. |
+| `cli.rs` | 1126 | The `arduino-cli` wrapper. `ArduinoCli { bin }` defaults to `"arduino-cli"` on PATH. Three invocation modes: `run_json` (appends `--json`, deserialises stdout), `run_ok` (side-effect commands that reject `--json`), `run_streaming` (two reader threads → one `mpsc` → `OutputLine` callback). `monitor()` returns a live `Child` with piped stdio. |
 | `esptool.rs` | 316 | MAC address and chip type. Probes `esptool` then `esptool.py`. Keeps raw output for the UI's "details" view. |
-| `types.rs` | 583 | The serde structs for everything `arduino-cli --json` returns — `DetectedPort`, `Port`, `IndexedLibrary`, `InstalledLibrary`, `Platform`, `BoardOption` — plus the streaming shapes `OutputLine { stream, line }` and `RunResult`. |
+| `types.rs` | 701 | The serde structs for everything `arduino-cli --json` returns — `DetectedPort`, `Port`, `IndexedLibrary`, `InstalledLibrary`, `Platform`, `BoardOption` — plus the streaming shapes `OutputLine { stream, line }` and `RunResult`. |
 | `boards.rs` | 383 | Core/platform identity: `parse_core_id`, `fqbn_platform_id`, install-status derivation, version sorting, and the `sketch.yaml` platform-dependency strings. |
 
 ### Sketch and project model
@@ -105,7 +105,7 @@ event taxonomy, the agent safety model, the build gate and the MQTT contract.
 
 ### What it owns
 
-- **The 95 commands** — see [ipc-contract](ipc-contract.md).
+- **The 96 commands** — see [ipc-contract](ipc-contract.md).
 - **`AppState`** — five independent session slots plus the build gate. See
   [runtime-model](runtime-model.md).
 - **Every thread** — hotplug watcher, monitor readers, scope reader, MQTT

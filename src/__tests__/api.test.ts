@@ -232,6 +232,11 @@ describe("new project", () => {
     await api.sketchbookDir();
     expect(called()[0]).toBe("sketchbook_dir");
   });
+
+  it("boardDetails passes the fqbn", async () => {
+    await api.boardDetails("esp32:esp32:esp32s3");
+    expect(called()).toEqual(["board_details", { fqbn: "esp32:esp32:esp32s3" }]);
+  });
 });
 
 describe("git-backed libraries", () => {

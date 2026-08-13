@@ -11,24 +11,11 @@
 // composing, parsing and the one judgement call (`silentSerialWarning`) are
 // all decisions that must be right rather than merely rendered.
 
-/**
- * One value a board option can take, as `arduino-cli board details` reports
- * it. **Local mirrors, temporarily** — these belong in `api.ts` next to the
- * other Rust-facing shapes, and should be re-exported from there and deleted
- * here once that lands.
- */
-export interface ConfigValue {
-  value: string;
-  value_label: string;
-  selected: boolean;
-}
+// The Rust-facing shapes live in `api.ts` with every other mirror of a core
+// type; re-exported here so a caller of this module needs only one import.
+import type { ConfigOption, ConfigValue } from "./api";
 
-/** One board option — a menu in the IDE, a `key=value` pair in an FQBN. */
-export interface ConfigOption {
-  option: string;
-  option_label: string;
-  values: ConfigValue[];
-}
+export type { ConfigOption, ConfigValue };
 
 /**
  * The board's own defaults, as a selection map.

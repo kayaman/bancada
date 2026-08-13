@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **95** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **96** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (95)
+## 2. Commands (96)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -56,9 +56,17 @@ authority**.
 `search_libraries` · `list_installed_libraries` · `install_library` ·
 `uninstall_library` · `sketchbook_libraries_dir` · `create_library`
 
-### Cores and boards — 6
+### Cores and boards — 7
 `list_cores` · `search_cores` · `install_core` · `uninstall_core` ·
-`update_core_index` · `list_all_boards`
+`update_core_index` · `list_all_boards` · `board_details`
+
+`board_details` exposes the configuration menus a board offers, so a profile
+can pin more than a bare FQBN — `esp32:esp32:esp32s3:CDCOnBoot=cdc` rather
+than `esp32:esp32:esp32s3`. Two properties of the tool's response are easy to
+misread: `selected` tracks the **query** (ask with a bare board id and it
+reports the platform defaults; ask with an option-bearing FQBN and it reports
+that FQBN's choices), and the response's own `fqbn` is **canonical with the
+options stripped**, so it cannot be used to read a profile's pins back.
 
 The middle three stream to `build://line` — they are long-running and share the
 build console with compiles.

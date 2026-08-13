@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import BoardPicker from "./BoardPicker";
+import BoardOptions from "./BoardOptions";
 import {
   initProfile,
   listAllBoards,
@@ -8,6 +9,7 @@ import {
   type BoardOption,
   type SketchYaml,
 } from "../api";
+import { parseFqbn } from "../boardOptions";
 import {
   effectiveRetargetFqbn,
   initialFqbn as computeInitialFqbn,
@@ -73,6 +75,9 @@ export default function ProfileInit({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Choosing a different board drops the previous board's options: they
+  // are that board's menus, and carrying them across would pin values
+  // the new board may not offer.
   const pick = (f: string) => {
     setFqbn(f);
     if (mode !== "retarget" && !nameTouched)
@@ -117,10 +122,11 @@ export default function ProfileInit({
       <span className="profile-init-label">{LABEL[mode]}</span>
       <BoardPicker
         boards={boards}
-        value={fqbn}
+        value={parseFqbn(fqbn).base}
         onChange={pick}
         title="Board for this profile"
       />
+      <BoardOptions fqbn={fqbn} onChange={setFqbn} disabled={busy} />
       {mode === "retarget" ? (
         <span className="profile-init-label" title="Profile being retargeted">
           {currentProfile}

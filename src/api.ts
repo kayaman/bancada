@@ -257,6 +257,39 @@ export interface FleetEntry {
   last_flash?: FlashRecord | null;
 }
 
+/** One value a board option can take. Mirror of core::types::ConfigValue. */
+export interface ConfigValue {
+  value: string;
+  value_label: string;
+  /** True on the board's own default — absent rather than false in the wire
+   *  JSON, so the Rust side defaults it. */
+  selected: boolean;
+}
+
+/** One configurable board option, e.g. `CDCOnBoot` / "USB CDC On Boot". */
+export interface ConfigOption {
+  option: string;
+  option_label: string;
+  values: ConfigValue[];
+}
+
+export interface BoardDetails {
+  fqbn: string;
+  name: string;
+  /** Empty for a board with nothing to configure. */
+  config_options: ConfigOption[];
+}
+
+/**
+ * The options a board exposes, so a profile can pin more than a bare FQBN.
+ *
+ * Without this a profile cannot say `CDCOnBoot=cdc`, and on an ESP32-S3 the
+ * core's default routes `Serial` to UART0 rather than the native USB port —
+ * a board that flashes perfectly and prints nothing.
+ */
+export const boardDetails = (fqbn: string) =>
+  invoke<BoardDetails>("board_details", { fqbn });
+
 /** One selectable board, flattened from `board listall`. */
 export interface BoardOption {
   fqbn: string;

@@ -7,6 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
+import { silentSerialWarning } from "./boardOptions";
 import { recapturePlan } from "./monitorRecovery";
 import {
   flashTargetMismatch,
@@ -1167,11 +1168,18 @@ export default function App() {
       ? sketchYaml?.profiles?.[target.profile]?.fqbn
       : undefined;
     const detected = detectedFqbn();
+    // Both facts are already known here: which kind of port is selected, and
+    // whether the profile turns USB CDC on. When they disagree the board
+    // flashes perfectly and prints nothing — the failure that is hardest to
+    // read, because nothing about it looks like a configuration problem.
+    const silent = silentSerialWarning(selectedPort, profileFqbn ?? target.fqbn);
     if (flashTargetMismatch(profileFqbn, detected)) {
       notify(
         `⚠ ${selectedPortName()} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
         true,
       );
+    } else if (silent) {
+      notify(`⚠ ${silent}`, true);
     } else {
       notify(`Building and flashing to ${selectedPortName()}…`);
     }
