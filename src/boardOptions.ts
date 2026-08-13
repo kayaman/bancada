@@ -118,9 +118,12 @@ const NATIVE_USB_BOARDS = new Set([
 ]);
 
 /** True for a port that *is* the chip — Linux `ttyACM`, macOS `usbmodem`.
- *  A `ttyUSB`/`cu.usbserial` port is a CH340 or CP210x wired to the UART pins,
- *  where `Serial` arrives no matter how CDCOnBoot is set. Windows `COM3` says
- *  nothing either way, so it says nothing here. */
+ *  A `ttyUSB`/`cu.usbserial` port is a CH340 or CP210x bridge on UART0, where
+ *  `Serial` arrives no matter how CDCOnBoot is set — so no warning is needed
+ *  there. That is about the *port*, not the board: an S3 DevKit has two USB-C
+ *  sockets and the UART one may still print nothing, which is why the warning
+ *  never suggests switching cable. Windows `COM3` says nothing either way, so
+ *  it says nothing here. */
 function isNativeUsbPort(address: string): boolean {
   return (
     /^\/dev\/ttyACM\d+$/.test(address) ||
@@ -158,10 +161,15 @@ export function silentSerialWarning(
   const cdc = selection.CDCOnBoot;
   if (cdc !== undefined && cdc !== "default") return null;
 
+  // Deliberately does not suggest "use the other port instead". With CDC off,
+  // `Serial` goes to the UART0 *peripheral* — whether that reaches anything
+  // you can open is the board's business, and on plenty of dev boards
+  // (including the ESP32-S3 DevKit this was found on) it does not. Enabling
+  // CDC is the fix that works regardless.
   return (
     `Serial output will not reach ${portAddress}: with CDCOnBoot left at its ` +
-    `default this board sends Serial to the UART pins, so the monitor stays ` +
-    `empty while the upload itself looks fine. Set USB CDC On Boot to Enabled ` +
-    `to read Serial over USB.`
+    `default this board sends Serial to the UART0 peripheral rather than the ` +
+    `USB port, so the monitor stays empty while the upload itself looks fine. ` +
+    `Set USB CDC On Boot to Enabled in the profile's board options.`
   );
 }

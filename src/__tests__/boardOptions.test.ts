@@ -177,10 +177,23 @@ describe("silentSerialWarning", () => {
     const w = silentSerialWarning("/dev/ttyACM0", "esp32:esp32:esp32c6");
     expect(w).toBe(
       "Serial output will not reach /dev/ttyACM0: with CDCOnBoot left at its " +
-        "default this board sends Serial to the UART pins, so the monitor stays " +
-        "empty while the upload itself looks fine. Set USB CDC On Boot to " +
-        "Enabled to read Serial over USB.",
+        "default this board sends Serial to the UART0 peripheral rather than " +
+        "the USB port, so the monitor stays empty while the upload itself " +
+        "looks fine. Set USB CDC On Boot to Enabled in the profile's board " +
+        "options.",
     );
+  });
+
+  it("does not offer the other USB port as a way out", () => {
+    // An S3 DevKit has two USB-C sockets, and on the one this was found with
+    // the UART socket prints nothing at all — UART0 goes to the peripheral,
+    // not necessarily to anything openable. Enabling CDC is the fix that
+    // holds regardless of how the board is wired, so the message must not
+    // send anyone hunting for a second port.
+    const w = silentSerialWarning("/dev/ttyACM0", "esp32:esp32:esp32s3") ?? "";
+    expect(w).not.toContain("UART pins");
+    expect(w).not.toMatch(/other port|UART port/i);
+    expect(w).toContain("USB CDC On Boot to Enabled");
   });
 
   it("warns when CDCOnBoot is written out as its default", () => {
