@@ -219,6 +219,24 @@ impl ArduinoCli {
         Ok(out)
     }
 
+    /// The configuration options a board exposes, so a profile can pin
+    /// `esp32:esp32:esp32s3:CDCOnBoot=cdc` rather than a bare FQBN.
+    ///
+    /// The FQBN may itself carry options; arduino-cli then reports them as the
+    /// `selected` values, which is how a saved profile's choices are read back.
+    ///
+    /// A blank FQBN is refused here rather than passed through: arduino-cli
+    /// answers one with exit 1 and prints its complaint to *stdout*, so the
+    /// resulting [`Error::ToolFailed`] would carry an empty stderr and explain
+    /// nothing.
+    pub fn board_details(&self, fqbn: &str) -> Result<BoardDetails> {
+        if fqbn.trim().is_empty() {
+            return Err(Error::Other("board details needs an FQBN".into()));
+        }
+        let args = board_details_args(fqbn);
+        self.run_json(&as_str_slice(&args))
+    }
+
     // ---------- new projects ----------
 
     /// `arduino-cli sketch new <dir>` — creates the folder and its main `.ino`.
@@ -480,6 +498,15 @@ fn core_install_args(id: &str, version: Option<&str>) -> Vec<String> {
     args
 }
 
+/// `board details --fqbn <fqbn>`
+///
+/// The FQBN stays one argument even when it carries options
+/// (`esp32:esp32:esp32s3:CDCOnBoot=cdc`): the `=` belongs to the FQBN grammar,
+/// not to the command line.
+fn board_details_args(fqbn: &str) -> Vec<String> {
+    owned(&["board", "details", "--fqbn", fqbn.trim()])
+}
+
 /// `monitor -p <port> -c baudrate=<n>`
 fn monitor_args(port: &str, baudrate: u32) -> Vec<String> {
     let mut args = owned(&["monitor", "-p", port, "-c"]);
@@ -659,6 +686,23 @@ mod tests {
             lib_spec("Adafruit GFX Library", Some("1.12.6")),
             "Adafruit GFX Library@1.12.6"
         );
+    }
+
+    #[test]
+    fn board_details_names_the_board_through_the_fqbn_flag() {
+        assert_eq!(
+            board_details_args("esp32:esp32:esp32s3"),
+            ["board", "details", "--fqbn", "esp32:esp32:esp32s3"]
+        );
+    }
+
+    #[test]
+    fn board_details_keeps_an_option_bearing_fqbn_as_one_argument() {
+        // `CDCOnBoot=cdc` is part of the FQBN, not a separate flag; splitting it
+        // would make arduino-cli reject the argument.
+        let args = board_details_args("  esp32:esp32:esp32s3:CDCOnBoot=cdc  ");
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(args[3], "esp32:esp32:esp32s3:CDCOnBoot=cdc", "and trimmed");
     }
 
     #[test]
@@ -921,6 +965,67 @@ mod tests {
                 assert_eq!(names, ["Solo", "Alpha", "Zeta"]);
             },
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_details_reads_the_menus_and_their_selected_values() {
+        // The payload is a trimmed capture: one of the ESP32-S3's 17 options,
+        // with `selected` present on the default value and absent on the other.
+        with_stub(
+            r#"echo '{"fqbn":"esp32:esp32:esp32s3","name":"ESP32S3 Dev Module","config_options":[
+              {"option":"CDCOnBoot","option_label":"USB CDC On Boot","values":[
+                {"value":"default","value_label":"Disabled","selected":true},
+                {"value":"cdc","value_label":"Enabled"}]}
+            ]}'"#,
+            |s| {
+                let d = s.cli.board_details("esp32:esp32:esp32s3").unwrap();
+                assert_eq!(d.name, "ESP32S3 Dev Module");
+                assert_eq!(d.config_options.len(), 1);
+                let opt = &d.config_options[0];
+                assert_eq!(opt.option, "CDCOnBoot");
+                assert!(opt.values[0].selected);
+                assert!(!opt.values[1].selected, "an absent key is not a choice");
+                assert!(
+                    s.argv()
+                        .contains("board details --fqbn esp32:esp32:esp32s3 --json"),
+                    "{}",
+                    s.argv()
+                );
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_details_accepts_a_board_with_no_menus() {
+        // An UNO omits `config_options` entirely; erroring would make every
+        // option-less board unopenable.
+        with_stub(
+            r#"echo '{"fqbn":"arduino:avr:uno","name":"Arduino UNO"}'"#,
+            |s| {
+                let d = s.cli.board_details("arduino:avr:uno").unwrap();
+                assert_eq!(d.name, "Arduino UNO");
+                assert!(d.config_options.is_empty());
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_details_refuses_an_empty_fqbn_without_running_the_tool() {
+        // arduino-cli answers a blank --fqbn with exit 1 and its complaint on
+        // *stdout*, so ToolFailed would surface an empty stderr and say
+        // nothing. Refusing first keeps the message useful.
+        with_stub("echo '{}'", |s| {
+            for blank in ["", "   "] {
+                match s.cli.board_details(blank) {
+                    Err(Error::Other(msg)) => assert!(msg.contains("FQBN"), "{msg}"),
+                    other => panic!("expected Other, got {other:?}"),
+                }
+            }
+            assert_eq!(s.argv(), "", "arduino-cli must not have been spawned");
+        });
     }
 
     #[cfg(unix)]
