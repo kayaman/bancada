@@ -99,9 +99,9 @@ slot has a single-owner rule and an eviction protocol rather than a pool — see
 
 Because the sketch on disk is a plain arduino-cli sketch with a plain
 `sketch.yaml` profile, a project created in Bancada builds in Arduino IDE, in
-`arduino-cli` directly, or in CI, with Bancada uninstalled. The only file whose
-schema Bancada itself owns is `bancada.yaml` (git-hosted library pins), and it
-is additive.
+`arduino-cli` directly, or in CI, with Bancada uninstalled. Bancada-owned
+`bancada.yaml` and `hardware/circuit.yaml` are additive; the generated circuit
+pin header is ordinary Arduino C++ and remains buildable without Bancada.
 
 ---
 

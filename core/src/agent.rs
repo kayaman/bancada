@@ -322,6 +322,8 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "mcp__bancada__upload",
     "mcp__bancada__serial_read",
     "mcp__bancada__serial_send",
+    "mcp__bancada__circuit_status",
+    "mcp__bancada__circuit_sync",
 ];
 
 /// Tools present in a session's `system`/`init` `tools` array that Bancada did
@@ -773,7 +775,8 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
         "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
-         mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
+         mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
+         mcp__bancada__circuit_status,mcp__bancada__circuit_sync"
             .to_string(),
         "--disallowedTools".to_string(),
         "Bash,Task,NotebookEdit,KillShell,BashOutput".to_string(),
@@ -1251,7 +1254,8 @@ mod tests {
         assert_eq!(
             args[allowed_idx + 1],
             "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
-             mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
+             mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
+             mcp__bancada__circuit_status,mcp__bancada__circuit_sync"
         );
     }
 
@@ -1346,7 +1350,10 @@ mod tests {
             .iter()
             .position(|a| a == "--tools")
             .expect("--tools must be present");
-        assert_eq!(args[idx + 1], "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch");
+        assert_eq!(
+            args[idx + 1],
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"
+        );
         assert!(
             !args[idx + 1].contains("Bash"),
             "Bash must never be in the built-in allow-list"

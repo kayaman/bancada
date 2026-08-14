@@ -1,0 +1,4 @@
+interface:
+  display_name: "ESP32 Circuit Designer"
+  short_description: "Keep ESP32 circuits synchronized with Arduino code"
+  default_prompt: "Use $esp32-circuit-designer to design or update this project's circuit, synchronize its generated artifacts, and validate hardware against the selected board and Arduino code."

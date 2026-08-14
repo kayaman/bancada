@@ -45,6 +45,8 @@ import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
 import BoardsManager from "./components/BoardsManager";
 import FleetManager from "./components/FleetManager";
+import CircuitStatusPanel from "./components/CircuitStatusPanel";
+import CircuitWorkspace from "./components/CircuitWorkspace";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
@@ -69,7 +71,7 @@ import {
 
 type SideGroup = "software" | "hardware";
 type SoftwareTab = "files" | "libraries";
-type HardwareTab = "boards" | "fleet";
+type HardwareTab = "boards" | "fleet" | "circuit";
 
 // Bottom panel sizing: layout preference, so it lives in localStorage (per
 // machine, not part of the app settings file).
@@ -150,6 +152,8 @@ export default function App() {
   const [renamingProject, setRenamingProject] = useState(false);
   /** When true the editor area shows the usage dashboard instead. */
   const [showingUsage, setShowingUsage] = useState(false);
+  /** Hardware manifest editor, hosted centrally because the diagram needs room. */
+  const [showingCircuit, setShowingCircuit] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
 
@@ -159,13 +163,14 @@ export default function App() {
    * call site, which is how the fifth pane would have been forgotten.
    */
   const showPane = (
-    pane: "new" | "duplicate" | "rename" | "usage" | null,
+    pane: "new" | "duplicate" | "rename" | "usage" | "circuit" | null,
     profileMode: ProfileFormMode | null = null,
   ) => {
     setCreatingProject(pane === "new");
     setDuplicatingProject(pane === "duplicate");
     setRenamingProject(pane === "rename");
     setShowingUsage(pane === "usage");
+    setShowingCircuit(pane === "circuit");
     setProfileForm(profileMode);
   };
   // Live mirror of sketchDir for the App-level agent event listeners, which
@@ -176,6 +181,12 @@ export default function App() {
 
   // The toolbar pill's whole world; null while no sketch is open.
   const [gitState, setGitState] = useState<api.RepoState | null>(null);
+  const [circuitValidation, setCircuitValidation] =
+    useState<api.CircuitValidation | null>(null);
+  const [circuitValidationError, setCircuitValidationError] = useState<string | null>(null);
+  const activeProfileFqbn = profile
+    ? (sketchYaml?.profiles?.[profile]?.fqbn ?? null)
+    : null;
   /** Last fleet snapshot, so a port can be named by its nickname rather than
    *  by a device path the kernel hands out in plug order. */
   const [fleet, setFleet] = useState<api.FleetSnapshot | null>(null);
@@ -389,6 +400,37 @@ export default function App() {
   useEffect(() => {
     api.ghAvailable().then(setGhOk).catch(() => setGhOk(false));
   }, []);
+
+  // Keep the toolbar's disabled state aligned with the backend build guard.
+  // The backend re-checks immediately before every build, so this is useful
+  // feedback rather than a security boundary.
+  useEffect(() => {
+    let alive = true;
+    if (!sketchDir) {
+      setCircuitValidation(null);
+      setCircuitValidationError(null);
+      return;
+    }
+    api
+      .circuitValidate(
+        sketchDir,
+        profile ?? undefined,
+        activeProfileFqbn ?? undefined,
+      )
+      .then((validation) => {
+        if (!alive) return;
+        setCircuitValidation(validation);
+        setCircuitValidationError(null);
+      })
+      .catch((error) => {
+        if (!alive) return;
+        setCircuitValidation(null);
+        setCircuitValidationError(`Circuit validation failed: ${String(error)}`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [sketchDir, profile, activeProfileFqbn]);
 
   /** Open a bottom tab: routes to its group, remembers it there, mounts
    *  live panels on first open. Every former setBottomTab caller uses this. */
@@ -2008,6 +2050,12 @@ export default function App() {
         selectedPort={selectedPort}
         fleet={fleet}
         busy={busy}
+        circuitBlockReason={
+          circuitValidationError ??
+          (circuitValidation && !circuitValidation.valid
+            ? "fix and synchronize the project circuit before building"
+            : null)
+        }
         onOpenProject={openSketch}
         onOpenRecent={(dir) => void loadSketch(dir)}
         onNewProject={() => showPane("new")}
@@ -2162,6 +2210,13 @@ export default function App() {
                 >
                   Boards
                 </button>
+                <button
+                  className={sideTab === "circuit" ? "tab active" : "tab"}
+                  onClick={() => setHardwareTab("circuit")}
+                  title="Keep hardware wiring synchronized with Arduino pin definitions"
+                >
+                  Circuit
+                </button>
               </>
             )}
           </div>
@@ -2205,6 +2260,13 @@ export default function App() {
                 openBottomTab("build");
               }}
               notify={notify}
+            />
+          )}
+          {sideTab === "circuit" && (
+            <CircuitStatusPanel
+              validation={circuitValidation}
+              projectOpen={!!sketchDir}
+              onOpen={() => showPane("circuit")}
             />
           )}
         </aside>
@@ -2271,6 +2333,21 @@ export default function App() {
             <UsageDashboard
               onClose={() => setShowingUsage(false)}
               openBottomTab={openBottomTab}
+            />
+          ) : showingCircuit && sketchDir ? (
+            <CircuitWorkspace
+              sketchDir={sketchDir}
+              profile={profile}
+              fqbn={activeProfileFqbn}
+              onClose={() => setShowingCircuit(false)}
+              onFilesChanged={() => {
+                void api.listSketchFiles(sketchDir).then(setFiles).catch(() => {});
+              }}
+              onValidation={(validation) => {
+                setCircuitValidation(validation);
+                setCircuitValidationError(null);
+              }}
+              notify={notify}
             />
           ) : (
             <>

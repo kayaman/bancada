@@ -158,9 +158,19 @@ These belong to the project and are meant to be committed.
 | File | Owner | Notes |
 |---|---|---|
 | `sketch.yaml` | **arduino-cli** | Profiles, platform and library pins. Bancada edits it but does not own the schema — this is what keeps a project buildable without Bancada. |
-| `bancada.yaml` | **Bancada** | The git-hosted library manifest: `{alias, ref, commit, vendor}` per entry. The only schema Bancada owns, and it is additive. |
+| `bancada.yaml` | **Bancada** | The git-hosted library manifest: `{alias, ref, commit, vendor}` per entry. |
+| `hardware/circuit.yaml` | **User / Circuit workspace** | Versioned canonical circuit: exact catalog board, parts, endpoints, voltage/current declarations, protection evidence and firmware symbols. |
+| `src/bancada_circuit_pins.h` | **Circuit generator** | Arduino C++ constants rendered from manifest GPIO symbols. |
+| `hardware/circuit.svg` | **Circuit generator** | Deterministic logical wiring diagram. |
+| `hardware/wiring.md` | **Circuit generator** | Complete connection table and validation summary. |
+| `hardware/bom.csv` | **Circuit generator** | Deterministic component inventory. |
+| `hardware/validation.json` | **Circuit generator** | Manifest digest, generator version, diagnostics and artifact status. |
 | `.bancada/libs/<Name>/` | Bancada | Vendored library bytes, **auto-added to `.gitignore`** — they are re-fetchable from the manifest at their pinned commit. |
 | `.gitignore` | shared | Merged against `GITIGNORE_REQUIRED` rather than overwritten, so user entries survive. |
+
+The five generated circuit artifacts are checked byte-for-byte against a fresh
+render before Verify or Upload. They are committed with the manifest but never
+edited directly.
 
 Two details that matter:
 

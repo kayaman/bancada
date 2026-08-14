@@ -4,10 +4,10 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **95** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **99** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
-| Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
+| Loopback MCP | agent → Rust, HTTP JSON-RPC | 6 tools | the AI Assistant's tools |
 
 Authoritative sources: the `generate_handler![…]` list in
 `src-tauri/src/lib.rs`, and `src/api.ts` — the **only** frontend file importing
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (95)
+## 2. Commands (99)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -94,6 +94,15 @@ at a path that no longer exists. Each failure comes back in `warnings`.
 `gh_restore` re-materialises every manifest entry at its pinned commit,
 collecting per-entry errors rather than aborting on the first.
 
+### Circuit synchronization — 4
+`circuit_catalog` · `circuit_load` · `circuit_save` · `circuit_validate`
+
+The catalog and validation engine live in `core::circuit`. Saving
+`hardware/circuit.yaml` atomically regenerates the C++ pin header, SVG, wiring
+guide, BOM and validation JSON. Loading and validation compare each artifact
+byte-for-byte with a fresh render and compare the manifest board with the
+active profile/FQBN.
+
 ### Build and flash — 2
 `compile_sketch` · `upload_sketch`
 
@@ -105,6 +114,10 @@ A successful `upload_sketch` also calls `tag_flash` before releasing the gate �
 checkpoint, tag, push. So does the agent's MCP `upload`. See
 [data-flows](data-flows.md) for the trace, and note that **nothing in that path
 can fail the flash**: every step reports to `build://line` and returns.
+
+Before taking the gate, both paths run the same circuit build guard as the MCP
+tools. No manifest means no change in behavior; a present manifest must parse,
+validate and have current generated artifacts.
 
 ### Git and GitHub — 9
 `git_state` · `git_commit` · `git_init` · `git_init_here` ·
@@ -274,7 +287,7 @@ quietly rather than erroring.
 Not a Tauri mechanism. The AI Assistant's `claude` child reaches back into
 Bancada over HTTP JSON-RPC on `127.0.0.1:<ephemeral>/mcp`, bearer-authenticated.
 
-Four tools (`core/src/mcp.rs`):
+Six tools (`core/src/mcp.rs`):
 
 | Tool | Does |
 |---|---|
@@ -282,6 +295,8 @@ Four tools (`core/src/mcp.rs`):
 | `upload` | flash it — **no port argument**; uses the UI-selected port and the session-frozen profile, and is refused unless "Allow uploads" is armed |
 | `serial_read` | read from the rolling `SerialRing` since this session's cursor (`wait_s` clamped to 10) |
 | `serial_send` | write a line to the monitor |
+| `circuit_status` | validate the project circuit without writing |
+| `circuit_sync` | regenerate circuit artifacts and return validation |
 
 Listener discipline (`mcp_listener_loop`), each rule the result of an observed
 failure:

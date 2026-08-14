@@ -100,6 +100,37 @@ pub fn upload_tool_def() -> ToolDef {
     }
 }
 
+/// Inspect whether the project circuit is electrically valid and generated
+/// artifacts still match its manifest. Projects without a manifest report
+/// that circuit management is not enabled.
+pub fn circuit_status_tool_def() -> ToolDef {
+    ToolDef {
+        name: "circuit_status".to_string(),
+        description: "Validate hardware/circuit.yaml against the active board, firmware pin usage, and every generated hardware artifact. Call this before changing pin assignments and after hardware-related code edits. Takes no arguments and does not write files."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Regenerate the derived header, SVG, wiring guide, BOM and validation
+/// report from the current circuit manifest.
+pub fn circuit_sync_tool_def() -> ToolDef {
+    ToolDef {
+        name: "circuit_sync".to_string(),
+        description: "Regenerate all circuit artifacts from hardware/circuit.yaml, then validate hardware and firmware synchronization. Use after editing the manifest; never hand-edit generated files. Takes no arguments."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
 /// The `serial_read` tool definition: read new serial-monitor output.
 ///
 /// Reads everything this session has not yet seen from the monitor's ring
@@ -539,21 +570,20 @@ mod tests {
     fn serial_send_tool_requires_the_data_line() {
         let def = serial_send_tool_def();
         assert_eq!(def.name, "serial_send");
-        assert_eq!(
-            def.input_schema["properties"]["data"]["type"],
-            "string"
-        );
+        assert_eq!(def.input_schema["properties"]["data"]["type"], "string");
         assert_eq!(def.input_schema["required"], serde_json::json!(["data"]));
         assert_eq!(def.input_schema["additionalProperties"], false);
     }
 
     #[test]
-    fn tools_list_advertises_all_four_tools() {
+    fn tools_list_advertises_all_tools() {
         let all = vec![
             verify_tool_def(),
             upload_tool_def(),
             serial_read_tool_def(),
             serial_send_tool_def(),
+            circuit_status_tool_def(),
+            circuit_sync_tool_def(),
         ];
         let body = r#"{"jsonrpc":"2.0","id":9,"method":"tools/list"}"#;
         match handle_request(body, &all) {
@@ -565,7 +595,17 @@ mod tests {
                     .iter()
                     .map(|t| t["name"].as_str().unwrap())
                     .collect();
-                assert_eq!(names, ["verify", "upload", "serial_read", "serial_send"]);
+                assert_eq!(
+                    names,
+                    [
+                        "verify",
+                        "upload",
+                        "serial_read",
+                        "serial_send",
+                        "circuit_status",
+                        "circuit_sync"
+                    ]
+                );
             }
             other => panic!("expected Json, got {other:?}"),
         }

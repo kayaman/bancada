@@ -23,6 +23,7 @@ interface Props {
   /** Last fleet snapshot, so ports are named by nickname where one exists. */
   fleet: FleetSnapshot | null;
   busy: boolean;
+  circuitBlockReason: string | null;
   gitState: RepoState | null;
   ghAvailable: boolean;
   onOpenProject: () => void;
@@ -60,8 +61,8 @@ export default function Toolbar(props: Props) {
     selectedPort: props.selectedPort,
     busy: props.busy,
   };
-  const verifyReason = buildBlockedReason("verify", build);
-  const flashReason = buildBlockedReason("flash", build);
+  const verifyReason = buildBlockedReason("verify", build) ?? props.circuitBlockReason;
+  const flashReason = buildBlockedReason("flash", build) ?? props.circuitBlockReason;
   const retargetReason = retargetBlockedReason(profiles, props.profile);
   // tauri.conf.json is the single source of truth for the version; outside a
   // Tauri shell (plain vite in a browser) the call rejects and the span

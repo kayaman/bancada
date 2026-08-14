@@ -17,12 +17,12 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  95 invoke commands · 7 events · 3 Channels
+          src/api.ts:  99 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
 ├────────────────────────────────────────────────────────────────────┤
-│ core (bancada-core) — 22 modules of pure Rust, no UI deps:         │
+│ core (bancada-core) — 23 modules of pure Rust, no UI deps:         │
 │   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
       subprocesses: arduino-cli · esptool · git · gh · claude
@@ -186,7 +186,11 @@ scaffolded library, a fetched library and a newly created project actually
   history included. Each board carries a nickname you set, its chip type, the
   FQBNs it has been built for, and when it was first and last seen
 - Sidebar split into **Software** (files, libraries) and **Hardware** (boards,
-  fleet) groups, drag-resizable and collapsible to a rail
+  fleet, circuit) groups, drag-resizable and collapsible to a rail
+- **Circuit workspace** — guided ESP32 board/component/wire editing backed by
+  `hardware/circuit.yaml`; generates a C++ pin header, SVG diagram, wiring
+  guide, BOM and validation report. Verify and Flash refuse stale, unsafe or
+  profile-incompatible circuit data
 - **Editor tabs** — multiple files open at once, dirty markers, and a
   close-again-to-discard step so unsaved work is never dropped by one click
 - **Git pill** — repository state at a glance in the toolbar, with commit,
@@ -256,7 +260,7 @@ clears the transcript.
 **What it can and can't do** — the embedded session's built-in tools are
 narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
 (via `--tools`, which genuinely removes tools from the CLI, unlike
-`--disallowedTools` alone), plus four bancada MCP tools:
+`--disallowedTools` alone), plus six bancada MCP tools:
 
 - **`verify`** — the same compile path as the **Verify** button; compiles
   only, never flashes.
@@ -273,6 +277,10 @@ narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
   the port is free. The Monitor tab stays in sync.
 - **`serial_send`** — types one line to the board through the running
   monitor, exactly like the Monitor tab's send box.
+- **`circuit_status`** — checks the project circuit, active FQBN, generated
+  artifacts and Arduino pin usage without writing.
+- **`circuit_sync`** — regenerates the project pin header, SVG, wiring guide,
+  BOM and validation report from `hardware/circuit.yaml`.
 
 It still cannot run shell commands (`Bash` stays out of the tool set —
 capabilities are scoped by what the tools can express, not by prompt
@@ -330,7 +338,7 @@ and everything that is *not* enforced — is documented in
 
 ```
 bancada/
-├── core/            # bancada-core: 22 modules of pure Rust (no Tauri, unit-tested)
+├── core/            # bancada-core: 23 modules of pure Rust (no Tauri, unit-tested)
 ├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
 ├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope

@@ -20,7 +20,7 @@ lines of TypeScript.
 │   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/               │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  src/api.ts — the ONLY IPC module
-              95 invoke commands · 7 events · 3 Channels
+              99 invoke commands · 7 events · 3 Channels
 ┌───────────────────────────────┴───────────────────────────────────────┐
 │ src-tauri  (crate `bancada`)                                          │
 │   lib.rs — commands, AppState, threads, event emission                │
@@ -29,7 +29,7 @@ lines of TypeScript.
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │
 ┌───────────────────────────────┴───────────────────────────────────────┐
-│ core  (crate `bancada-core`) — 22 modules, no Tauri, no UI            │
+│ core  (crate `bancada-core`) — 23 modules, no Tauri, no UI            │
 │   parsers · validators · policy · wire formats · argv builders        │
 │   unit-testable headlessly; reusable from a CLI or another frontend   │
 └───────────────────────────────┬───────────────────────────────────────┘
@@ -65,6 +65,7 @@ Read in this order the first time.
 
 | Doc | Answers |
 |---|---|
+| [current-state diagram and review](current-state-diagram.md) | How every layer, datastore, circuit artifact, and external integration connects; strengths and current risks. |
 | [system-context](system-context.md) | What does Bancada talk to, and why does it shell out to everything? |
 | [conventions](conventions.md) | How does this project work — layering, testing, commits, releases? |
 | [backend-modules](backend-modules.md) | What are the 22 core modules, and what does the Tauri layer add? |
@@ -113,7 +114,7 @@ on. No refactor is proposed here.
 
 ### `src-tauri/src/lib.rs` is 6,658 lines
 
-All 95 commands live in one module. The seams are already visible — the handler
+All 99 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
 subsystems (scope, agent + MCP, mqtt, device-proxy, git, fleet, chat + usage),
 each with its own slot in `AppState` and its own threads.

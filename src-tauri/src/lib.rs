@@ -35,8 +35,8 @@
 //! session, driven over stdio stream-json, with four detached threads —
 //! stdin writer (fed by an mpsc channel, so the `agent` mutex is never held
 //! across a pipe write), stdout reader, stderr drain, and a loopback
-//! `tiny_http` MCP listener serving the `verify`, `upload`, `serial_read`
-//! and `serial_send` tools. The listener gets owned clones at spawn time and
+//! `tiny_http` MCP listener serving the build, serial and circuit tools. The
+//! listener gets owned clones at spawn time and
 //! never locks `agent` (it MAY lock the `serial` owner slot — it is never
 //! joined under it); shutdown breaks its blocking `recv()` with
 //! `Server::unblock()`, which no atomic flag could do (the unblock is
@@ -149,6 +149,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bancada_core::boards::{self, CoreView};
+use bancada_core::circuit::{self, CircuitManifest, CircuitSnapshot, ValidationReport};
 use bancada_core::cli::ArduinoCli;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
@@ -1209,6 +1210,84 @@ async fn gh_restore(sketch_dir: String, profile: Option<String>) -> Result<GhRes
 
 // ---------- build & flash ----------
 
+/// Resolve the board target exactly as the build will: an explicit FQBN wins,
+/// then the named profile, then sketch.yaml's default profile. The circuit
+/// validator compares only the target portion, so board options may differ.
+fn active_fqbn(
+    sketch_dir: &str,
+    profile: Option<&str>,
+    fqbn: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(fqbn) = fqbn.filter(|value| !value.trim().is_empty()) {
+        return Ok(Some(fqbn.to_string()));
+    }
+    let project = SketchProject::open(sketch_dir).map_err(err_str)?;
+    let yaml = project.load_yaml().map_err(err_str)?;
+    let profile = profile.or(yaml.default_profile.as_deref());
+    Ok(profile.and_then(|name| yaml.profiles.get(name).map(|p| p.fqbn.clone())))
+}
+
+fn circuit_guard(
+    sketch_dir: &str,
+    profile: Option<&str>,
+    fqbn: Option<&str>,
+) -> Result<(), String> {
+    if !circuit::manifest_exists(Path::new(sketch_dir)) {
+        return Ok(());
+    }
+    let selected = active_fqbn(sketch_dir, profile, fqbn)?;
+    circuit::require_build_ready(Path::new(sketch_dir), selected.as_deref()).map_err(err_str)
+}
+
+#[tauri::command]
+fn circuit_catalog() -> circuit::CircuitCatalog {
+    circuit::catalog()
+}
+
+#[tauri::command]
+async fn circuit_load(
+    sketch_dir: String,
+    profile: Option<String>,
+    fqbn: Option<String>,
+) -> Result<Option<CircuitSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = active_fqbn(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
+        circuit::load_project(Path::new(&sketch_dir), selected.as_deref()).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn circuit_save(
+    sketch_dir: String,
+    profile: Option<String>,
+    fqbn: Option<String>,
+    manifest: CircuitManifest,
+) -> Result<CircuitSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = active_fqbn(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
+        circuit::save_project(Path::new(&sketch_dir), &manifest, selected.as_deref())
+            .map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[tauri::command]
+async fn circuit_validate(
+    sketch_dir: String,
+    profile: Option<String>,
+    fqbn: Option<String>,
+) -> Result<Option<ValidationReport>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let selected = active_fqbn(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
+        circuit::validate_project(Path::new(&sketch_dir), selected.as_deref()).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
 #[tauri::command]
 async fn compile_sketch(
     app: AppHandle,
@@ -1220,6 +1299,7 @@ async fn compile_sketch(
     let cli = state.cli.clone();
     let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        circuit_guard(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
         let _gate = try_build_gate(&gate)?;
         let result = cli
             .compile(
@@ -1250,6 +1330,7 @@ async fn upload_sketch(
     let cli = state.cli.clone();
     let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        circuit_guard(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
         let _gate = try_build_gate(&gate)?;
         let emit_line = |line: OutputLine| {
             let _ = app.emit("build://line", &line);
@@ -1268,9 +1349,7 @@ async fn upload_sketch(
         // it until they are written.
         if result.success {
             let fleet_file = fleet_path(&app).ok();
-            let board = fleet_file
-                .as_deref()
-                .and_then(|f| board_on_port(f, &port));
+            let board = fleet_file.as_deref().and_then(|f| board_on_port(f, &port));
             let flashed = tag_flash(
                 &sketch_dir,
                 profile.as_deref(),
@@ -1282,8 +1361,7 @@ async fn upload_sketch(
             // Only when a tag was actually written: `None` covers the scope's
             // $TMPDIR firmware and every other case where there is nothing
             // true to record.
-            if let (Some(f), Some((id, _)), Some(info)) =
-                (fleet_file.as_deref(), &board, &flashed)
+            if let (Some(f), Some((id, _)), Some(info)) = (fleet_file.as_deref(), &board, &flashed)
             {
                 note_flash_on_board(f, id, &sketch_dir, info);
             }
@@ -1460,10 +1538,7 @@ enum ProjectDrift {
 }
 
 #[tauri::command]
-async fn git_project_drift(
-    sketch_dir: String,
-    commit: String,
-) -> Result<ProjectDrift, String> {
+async fn git_project_drift(sketch_dir: String, commit: String) -> Result<ProjectDrift, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let dir = Path::new(&sketch_dir);
         if !dir.is_dir() {
@@ -1549,9 +1624,7 @@ fn tag_flash(
         }
     };
 
-    let message = format!(
-        "{suggested}\n\nCheckpointed automatically before flashing to {port}."
-    );
+    let message = format!("{suggested}\n\nCheckpointed automatically before flashing to {port}.");
     match git::commit(dir, &message) {
         Ok(git::CommitOutcome::Committed) => {}
         Ok(git::CommitOutcome::NothingToCommit) => match git::flash_tags_at_head(dir) {
@@ -1602,7 +1675,9 @@ fn tag_flash(
     let commit = match git::head_sha(dir) {
         Ok(sha) => sha,
         Err(e) => {
-            note(format!("{name} written, but its commit could not be read — {e}"));
+            note(format!(
+                "{name} written, but its commit could not be read — {e}"
+            ));
             return None;
         }
     };
@@ -2200,8 +2275,7 @@ fn chat_append(
     let usage = load_usage(&app)
         .map_err(|e| eprintln!("usage record not loaded: {e}"))
         .ok();
-    let created =
-        bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
+    let created = bancada_core::chatlog::append_line(&root, &key, &file, &line).map_err(err_str)?;
     // A new chat is the moment to bound the directory. Prune is silent and
     // best-effort, so a failed cleanup can never cost the append. The usage
     // record is why pruning is safe: totals were banked at append time.
@@ -2296,9 +2370,7 @@ fn load_usage(app: &AppHandle) -> Result<(PathBuf, bancada_core::usage::UsageSto
 }
 
 #[tauri::command]
-fn usage_overview(
-    app: AppHandle,
-) -> Result<Vec<bancada_core::usage::ProjectUsage>, String> {
+fn usage_overview(app: AppHandle) -> Result<Vec<bancada_core::usage::ProjectUsage>, String> {
     let (_path, store) = load_usage(&app)?;
     Ok(store.overview())
 }
@@ -2896,8 +2968,8 @@ fn dev_proxy_handle(
                     message: message.clone(),
                 },
             );
-            let _ = request
-                .respond(tiny_http::Response::from_string(message).with_status_code(502));
+            let _ =
+                request.respond(tiny_http::Response::from_string(message).with_status_code(502));
             return;
         }
     };
@@ -3011,7 +3083,13 @@ fn device_browse_start(
     let server = Arc::new(server);
     let target = Arc::new(Mutex::new(target));
 
-    let _ = db_send(&on_event, &DeviceBrowseEvent::Stage { stage: "listening", port });
+    let _ = db_send(
+        &on_event,
+        &DeviceBrowseEvent::Stage {
+            stage: "listening",
+            port,
+        },
+    );
 
     let loop_server = server.clone();
     let loop_target = target.clone();
@@ -3478,6 +3556,8 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
         mcp::upload_tool_def(),
         mcp::serial_read_tool_def(),
         mcp::serial_send_tool_def(),
+        mcp::circuit_status_tool_def(),
+        mcp::circuit_sync_tool_def(),
     ];
 
     for mut request in server.incoming_requests() {
@@ -3550,6 +3630,8 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
                     // monitor's reader threads must own an emitter clone.
                     "serial_read" => run_serial_read(&ctx, &emit, &args),
                     "serial_send" => run_serial_send(&ctx, &args),
+                    "circuit_status" => run_circuit_status(&ctx),
+                    "circuit_sync" => run_circuit_sync(&ctx),
                     // Unreachable via `handle_request`, which rejects tools
                     // outside `tools` — belt and braces.
                     _ => (format!("unknown tool: {name}"), true),
@@ -3604,6 +3686,11 @@ fn run_verify(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
     // that blocks every other build in the app for the length of a compile.
     if ctx.is_cancelled() {
         return (VERIFY_CANCELLED.to_string(), true);
+    }
+
+    if let Err(error) = circuit_guard(&ctx.sketch_dir, ctx.profile.as_deref(), ctx.fqbn.as_deref())
+    {
+        return (error, true);
     }
 
     // Shared with compile_sketch/upload_sketch: an agent build must not race
@@ -3718,6 +3805,11 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
         return (NO_SELECTED_TARGET.to_string(), true);
     };
 
+    if let Err(error) = circuit_guard(&ctx.sketch_dir, ctx.profile.as_deref(), ctx.fqbn.as_deref())
+    {
+        return (error, true);
+    }
+
     // Same gate as compile_sketch/upload_sketch/run_verify (R5).
     let _gate = match try_build_gate(&ctx.build_gate) {
         Ok(guard) => guard,
@@ -3804,13 +3896,53 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
     }
 }
 
+fn run_circuit_status(ctx: &McpToolCtx) -> (String, bool) {
+    if ctx.is_cancelled() {
+        return (TOOL_CANCELLED.to_string(), true);
+    }
+    let selected = match active_fqbn(&ctx.sketch_dir, ctx.profile.as_deref(), ctx.fqbn.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return (error, true),
+    };
+    match circuit::validate_project(Path::new(&ctx.sketch_dir), selected.as_deref()) {
+        Ok(None) => ("No hardware/circuit.yaml is present; circuit synchronization is not enabled for this project.".into(), false),
+        Ok(Some(report)) => (
+            serde_json::to_string_pretty(&report).unwrap_or_else(|error| error.to_string()),
+            false,
+        ),
+        Err(error) => (error.to_string(), true),
+    }
+}
+
+fn run_circuit_sync(ctx: &McpToolCtx) -> (String, bool) {
+    if ctx.is_cancelled() {
+        return (TOOL_CANCELLED.to_string(), true);
+    }
+    let selected = match active_fqbn(&ctx.sketch_dir, ctx.profile.as_deref(), ctx.fqbn.as_deref()) {
+        Ok(value) => value,
+        Err(error) => return (error, true),
+    };
+    match circuit::sync_project(Path::new(&ctx.sketch_dir), selected.as_deref()) {
+        Ok(snapshot) => (
+            serde_json::to_string_pretty(&snapshot.validation)
+                .unwrap_or_else(|error| error.to_string()),
+            false,
+        ),
+        Err(error) => (error.to_string(), true),
+    }
+}
+
 /// The `serial_read` tool: hand the agent every monitor line it has not
 /// seen, auto-starting the monitor (UI-selected port/baud) when the port is
 /// free. The wait loop polls only the ring — never while holding `serial` —
 /// and re-checks the cancel flag every tick, so a stopped session lets the
 /// listener drain within one tick (the tiny_http unblock is sticky; see the
 /// module doc).
-fn run_serial_read(ctx: &McpToolCtx, emit: &Arc<EmitFn>, args: &serde_json::Value) -> (String, bool) {
+fn run_serial_read(
+    ctx: &McpToolCtx,
+    emit: &Arc<EmitFn>,
+    args: &serde_json::Value,
+) -> (String, bool) {
     let wait_s = args
         .get("wait_s")
         .and_then(|v| v.as_u64())
@@ -3852,9 +3984,7 @@ fn run_serial_read(ctx: &McpToolCtx, emit: &Arc<EmitFn>, args: &serde_json::Valu
                             serde_json::json!({ "port": target.port, "baud": target.baud }),
                         );
                     }
-                    Err(e) => {
-                        return (format!("could not start the serial monitor: {e}"), true)
-                    }
+                    Err(e) => return (format!("could not start the serial monitor: {e}"), true),
                 }
             }
         }
@@ -3941,7 +4071,11 @@ fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&st
          successful upload, call mcp__bancada__serial_read to restart the \
          serial monitor and watch the boot output; mcp__bancada__serial_read \
          also reads any new monitor output, and mcp__bancada__serial_send \
-         types a line to the board.",
+         types a line to the board. If hardware/circuit.yaml exists, call \
+         mcp__bancada__circuit_status before changing pin assignments, edit \
+         the manifest rather than generated circuit files, and call \
+         mcp__bancada__circuit_sync after manifest changes; Verify and Upload \
+         will refuse stale, unsafe, or firmware-incompatible circuits.",
     );
     out
 }
@@ -4619,6 +4753,10 @@ pub fn run() {
             gh_manifest,
             gh_add_library,
             gh_restore,
+            circuit_catalog,
+            circuit_load,
+            circuit_save,
+            circuit_validate,
             compile_sketch,
             upload_sketch,
             git_state,
@@ -4753,8 +4891,11 @@ mod tests {
                 let resp = tiny_http::Response::from_string(body)
                     .with_status_code(status)
                     .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                            .unwrap(),
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
                     );
                 let _ = req.respond(resp);
             }
@@ -4762,7 +4903,10 @@ mod tests {
         (server, port, join)
     }
 
-    fn collecting_channel() -> (Channel<InvokeResponseBody>, Arc<Mutex<Vec<serde_json::Value>>>) {
+    fn collecting_channel() -> (
+        Channel<InvokeResponseBody>,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+    ) {
         let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         let ch = Channel::new(move |body| {
@@ -4840,7 +4984,10 @@ mod tests {
         assert_eq!(first["status"], 200);
         assert_eq!(first["content_type"], "application/json");
         assert_eq!(first["binary"], false);
-        assert!(first["preview"].as_str().unwrap().contains("saw_connection"));
+        assert!(first["preview"]
+            .as_str()
+            .unwrap()
+            .contains("saw_connection"));
 
         device.unblock();
         let _ = device_join.join();
@@ -4903,14 +5050,20 @@ mod tests {
         assert_eq!(v["status"], 200);
         assert_eq!(v["content_type"], "application/json");
 
-        let stage = DeviceBrowseEvent::Stage { stage: "listening", port: 4242 };
+        let stage = DeviceBrowseEvent::Stage {
+            stage: "listening",
+            port: 4242,
+        };
         let v: serde_json::Value = serde_json::to_value(&stage).unwrap();
         assert_eq!(v["type"], "stage");
         assert_eq!(v["port"], 4242);
 
         let closed = DeviceBrowseEvent::Closed {};
         assert_eq!(serde_json::to_value(&closed).unwrap()["type"], "closed");
-        let err = DeviceBrowseEvent::Error { path: "/x".into(), message: "boom".into() };
+        let err = DeviceBrowseEvent::Error {
+            path: "/x".into(),
+            message: "boom".into(),
+        };
         assert_eq!(serde_json::to_value(&err).unwrap()["type"], "error");
     }
 
@@ -5120,7 +5273,10 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap().join("loose");
         std::fs::create_dir_all(&dir).unwrap();
         let state = bancada_core::git::repo_state(&dir).unwrap();
-        assert!(matches!(state, bancada_core::git::RepoState::NoGit), "got {state:?}");
+        assert!(
+            matches!(state, bancada_core::git::RepoState::NoGit),
+            "got {state:?}"
+        );
     }
 
     /// The hardware-facing parts of a listener's context, injectable per
@@ -5180,7 +5336,17 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["verify", "upload", "serial_read", "serial_send"]);
+        assert_eq!(
+            names,
+            [
+                "verify",
+                "upload",
+                "serial_read",
+                "serial_send",
+                "circuit_status",
+                "circuit_sync"
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -5409,7 +5575,11 @@ mod tests {
         assert_eq!(seen.len(), 3, "capture stopped early: {seen:?}");
         assert_eq!(seen[0], "before");
         assert_eq!(seen[2], "after", "lines after the bad byte were lost");
-        assert!(seen[1].contains('\u{fffd}'), "expected lossy decode: {:?}", seen[1]);
+        assert!(
+            seen[1].contains('\u{fffd}'),
+            "expected lossy decode: {:?}",
+            seen[1]
+        );
     }
 
     #[test]

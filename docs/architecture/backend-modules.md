@@ -5,12 +5,12 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ src-tauri  (crate `bancada`, lib `bancada_lib`)              │
-│   lib.rs — 95 commands, AppState, threads, events, MCP       │
+│   lib.rs — 99 commands, AppState, threads, events, MCP       │
 │   Owns: processes · threads · mutexes · files · the window   │
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
 ┌───────────────────────────┴──────────────────────────────────┐
-│ core  (crate `bancada-core`) — 22 modules, ~16.0k lines      │
+│ core  (crate `bancada-core`) — 23 modules, no UI dependencies│
 │   Pure of Tauri. Parsers, validators, policy, wire formats.  │
 │   Owns: no long-lived state, no knowledge that a UI exists   │
 └──────────────────────────────────────────────────────────────┘
@@ -20,7 +20,7 @@ The rule and its rationale are in [conventions §1](conventions.md#1-the-layerin
 
 ---
 
-## 1. `bancada-core` — the 22 modules
+## 1. `bancada-core` — the 23 modules
 
 `core/src/lib.rs` is 61 lines: the module list, one `Error` enum, one `Result`
 alias. Every error in the crate is one of six variants — `Io`, `ToolFailed`,
@@ -40,10 +40,11 @@ Tauri layer is uniformly `.map_err(err_str)`.
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `sketch.rs` | 1019 | `SketchYaml` / `Profile` / `PlatformDep` / `LibraryDep`, and `SketchProject` — the sketch on disk. File walk (`SKIP_DIRS`), profile create/add/retarget, library and platform pinning. **The only file schema Bancada itself owns.** |
+| `sketch.rs` | 1019 | `SketchYaml` / `Profile` / `PlatformDep` / `LibraryDep`, and `SketchProject` — the sketch on disk. File walk (`SKIP_DIRS`), profile create/add/retarget, library and platform pinning. The schema belongs to arduino-cli and remains interoperable. |
 | `project.rs` | 852 | Project policy: name validation, starter templates (`TEMPLATES`), profile naming from an FQBN, board-required libraries, default parent directory — **and `rename_project`**, which moves the folder and its main `.ino` together and rolls the `.ino` back if the directory move fails. |
 | `clone.rs` | 1169 | Copy a project under a new name — **"Duplicate" in the UI**; the module keeps the older name. Staging directory + atomic rename, merged `.gitignore` written *into the staging dir* so credential ignore rules exist before any possible commit, best-effort `git init`. Skips `.bancada` and `.claude`. Its `retitle_main_ino` and `rewrite_sketch_yaml` are `pub(crate)` and shared with `project::rename_project`, so their warnings name no caller. |
 | `files.rs` | 389 | Explorer mutations: `validate_rel_path`, protected-path checks, collision and descendant guards. **Delete goes to the OS trash** (`trash::delete`), never `fs::remove`. |
+| `circuit.rs` | current | Versioned `hardware/circuit.yaml` model, sourced ESP32 board catalog, electrical and firmware validation, deterministic pin-header/SVG/wiring/BOM/report generation, stale-artifact checks, and the shared build guard. Reused by Tauri, MCP and the `bancada-circuit` CLI. |
 
 ### Libraries
 
@@ -73,7 +74,7 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | `scope.rs` | 467 | The oscilloscope protocol: `crc16_ccitt`, `FrameScanner`, banner parsing, control-line command builders, and the host→frontend envelope encoders. Contract: [`docs/scope-architecture.md`](../scope-architecture.md) §1–2. |
 | `mqtt.rs` | 518 | Broker URL parsing and password redaction, topic matching, the `MqttEvent` channel contract (`#[serde(tag = "ev")]`), and the `mqtt.json` config model. |
 | `devproxy.rs` | 215 | Device-browser proxy policy: `parse_target` (**refuses `https`**), the hop-by-hop header set, body previews. |
-| `mcp.rs` | 762 | The MCP JSON-RPC server logic and the four tool schemas (`verify`, `upload`, `serial_read`, `serial_send`), plus the bearer check. Pure request→reply; the socket lives in `src-tauri`. |
+| `mcp.rs` | current | The MCP JSON-RPC server logic and six tool schemas (`verify`, `upload`, `serial_read`, `serial_send`, `circuit_status`, `circuit_sync`), plus the bearer check. Pure request→reply; the socket lives in `src-tauri`. |
 
 ### Agent
 
@@ -105,7 +106,7 @@ event taxonomy, the agent safety model, the build gate and the MQTT contract.
 
 ### What it owns
 
-- **The 95 commands** — see [ipc-contract](ipc-contract.md).
+- **The 99 commands** — see [ipc-contract](ipc-contract.md).
 - **`AppState`** — five independent session slots plus the build gate. See
   [runtime-model](runtime-model.md).
 - **Every thread** — hotplug watcher, monitor readers, scope reader, MQTT

@@ -117,7 +117,7 @@ signal at all**.
 ```rust
 BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"
 
-EXPECTED_TOOLS = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send}
+EXPECTED_TOOLS = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send, circuit_status, circuit_sync}
 ```
 
 **`--tools` is a boundary. `--disallowedTools` is not.** The latter is a
@@ -142,6 +142,9 @@ recorded, not accidental.
 - It is refused unless the panel's **"Allow uploads"** switch is armed.
 - `serial_read` / `serial_send` drive the app's own monitor under the same
   single-owner discipline as the UI.
+- `circuit_status` is read-only; `circuit_sync` can only regenerate the fixed
+  project-local artifact set from `hardware/circuit.yaml`. Verify and Upload
+  independently apply the same circuit guard.
 - None of them can touch the scope.
 
 ---

@@ -161,6 +161,111 @@ export interface RunResult {
   exit_code: number;
 }
 
+// ---------- project circuit ----------
+
+export interface BoardSelection {
+  catalog_id: string;
+  fqbn: string;
+}
+
+export interface CircuitPin {
+  id: string;
+  label: string;
+}
+
+export interface CircuitComponent {
+  id: string;
+  label: string;
+  kind: string;
+  part_number?: string | null;
+  voltage_v?: number | null;
+  current_ma?: number | null;
+  verified: boolean;
+  pins: CircuitPin[];
+  properties: Record<string, string>;
+}
+
+export interface CircuitEndpoint {
+  target: string;
+  pin: string;
+}
+
+export interface CircuitConnection {
+  id: string;
+  from: CircuitEndpoint;
+  to: CircuitEndpoint;
+  role: string;
+  voltage_v?: number | null;
+  firmware_symbol?: string | null;
+  notes?: string | null;
+}
+
+export interface CircuitManifest {
+  version: number;
+  name: string;
+  board: BoardSelection;
+  components: CircuitComponent[];
+  connections: CircuitConnection[];
+  notes: Record<string, string>;
+}
+
+export interface BoardPin {
+  id: string;
+  label: string;
+  gpio?: number | null;
+  capabilities: string[];
+  strapping: boolean;
+  reserved: boolean;
+}
+
+export interface CircuitBoardProfile {
+  id: string;
+  label: string;
+  fqbn: string;
+  logic_voltage_v: number;
+  max_3v3_ma: number;
+  source_url: string;
+  pins: BoardPin[];
+}
+
+export interface ComponentTemplate {
+  kind: string;
+  label: string;
+  pins: string[];
+  safety_hint: string;
+}
+
+export interface CircuitCatalog {
+  version: number;
+  boards: CircuitBoardProfile[];
+  component_kinds: ComponentTemplate[];
+}
+
+export interface CircuitDiagnostic {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  subject?: string | null;
+}
+
+export interface CircuitValidation {
+  schema_version: number;
+  generator_version: string;
+  manifest_digest: string;
+  valid: boolean;
+  diagnostics: CircuitDiagnostic[];
+  artifacts: { path: string; current: boolean }[];
+}
+
+export interface CircuitSnapshot {
+  manifest: CircuitManifest;
+  validation: CircuitValidation;
+  svg: string;
+  wiring_markdown: string;
+  bom_csv: string;
+  generated_header: string;
+}
+
 export interface ChipInfo {
   mac: string;
   chip_type?: string;
@@ -603,6 +708,40 @@ export const uploadSketch = (
   invoke<RunResult>("upload_sketch", {
     sketchDir,
     port,
+    profile: profile ?? null,
+    fqbn: fqbn ?? null,
+  });
+
+export const circuitCatalog = () => invoke<CircuitCatalog>("circuit_catalog");
+export const circuitLoad = (
+  sketchDir: string,
+  profile?: string,
+  fqbn?: string,
+) =>
+  invoke<CircuitSnapshot | null>("circuit_load", {
+    sketchDir,
+    profile: profile ?? null,
+    fqbn: fqbn ?? null,
+  });
+export const circuitSave = (
+  sketchDir: string,
+  manifest: CircuitManifest,
+  profile?: string,
+  fqbn?: string,
+) =>
+  invoke<CircuitSnapshot>("circuit_save", {
+    sketchDir,
+    manifest,
+    profile: profile ?? null,
+    fqbn: fqbn ?? null,
+  });
+export const circuitValidate = (
+  sketchDir: string,
+  profile?: string,
+  fqbn?: string,
+) =>
+  invoke<CircuitValidation | null>("circuit_validate", {
+    sketchDir,
     profile: profile ?? null,
     fqbn: fqbn ?? null,
   });

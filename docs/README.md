@@ -17,10 +17,11 @@ Start with its index, or jump straight to
 end to end.
 
 - [README](architecture/README.md) — layer map, "where does my code go?", known tensions
+- [current-state diagram and review](architecture/current-state-diagram.md) — elaborate runtime map, external integrations, circuit synchronization, and findings
 - [system-context](architecture/system-context.md) — external engines, network peers, constraints
 - [conventions](architecture/conventions.md) — layering, testing, commits, releases
 - [backend-modules](architecture/backend-modules.md) — the 22 core modules and the Tauri layer
-- [ipc-contract](architecture/ipc-contract.md) — 95 commands, 7 events, 3 channels, the MCP surface
+- [ipc-contract](architecture/ipc-contract.md) — 99 commands, 7 events, 3 channels, the MCP surface
 - [frontend](architecture/frontend.md) — shell, state tiers, the pure-logic tier
 - [runtime-model](architecture/runtime-model.md) — `AppState`, locks, threads, shutdown
 - [persistence](architecture/persistence.md) — every file Bancada writes

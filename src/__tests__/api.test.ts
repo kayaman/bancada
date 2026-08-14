@@ -534,6 +534,37 @@ describe("build, upload and monitor", () => {
     ]);
   });
 
+  it("circuit wrappers keep the profile/FQBN context and manifest", async () => {
+    await api.circuitCatalog();
+    expect(invokeMock.mock.calls.at(-1)).toEqual(["circuit_catalog"]);
+
+    await api.circuitLoad("/s", "c6");
+    expect(called()).toEqual([
+      "circuit_load",
+      { sketchDir: "/s", profile: "c6", fqbn: null },
+    ]);
+
+    const manifest: api.CircuitManifest = {
+      version: 1,
+      name: "test",
+      board: { catalog_id: "esp32-c6-devkitc-1", fqbn: "esp32:esp32:esp32c6" },
+      components: [],
+      connections: [],
+      notes: {},
+    };
+    await api.circuitSave("/s", manifest, undefined, "esp32:esp32:esp32c6");
+    expect(called()).toEqual([
+      "circuit_save",
+      { sketchDir: "/s", manifest, profile: null, fqbn: "esp32:esp32:esp32c6" },
+    ]);
+
+    await api.circuitValidate("/s");
+    expect(called()).toEqual([
+      "circuit_validate",
+      { sketchDir: "/s", profile: null, fqbn: null },
+    ]);
+  });
+
   it("startMonitor and monitorSend pass their payloads", async () => {
     await api.startMonitor("/dev/ttyACM0", 115200);
     expect(called()).toEqual([
