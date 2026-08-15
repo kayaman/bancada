@@ -11,21 +11,24 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 - **esptool** — ESP-specific utilities (read MAC, chip info)
 - **git** / **gh** — project version control and one-button repo creation
 - **claude** — the AI Assistant panel
+- **Mouser Search API** — optional live component lookup for stock, lifecycle,
+  pricing, and datasheet links in the Circuit workspace
 
 ```
 ┌─────────────────────────── Tauri window ───────────────────────────┐
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  99 invoke commands · 7 events · 3 Channels
+          src/api.ts: 103 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
 ├────────────────────────────────────────────────────────────────────┤
-│ core (bancada-core) — 23 modules of pure Rust, no UI deps:         │
+│ core (bancada-core) — 24 modules of pure Rust, no UI deps:         │
 │   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
       subprocesses: arduino-cli · esptool · git · gh · claude
+      outbound HTTPS: optional Mouser Search API
 ```
 
 **Full architecture documentation: [docs/architecture/](docs/architecture/README.md)** —
@@ -59,6 +62,12 @@ sudo zypper install gh   # then: gh auth login
 # See https://claude.com/product/claude-code for the current install options
 # (the native installer drops it in ~/.local/bin; npm is also supported).
 curl -fsSL https://claude.ai/install.sh | bash
+
+# Optional: request a Mouser Search API key at https://www.mouser.com/api-search/
+# and save it in Hardware → Circuit. For managed/dev environments, Bancada also
+# accepts MOUSER_API_KEY without copying the key into the webview or a project.
+# Search results stay transient under Mouser's API terms and are not saved to
+# circuit.yaml or the generated BOM.
 
 # Serial port access
 sudo usermod -aG dialout $USER   # check group with: ls -l /dev/ttyACM0
@@ -190,7 +199,10 @@ scaffolded library, a fetched library and a newly created project actually
 - **Circuit workspace** — guided ESP32 board/component/wire editing backed by
   `hardware/circuit.yaml`; generates a C++ pin header, SVG diagram, wiring
   guide, BOM and validation report. Verify and Flash refuse stale, unsafe or
-  profile-incompatible circuit data
+  profile-incompatible circuit data. Optional Mouser Search API integration
+  displays live manufacturer parts, stock, pricing, lifecycle, product and
+  datasheet data without persisting the returned catalog content; exact parts
+  and electrical verification remain explicit user-entered circuit data
 - **Editor tabs** — multiple files open at once, dirty markers, and a
   close-again-to-discard step so unsaved work is never dropped by one click
 - **Git pill** — repository state at a glance in the toolbar, with commit,
@@ -258,8 +270,8 @@ interrupts the current turn; **New session** ends the child process and
 clears the transcript.
 
 **What it can and can't do** — the embedded session's built-in tools are
-narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
-(via `--tools`, which genuinely removes tools from the CLI, unlike
+narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`,
+`Skill` (via `--tools`, which genuinely removes tools from the CLI, unlike
 `--disallowedTools` alone), plus six bancada MCP tools:
 
 - **`verify`** — the same compile path as the **Verify** button; compiles
@@ -310,7 +322,7 @@ enforcement layers — deny rules, a `PreToolUse` guard hook, a pre-flight
 refusal, and an independent runtime backstop that stops the session if an edit
 or the tool list drifts from what Bancada expects.
 
-Three limits are worth stating plainly before you use it:
+Four limits are worth stating plainly before you use it:
 
 - This is **in-process policy inside the `claude` CLI's own permission engine —
   not an OS-level sandbox or container.**
@@ -321,6 +333,12 @@ Three limits are worth stating plainly before you use it:
   reads on your machine *can leave it*. If that is wrong for your environment,
   don't chat with the Assistant on machines holding secrets you wouldn't paste
   into a browser.
+- The session can **load your own skills** (`Skill`). Your skills and plugins
+  were already reaching its prompt — neither `--bare` nor `--safe-mode` can be
+  used here — so this adds no capability, only the agent's ability to pull more
+  of that text in on its own initiative. What a skill then asks for is still
+  gated by the same tool list: one reaching for `Bash` or subagents finds
+  nothing there.
 
 **The complete model — all four layers, what each one can and cannot express,
 and everything that is *not* enforced — is documented in
@@ -338,7 +356,7 @@ and everything that is *not* enforced — is documented in
 
 ```
 bancada/
-├── core/            # bancada-core: 23 modules of pure Rust (no Tauri, unit-tested)
+├── core/            # bancada-core: 24 modules of pure Rust (no Tauri, unit-tested)
 ├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
 ├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope

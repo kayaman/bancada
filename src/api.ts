@@ -266,6 +266,67 @@ export interface CircuitSnapshot {
   generated_header: string;
 }
 
+export type MouserSearchKind = "keyword" | "part_number";
+export type MouserSearchOption =
+  | "none"
+  | "rohs"
+  | "in_stock"
+  | "rohs_and_in_stock";
+
+export interface MouserSearchRequest {
+  query: string;
+  kind: MouserSearchKind;
+  records: number;
+  starting_record: number;
+  option: MouserSearchOption;
+  exact: boolean;
+}
+
+export interface MouserPriceBreak {
+  quantity: number;
+  price: string;
+  currency: string;
+}
+
+export interface MouserAttribute {
+  name: string;
+  value: string;
+}
+
+export interface MouserPart {
+  mouser_part_number: string;
+  manufacturer_part_number: string;
+  manufacturer: string;
+  description: string;
+  category: string;
+  availability: string;
+  in_stock: string;
+  factory_stock: string;
+  lifecycle_status: string;
+  lead_time: string;
+  minimum_order_quantity: string;
+  order_multiple: string;
+  datasheet_url: string;
+  product_url: string;
+  image_url: string;
+  rohs_status: string;
+  suggested_replacement: string;
+  discontinued: string;
+  reeling?: boolean | null;
+  price_breaks: MouserPriceBreak[];
+  attributes: MouserAttribute[];
+}
+
+export interface MouserSearchResponse {
+  total: number;
+  parts: MouserPart[];
+}
+
+export interface MouserConfigStatus {
+  configured: boolean;
+  source?: "environment" | "private_file" | null;
+}
+
 export interface ChipInfo {
   mac: string;
   chip_type?: string;
@@ -745,6 +806,15 @@ export const circuitValidate = (
     profile: profile ?? null,
     fqbn: fqbn ?? null,
   });
+
+export const mouserConfigStatus = () =>
+  invoke<MouserConfigStatus>("mouser_config_status");
+export const mouserSetApiKey = (apiKey: string) =>
+  invoke<MouserConfigStatus>("mouser_set_api_key", { apiKey });
+export const mouserClearApiKey = () =>
+  invoke<MouserConfigStatus>("mouser_clear_api_key");
+export const mouserSearch = (request: MouserSearchRequest) =>
+  invoke<MouserSearchResponse>("mouser_search", { request });
 
 export const startMonitor = (port: string, baudrate: number) =>
   invoke<void>("start_monitor", { port, baudrate });

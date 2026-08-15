@@ -37,10 +37,23 @@ export default function CircuitWorkspace({
   const [componentKind, setComponentKind] = useState("generic");
   const [busy, setBusy] = useState(true);
   const [dirty, setDirty] = useState(false);
+  const [mouserStatus, setMouserStatus] = useState<api.MouserConfigStatus>({ configured: false });
+  const [mouserKey, setMouserKey] = useState("");
+  const [mouserQuery, setMouserQuery] = useState("");
+  const [mouserKind, setMouserKind] = useState<api.MouserSearchKind>("keyword");
+  const [mouserOption, setMouserOption] = useState<api.MouserSearchOption>("in_stock");
+  const [mouserTarget, setMouserTarget] = useState(0);
+  const [mouserResults, setMouserResults] = useState<api.MouserSearchResponse | null>(null);
+  const [mouserBusy, setMouserBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setBusy(true);
+    setMouserResults(null);
+    setMouserQuery("");
+    setMouserTarget(0);
+    setMouserKind("keyword");
+    setMouserOption("in_stock");
     Promise.all([api.circuitCatalog(), api.circuitLoad(sketchDir, profile ?? undefined, fqbn ?? undefined)])
       .then(([nextCatalog, loaded]) => {
         if (!alive) return;
@@ -56,6 +69,9 @@ export default function CircuitWorkspace({
       })
       .catch((error) => notify(String(error), true))
       .finally(() => alive && setBusy(false));
+    api.mouserConfigStatus()
+      .then((status) => alive && setMouserStatus(status))
+      .catch((error) => alive && notify(`Mouser configuration: ${String(error)}`, true));
     return () => {
       alive = false;
     };
@@ -90,6 +106,55 @@ export default function CircuitWorkspace({
       notify(String(error), true);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const saveMouserKey = async () => {
+    setMouserBusy(true);
+    try {
+      const status = await api.mouserSetApiKey(mouserKey);
+      setMouserStatus(status);
+      setMouserKey("");
+      notify("Mouser API key saved in the private application credentials file");
+    } catch (error) {
+      notify(String(error), true);
+    } finally {
+      setMouserBusy(false);
+    }
+  };
+
+  const clearMouserKey = async () => {
+    setMouserBusy(true);
+    try {
+      const status = await api.mouserClearApiKey();
+      setMouserStatus(status);
+      setMouserResults(null);
+      notify(status.configured ? "Private key removed; environment key is still active" : "Mouser API key removed");
+    } catch (error) {
+      notify(String(error), true);
+    } finally {
+      setMouserBusy(false);
+    }
+  };
+
+  const searchMouser = async () => {
+    setMouserBusy(true);
+    try {
+      const result = await api.mouserSearch({
+        query: mouserQuery,
+        kind: mouserKind,
+        records: 10,
+        starting_record: 0,
+        option: mouserOption,
+        exact: mouserKind === "part_number",
+      });
+      setMouserResults(result);
+      if (result.parts.length === 0) notify("Mouser returned no matching parts");
+    } catch (error) {
+      setMouserResults(null);
+      notify(String(error), true);
+    } finally {
+      setMouserBusy(false);
     }
   };
 
@@ -148,6 +213,115 @@ export default function CircuitWorkspace({
               Logic {board.logic_voltage_v} V · 3V3 budget {board.max_3v3_ma} mA ·{" "}
               <a href={board.source_url} target="_blank" rel="noreferrer">Espressif reference</a>
             </p>
+          )}
+        </section>
+
+        <section className="circuit-card circuit-mouser">
+          <div className="circuit-card-title">
+            <h3>Mouser live lookup</h3>
+            <span className={`circuit-badge ${mouserStatus.configured ? "valid" : "neutral"}`}>
+              {mouserStatus.configured
+                ? mouserStatus.source === "environment" ? "MOUSER_API_KEY" : "API configured"
+                : "Not configured"}
+            </span>
+          </div>
+          {!mouserStatus.configured || mouserStatus.source !== "environment" ? (
+            <div className="mouser-key-row">
+              <input
+                aria-label="Mouser API key"
+                type="password"
+                autoComplete="off"
+                placeholder={mouserStatus.configured ? "Replace API key" : "Search API key"}
+                value={mouserKey}
+                onChange={(event) => setMouserKey(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && mouserKey.trim()) void saveMouserKey();
+                }}
+              />
+              <button disabled={mouserBusy || !mouserKey.trim()} onClick={() => void saveMouserKey()}>Save key</button>
+              {mouserStatus.source === "private_file" && (
+                <button className="danger subtle" disabled={mouserBusy} onClick={() => void clearMouserKey()}>Clear</button>
+              )}
+            </div>
+          ) : (
+            <p className="circuit-hint">The key comes from the process environment and is never exposed to the webview.</p>
+          )}
+          <p className="circuit-hint">
+            Request a Search API key from <a href="https://www.mouser.com/api-search/" target="_blank" rel="noreferrer">Mouser</a>.
+            Live results are not written to <code>circuit.yaml</code> or the BOM. Review the <a href="https://www.mouser.com/apiterms/" target="_blank" rel="noreferrer">API terms</a>.
+          </p>
+          <div className="mouser-search-row">
+            <select
+              aria-label="Seed Mouser search from component"
+              value={Math.min(mouserTarget, Math.max(0, draft.components.length - 1))}
+              disabled={draft.components.length === 0}
+              onChange={(event) => {
+                const index = Number(event.target.value);
+                setMouserTarget(index);
+                const component = draft.components[index];
+                setMouserQuery(component?.part_number || component?.label || "");
+                setMouserKind(component?.part_number ? "part_number" : "keyword");
+                if (component?.part_number) setMouserOption("none");
+              }}
+            >
+              {draft.components.length === 0
+                ? <option value={0}>No project components</option>
+                : draft.components.map((component, index) => <option key={`${component.id}:${index}`} value={index}>{component.label || component.id}</option>)}
+            </select>
+            <select aria-label="Mouser search kind" value={mouserKind} onChange={(event) => {
+              const kind = event.target.value as api.MouserSearchKind;
+              setMouserKind(kind);
+              if (kind === "part_number") setMouserOption("none");
+            }}>
+              <option value="keyword">Keyword</option>
+              <option value="part_number">Part number</option>
+            </select>
+            <input
+              aria-label="Mouser search query"
+              placeholder="Manufacturer part number or keywords"
+              value={mouserQuery}
+              onChange={(event) => setMouserQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && mouserStatus.configured && mouserQuery.trim()) void searchMouser();
+              }}
+            />
+            <select aria-label="Mouser search filter" value={mouserOption} disabled={mouserKind === "part_number"} onChange={(event) => setMouserOption(event.target.value as api.MouserSearchOption)}>
+              <option value="none">All</option>
+              <option value="in_stock">In stock</option>
+              <option value="rohs">RoHS</option>
+              <option value="rohs_and_in_stock">RoHS and in stock</option>
+            </select>
+            <button className="primary" disabled={mouserBusy || !mouserStatus.configured || !mouserQuery.trim()} onClick={() => void searchMouser()}>
+              {mouserBusy ? "Searching…" : "Search"}
+            </button>
+          </div>
+          {mouserResults && (
+            <div className="mouser-results">
+              <p className="circuit-hint">
+                Showing {mouserResults.parts.length} of {mouserResults.total} matches. Live data provided by Mouser Electronics.
+              </p>
+              {mouserResults.parts.map((part) => {
+                const price = part.price_breaks[0];
+                return (
+                  <article className="mouser-result" key={part.mouser_part_number}>
+                    <div>
+                      <strong>{part.manufacturer_part_number || part.mouser_part_number}</strong>
+                      <span>{part.manufacturer}</span>
+                      <p>{part.description}</p>
+                    </div>
+                    <div className="mouser-facts">
+                      <span>{part.availability || "Availability unknown"}</span>
+                      <span>{part.lifecycle_status || "Lifecycle unknown"}</span>
+                      {price && <span>{price.price} {price.currency} at {price.quantity}+</span>}
+                    </div>
+                    <div className="mouser-links">
+                      {part.datasheet_url && <a href={part.datasheet_url} target="_blank" rel="noreferrer">Datasheet</a>}
+                      {part.product_url && <a href={part.product_url} target="_blank" rel="noreferrer">View at Mouser</a>}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
           )}
         </section>
 

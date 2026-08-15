@@ -2959,6 +2959,70 @@ body {
   min-height: 0;
 }
 
+.mouser-key-row,
+.mouser-search-row,
+.mouser-links,
+.mouser-facts {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mouser-key-row input,
+.mouser-search-row input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.mouser-search-row {
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.mouser-search-row select {
+  width: auto;
+  min-width: 120px;
+}
+
+.mouser-results {
+  max-height: 430px;
+  margin-top: 12px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+
+.mouser-result {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.5fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.mouser-result strong,
+.mouser-result span {
+  display: block;
+}
+
+.mouser-result p {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mouser-facts {
+  align-items: flex-start;
+  flex-direction: column;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mouser-links {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .circuit-hint {
   color: var(--text-dim);
   font-size: 11px;
@@ -3012,4 +3076,6 @@ body {
   .circuit-card { grid-column: 1; }
   .circuit-fields { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
   .circuit-wire { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .mouser-result { grid-template-columns: 1fr; }
+  .mouser-links { justify-content: flex-start; }
 }

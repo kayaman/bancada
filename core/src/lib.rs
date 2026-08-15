@@ -13,8 +13,10 @@ pub mod agent;
 pub mod boards;
 pub mod chatlog;
 pub mod circuit;
+pub mod circuitguess;
 pub mod cli;
 pub mod clone;
+pub mod cppscan;
 pub mod devproxy;
 pub mod esptool;
 pub mod files;
@@ -23,7 +25,9 @@ pub mod ghlib;
 pub mod git;
 pub mod library;
 pub mod mcp;
+pub mod mouser;
 pub mod mqtt;
+pub mod partsdb;
 pub mod ports;
 pub mod project;
 pub mod scope;
@@ -32,6 +36,7 @@ pub mod settings;
 pub mod sketch;
 pub mod types;
 pub mod usage;
+pub mod variantpins;
 
 use thiserror::Error;
 

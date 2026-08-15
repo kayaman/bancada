@@ -115,7 +115,7 @@ signal at all**.
 ## 3. The tool surface
 
 ```rust
-BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"
+BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
 
 EXPECTED_TOOLS = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send, circuit_status, circuit_sync}
 ```
@@ -133,6 +133,31 @@ permission-layer nudge — a session with it set still lists 25 built-in tools.
 `WebFetch` and `WebSearch` were added in 0.12.0 knowingly: reads were never
 confined, and web access lets what is read leave the machine. That trade is
 recorded, not accidental.
+
+### `Skill` closes a gap between the two injection paths
+
+Claude Code injects into an embedded session along two independent paths:
+**capability** (`--tools`) and **instruction** (the user's `CLAUDE.md`, plugins
+and skills). Only `--bare` and `--safe-mode` cut both, and neither is usable
+here — `--bare` restricts auth to `ANTHROPIC_API_KEY`/`apiKeyHelper` (probe:
+`authentication_failed` on turn one), `--safe-mode` drops `--mcp-config`
+servers and takes `mcp__bancada__verify` with them. Both findings are recorded
+in `agent_args`' doc comment in `core/src/agent.rs`. So the instruction path
+stays open no matter what this argv does. Gating `Skill` away therefore never removed the
+user's skills from the session; it only produced an agent reading
+"you MUST invoke the skill" with no tool to invoke it with, which it then said
+out loud instead of working.
+
+`Skill` is in `BUILTIN_TOOLS` because it is the one built-in that **grants no
+capability** — it loads text into context, it does not act. What a skill then
+reaches for meets the unchanged surface: `Bash`, `Task`, `NotebookEdit` are
+absent from `--tools`, and an out-of-project `Write` still meets the layer-2
+hook. The genuine cost is **prompt-injection surface**: skill text from
+`~/.claude` now enters a session that can write inside the sketch dir, at the
+agent's own initiative rather than only at startup. That is the same class of
+residue as the pre-existing-hostile-hook case in §5, and is accepted on the
+same grounds — Bancada stops the agent from *installing* such content, it
+cannot stop content that is already on the machine.
 
 ### Hardware is scoped structurally, not by policy
 
@@ -176,6 +201,10 @@ misleading:
 - **Reads are not confined at all.** The agent can read any file the user can.
 - **A pre-existing hostile hook in the user's own config still runs.** Bancada
   stops the agent from *installing* one; it cannot stop one already there.
+- **The user's own skills and plugins load into the session** — unavoidably, as
+  §3 explains — and since `Skill` is in the tool set the agent can also pull
+  more of that text in mid-turn. Instruction surface, not capability surface:
+  whatever a skill asks for still has to exist in `--tools`.
 - **None of this is OS-level.** It is in-process policy inside the process the
   model drives. There is no sandbox, no seccomp, no container.
 - **An already-started compile cannot be aborted**, so cancelling a session

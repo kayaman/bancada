@@ -302,7 +302,18 @@ pub struct AgentCfg {
 /// tools. `WebFetch`/`WebSearch` joined in 0.12.0 (deliberate egress
 /// trade-off — see the README's safety section); re-probe the init line
 /// whenever this list or the CLI version changes.
-pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
+///
+/// `Skill` is here deliberately, and is the one entry that grants no new
+/// *capability*: it loads instructions into the session's context, it does not
+/// act. The session was already receiving the user's skills and plugins
+/// (neither `--bare` nor `--safe-mode` is usable — see `agent_args`'s doc), so
+/// withholding the tool only produced an agent told to invoke skills it had no
+/// way to invoke. Everything a skill might reach for is still gated by this
+/// same list: a skill calling for `Bash`, `Task` or `NotebookEdit` finds them
+/// absent, and an out-of-project `Write` still meets the `--settings` hook.
+/// The residue it does add is prompt-injection surface — skill text from
+/// `~/.claude` now reaches a session that can write inside the sketch dir.
+pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill";
 
 /// The complete set of tools an embedded session is expected to report in its
 /// `system`/`init` line — [`BUILTIN_TOOLS`] plus the bancada MCP tools.
@@ -318,6 +329,7 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "Grep",
     "WebFetch",
     "WebSearch",
+    "Skill",
     "mcp__bancada__verify",
     "mcp__bancada__upload",
     "mcp__bancada__serial_read",
@@ -701,6 +713,11 @@ fn deny_json(reason: &str) -> String {
 ///   `Task*`, `Monitor`, `Workflow`, `SendMessage` and `LSP`. It is a nudge
 ///   at the permission layer, not a capability gate; it is kept because
 ///   defence in depth is free, not because it confines anything.
+/// - **`Skill` is allowed on purpose** and is the one entry in the list that
+///   adds no capability — see [`BUILTIN_TOOLS`]. It is in `--allowedTools`
+///   for the same reason the `mcp__bancada__*` entries are: a headless
+///   session would otherwise stall on a prompt it cannot answer. Skills that
+///   dispatch subagents or shell out simply find `Task`/`Bash` missing.
 /// - **`--settings cfg.settings_path` is a real boundary** — it carries the
 ///   `PreToolUse` hook that refuses out-of-project edits (A1). Probe-verified
 ///   end to end: an out-of-project `Write` came back as a `tool_result` with
@@ -774,7 +791,7 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--tools".to_string(),
         BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
-        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
          mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
          mcp__bancada__circuit_status,mcp__bancada__circuit_sync"
             .to_string(),
@@ -1253,7 +1270,7 @@ mod tests {
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(
             args[allowed_idx + 1],
-            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
              mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
              mcp__bancada__circuit_status,mcp__bancada__circuit_sync"
         );
@@ -1338,7 +1355,7 @@ mod tests {
         // A1/A2: `--tools` is the only flag in this argv that actually
         // removes a built-in tool from the session (probe-verified against
         // 2.1.220 — see the `agent_args` doc). Losing it silently would put
-        // Skill/Task/Monitor/LSP back in the agent's hands.
+        // Task/Monitor/LSP back in the agent's hands.
         let cfg = AgentCfg {
             mcp_config_path: "/tmp/x.json".to_string(),
             settings_path: "/tmp/s.json".to_string(),
@@ -1352,12 +1369,39 @@ mod tests {
             .expect("--tools must be present");
         assert_eq!(
             args[idx + 1],
-            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
         );
         assert!(
             !args[idx + 1].contains("Bash"),
             "Bash must never be in the built-in allow-list"
         );
+    }
+
+    #[test]
+    fn agent_args_offers_the_skill_tool_the_users_plugins_assume_exists() {
+        // `--bare`/`--safe-mode` are both unusable here (see the `agent_args`
+        // doc), so the user's own skills and plugins load into every embedded
+        // session regardless of this argv. Withholding `Skill` while those
+        // instructions arrive anyway left the session announcing it could not
+        // do as its own prompt told it. `Skill` only *loads instructions*; the
+        // capability gate stays `--tools`, so a skill reaching for `Bash` or
+        // `Task` still hits nothing.
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/s.json".to_string(),
+            system_prompt_extra: String::new(),
+            resume_session_id: None,
+        };
+        let args = agent_args(&cfg);
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        assert!(args[tools_idx + 1].split(',').any(|t| t == "Skill"));
+        // Load-bearing in the same way the mcp__bancada__* entries are: a
+        // headless session whose tool is missing from --allowedTools stalls
+        // on a permission prompt it has no way to answer.
+        let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert!(args[allowed_idx + 1].split(',').any(|t| t == "Skill"));
+        // And A2 must not treat the tool we asked for as an intruder.
+        assert!(unexpected_tools(&["Skill".to_string()]).is_empty());
     }
 
     #[test]
@@ -1948,12 +1992,12 @@ mod tests {
     #[test]
     fn an_extra_tool_is_reported_sorted_and_deduped() {
         let tools: Vec<String> = [
-            "Read", "Bash", "Edit", "Skill", "Write", "Glob", "Grep", "Bash",
+            "Read", "Bash", "Edit", "Monitor", "Write", "Glob", "Grep", "Bash",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Skill"]);
+        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Monitor"]);
     }
 
     #[test]

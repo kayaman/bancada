@@ -546,6 +546,24 @@ fn snapshot(
     }
 }
 
+/// Validate a manifest that is not (yet) on disk.
+///
+/// The same rules [`sync_project`] runs, exposed so a *proposal* can show the
+/// diagnostics acceptance will produce before anything is written. Sharing the
+/// implementation is the point: a preview computed by a second, parallel rule
+/// set would eventually disagree with the real one, and the disagreement would
+/// surface only after the user had committed to it.
+///
+/// Artifact staleness is deliberately not included — nothing has been
+/// rendered yet.
+pub fn validate_manifest_for(
+    project: &Path,
+    m: &CircuitManifest,
+    selected_fqbn: Option<&str>,
+) -> Vec<Diagnostic> {
+    validate_manifest(project, m, selected_fqbn)
+}
+
 fn validate_manifest(
     project: &Path,
     m: &CircuitManifest,
@@ -1090,8 +1108,41 @@ fn connects(c: &Connection, a_target: &str, a_pin: &str, other_target: &str) -> 
         || (c.to.target == a_target && c.to.pin == a_pin && c.from.target == other_target)
 }
 
-fn source_text(project: &Path) -> String {
-    fn walk(path: &Path, out: &mut String) {
+/// Where a source file sits relative to the sketch the user is writing.
+///
+/// Validation reads every file regardless (a `firmware_symbol` may legitimately
+/// be used from a local library), but inference must not: a vendored
+/// `Adafruit_BME280/examples/bme280test.ino` would otherwise manufacture a
+/// sensor the user does not own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRole {
+    /// The user's own code.
+    Sketch,
+    /// A library carried inside the project (`lib/`, `libraries/`, `.pio/`).
+    Vendored,
+    /// Example or test code, wherever it lives.
+    Example,
+}
+
+/// One C++ source file of a project, with enough provenance to cite it.
+#[derive(Debug, Clone)]
+pub struct SourceFile {
+    /// Slash-separated, relative to the project root — quotable in a
+    /// diagnostic as `rel_path:line`.
+    pub rel_path: String,
+    pub text: String,
+    pub role: SourceRole,
+}
+
+/// Every C++ source file of a project, **sorted by `rel_path`**.
+///
+/// The sort is load-bearing rather than cosmetic: `read_dir` yields entries in
+/// whatever order the filesystem hands back, and anything downstream that mints
+/// ids or picks a "first" match would otherwise vary between runs on identical
+/// input. Every existing consumer goes through `source_text`, whose checks are
+/// order-independent, so imposing an order changes no current behaviour.
+pub fn source_files(project: &Path) -> Vec<SourceFile> {
+    fn walk(root: &Path, path: &Path, out: &mut Vec<SourceFile>) {
         let Ok(entries) = fs::read_dir(path) else {
             return;
         };
@@ -1103,7 +1154,7 @@ fn source_text(project: &Path) -> String {
                 {
                     continue;
                 }
-                walk(&p, out);
+                walk(root, &p, out);
             } else if p.to_str().is_some_and(|s| {
                 s.ends_with(".ino")
                     || s.ends_with(".cpp")
@@ -1112,15 +1163,56 @@ fn source_text(project: &Path) -> String {
                     || s.ends_with(".hpp")
             }) && !p.ends_with(HEADER_PATH)
             {
-                if let Ok(text) = fs::read_to_string(p) {
-                    out.push_str(&text);
-                    out.push('\n');
-                }
+                let Ok(text) = fs::read_to_string(&p) else {
+                    continue;
+                };
+                let Ok(rel) = p.strip_prefix(root) else {
+                    continue;
+                };
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                let dirs = &parts[..parts.len().saturating_sub(1)];
+                let role = if dirs
+                    .iter()
+                    .any(|d| d == "examples" || d == "test" || d == "tests")
+                {
+                    SourceRole::Example
+                } else if dirs
+                    .iter()
+                    .any(|d| d == "lib" || d == "libraries" || d == ".pio" || d == "build")
+                {
+                    SourceRole::Vendored
+                } else {
+                    SourceRole::Sketch
+                };
+                out.push(SourceFile {
+                    rel_path: parts.join("/"),
+                    text,
+                    role,
+                });
             }
         }
     }
+    let mut out = Vec::new();
+    walk(project, project, &mut out);
+    out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    out
+}
+
+/// Every C++ source of a project as one string, for the substring and
+/// line-scanning checks `validate_manifest` runs.
+///
+/// Deliberately keeps reading *all* roles: a `firmware_symbol` used only from a
+/// vendored library is still used, and narrowing this would turn
+/// `firmware.unused_symbol` into a false alarm.
+fn source_text(project: &Path) -> String {
     let mut out = String::new();
-    walk(project, &mut out);
+    for file in source_files(project) {
+        out.push_str(&file.text);
+        out.push('\n');
+    }
     out
 }
 
@@ -1233,6 +1325,67 @@ mod tests {
                 })
                 .collect(),
             properties: BTreeMap::new(),
+        }
+    }
+
+    /// A project shaped like the ones the guess has to survive: sketch sources
+    /// beside a vendored library and its bundled example, plus the two things
+    /// the walk has always skipped.
+    fn source_role_fixture() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let write = |rel: &str, text: &str| {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("a.ino", "// sketch a\n");
+        write("src/b.cpp", "// sketch b\n");
+        write("libraries/Foo/Foo.cpp", "// vendored foo\n");
+        write("examples/Bar/Bar.ino", "// example bar\n");
+        write("hardware/x.h", "// generated, skipped\n");
+        write(HEADER_PATH, "// generated header, skipped\n");
+        write("notes.txt", "// not a source file\n");
+        dir
+    }
+
+    #[test]
+    fn source_files_are_sorted_and_carry_their_role() {
+        let dir = source_role_fixture();
+        let files = source_files(dir.path());
+        let seen: Vec<(&str, SourceRole)> = files
+            .iter()
+            .map(|f| (f.rel_path.as_str(), f.role))
+            .collect();
+        // Sorted by rel_path, so the order is an assertion, not an accident:
+        // `read_dir` order is nondeterministic and a guess built on it would
+        // mint different component ids on different runs.
+        assert_eq!(
+            seen,
+            vec![
+                ("a.ino", SourceRole::Sketch),
+                ("examples/Bar/Bar.ino", SourceRole::Example),
+                ("libraries/Foo/Foo.cpp", SourceRole::Vendored),
+                ("src/b.cpp", SourceRole::Sketch),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_text_still_sees_every_file_it_always_saw() {
+        // Validation's semantics must not shift: `source_text` is what
+        // firmware.* diagnostics read, and it has always included vendored and
+        // example code. Only the guess narrows to SourceRole::Sketch.
+        let dir = source_role_fixture();
+        let text = source_text(dir.path());
+        for expected in ["sketch a", "sketch b", "vendored foo", "example bar"] {
+            assert!(text.contains(expected), "{expected} missing from {text:?}");
+        }
+        for skipped in [
+            "generated, skipped",
+            "generated header",
+            "not a source file",
+        ] {
+            assert!(!text.contains(skipped), "{skipped} leaked into {text:?}");
         }
     }
 
