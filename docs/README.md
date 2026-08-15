@@ -20,8 +20,8 @@ end to end.
 - [current-state diagram and review](architecture/current-state-diagram.md) — elaborate runtime map, external integrations, circuit synchronization, and findings
 - [system-context](architecture/system-context.md) — external engines, network peers, constraints
 - [conventions](architecture/conventions.md) — layering, testing, commits, releases
-- [backend-modules](architecture/backend-modules.md) — the 22 core modules and the Tauri layer
-- [ipc-contract](architecture/ipc-contract.md) — 99 commands, 7 events, 3 channels, the MCP surface
+- [backend-modules](architecture/backend-modules.md) — the 24 core modules and the Tauri layer
+- [ipc-contract](architecture/ipc-contract.md) — 103 commands, 7 events, 3 channels, the MCP surface
 - [frontend](architecture/frontend.md) — shell, state tiers, the pure-logic tier
 - [runtime-model](architecture/runtime-model.md) — `AppState`, locks, threads, shutdown
 - [persistence](architecture/persistence.md) — every file Bancada writes

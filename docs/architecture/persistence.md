@@ -28,6 +28,8 @@ never guesses a path.
 ├── usage.json
 ├── fleet.json
 ├── mqtt.json
+├── credentials/
+│   └── mouser-api-key
 └── chats/
     └── <sketch_key>/
         ├── 2026-08-11T09-04-20.ndjson
@@ -42,6 +44,14 @@ and the recent-projects list capped at `MAX_RECENT = 10`.
 All paths here are absolute, so a project rename invalidates them.
 `replace_recent(old, new)` swaps the entry **in place**, keeping its position:
 a rename is not a visit, and should not reorder the list.
+
+### `credentials/mouser-api-key`
+
+Optional Mouser Search API credential. It is separate from `settings.json`,
+never returned to the webview, never written inside a sketch, and never placed
+in logs. On Unix the credentials directory is mode `0700` and the atomically
+replaced key file is created at `0600`; reads refuse a file accessible by group
+or other users. `MOUSER_API_KEY` overrides this file for managed environments.
 
 ### `chats/<sketch_key>/*.ndjson`
 
@@ -163,7 +173,7 @@ These belong to the project and are meant to be committed.
 | `src/bancada_circuit_pins.h` | **Circuit generator** | Arduino C++ constants rendered from manifest GPIO symbols. |
 | `hardware/circuit.svg` | **Circuit generator** | Deterministic logical wiring diagram. |
 | `hardware/wiring.md` | **Circuit generator** | Complete connection table and validation summary. |
-| `hardware/bom.csv` | **Circuit generator** | Deterministic component inventory. |
+| `hardware/bom.csv` | **Circuit generator** | Deterministic component inventory from the user-maintained circuit manifest. Live Mouser API results are not persisted here. |
 | `hardware/validation.json` | **Circuit generator** | Manifest digest, generator version, diagnostics and artifact status. |
 | `.bancada/libs/<Name>/` | Bancada | Vendored library bytes, **auto-added to `.gitignore`** — they are re-fetchable from the manifest at their pinned commit. |
 | `.gitignore` | shared | Merged against `GITIGNORE_REQUIRED` rather than overwritten, so user entries survive. |

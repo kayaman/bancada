@@ -2,9 +2,9 @@
 
 What Bancada talks to, and the one principle that decides how.
 
-Bancada is a single-user Linux desktop application. It has no server, no
-account, and no network service of its own. Everything it does it does by
-driving five external binaries and speaking to whatever the bench happens to
+Bancada is a single-user Linux desktop application. It has no server and no
+network service of its own. Everything it does is local orchestration of five
+external binaries, one optional catalog API, and whatever the bench happens to
 have plugged in or reachable.
 
 ```
@@ -21,7 +21,7 @@ have plugged in or reachable.
  │ esptool            │    (index, libraries)    │ WebSocket peer (webview) │
  │ git                │──▶ GitHub / any remote   │ device HTTP    (ureq)    │
  │ gh                 │──▶ GitHub API            │ GitHub raw/ls-remote     │
- │ claude             │──▶ Anthropic API         └──────────────────────────┘
+ │ claude             │──▶ Anthropic API         │ Mouser Search API (TLS)  │
  └────────┬───────────┘
           │ USB serial (/dev/ttyACM*, /dev/ttyUSB*)
           ▼
@@ -38,11 +38,12 @@ have plugged in or reachable.
 > Bancada does not reimplement the toolchain. It drives the same engines the
 > official IDE uses.
 
-This is the single most consequential decision in the codebase, and it is
-applied without exception. There is no `libgit2`, no Arduino SDK binding, no
-Anthropic client library, no Node sidecar. Every capability that a mature tool
-already provides is obtained by **spawning that tool, asking for JSON, and
-parsing it into typed structs** (`core/src/lib.rs:6-10`).
+This is the single most consequential toolchain decision in the codebase.
+There is no `libgit2`, Arduino SDK binding, Anthropic client library, or Node
+sidecar. Capabilities provided by mature local tools are obtained by spawning
+those tools and parsing their output. Mouser is the deliberate exception: it
+offers an HTTPS Search API rather than a local engine, so `core::mouser` calls
+that official contract directly and normalizes its JSON.
 
 It buys correctness Bancada could not otherwise afford: platform resolution,
 dependency resolution, the build cache, and upload protocols are all *exactly*
@@ -115,6 +116,10 @@ pin header is ordinary Arduino C++ and remains buildable without Bancada.
 | **`gh`** | one-button private repo creation (`gh repo create --source --push`) | `core/src/git.rs` |
 | **`claude`** | the AI Assistant panel, driven over stdio stream-json | `src-tauri/src/lib.rs` only |
 
+Mouser is not an engine. It is an optional network catalog used only from the
+Circuit workspace; builds and circuit validation do not depend on its
+availability.
+
 Two notes worth internalising:
 
 **Port enumeration is delegated on purpose.** The `serialport` crate is built
@@ -146,8 +151,9 @@ Bancada makes no outbound connection except through an engine or one of these:
 | Device HTTP server | plain HTTP | `ureq`, via the loopback reverse proxy |
 | Arduino registry, GitHub | HTTPS | inside `arduino-cli` / `git` / `gh` |
 | Anthropic API | HTTPS | inside `claude` |
+| Mouser Search API | HTTPS (rustls) | `core/src/mouser.rs`, with the credential supplied only by `src-tauri` |
 
-Three of these are worth a contributor's attention:
+Four of these are worth a contributor's attention:
 
 - **The WebSocket panel runs in the webview**, not in Rust. That is why
   `tauri.conf.json` sets `csp: null`. It is a deliberate trade.
@@ -160,6 +166,12 @@ Three of these are worth a contributor's attention:
 - **MQTT never retries.** Any error emits `closed` and the thread exits.
   Reconnection policy lives in the frontend (`src/obs/backoff.ts`), where it can
   be shown to the user as a countdown.
+- **Mouser is live lookup metadata, not an electrical authority.** Calls are
+  user-triggered, and the native layer applies a process-local quota guard,
+  holds the saved/environment key, caps response bodies, rejects non-HTTPS
+  links, and normalizes untrusted JSON. Results remain transient; exact part
+  declarations and datasheet verification stay user-maintained in the circuit
+  manifest.
 
 ---
 

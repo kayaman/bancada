@@ -23,6 +23,7 @@ pub mod ghlib;
 pub mod git;
 pub mod library;
 pub mod mcp;
+pub mod mouser;
 pub mod mqtt;
 pub mod ports;
 pub mod project;

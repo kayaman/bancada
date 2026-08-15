@@ -23,6 +23,7 @@ flowchart LR
 
     subgraph service["Headless Rust domain: bancada-core"]
         circuitCore["Circuit manifest, catalog, validation and generator"]
+        mouserAdapter["Mouser Search API client and normalizer"]
         arduinoAdapter["Arduino CLI adapter"]
         sourceDomains["Sketch, files, project, boards and libraries"]
         gitDomains["Git, GitHub library and repository domains"]
@@ -38,7 +39,7 @@ flowchart LR
         circuitManifest["hardware/circuit.yaml source of truth"]
         circuitArtifacts["Generated pin header, SVG, wiring, BOM and validation"]
         projectGit["Project .git and bancada.yaml"]
-        appFiles["XDG settings, fleet, chats and usage"]
+        appFiles["XDG settings, private credentials, fleet, chats and usage"]
     end
 
     subgraph external["External integrations"]
@@ -50,6 +51,7 @@ flowchart LR
         arduinoRegistry["Arduino indexes and library registry"]
         gitRemotes["GitHub and other Git remotes"]
         anthropicApi["Anthropic API"]
+        mouserApi["Mouser Search API"]
         mqttBroker["MQTT broker"]
         wsPeer["WebSocket peer"]
         deviceHttp["Bench device HTTP server"]
@@ -69,11 +71,13 @@ flowchart LR
     typedApi <---|"events and Channels"| events
     commands --> appState
     commands --> circuitCore
+    commands --> mouserAdapter
     commands --> sourceDomains
     commands --> gitDomains
     commands --> hardwareDomains
     commands --> connectedDomains
     commands --> agentDomains
+    commands --> appFiles
     appState --> events
     appState --> mcpServer
     appState --> deviceProxy
@@ -101,6 +105,7 @@ flowchart LR
     gitCli -.->|"fetch and push"| gitRemotes
     ghCli -.->|"GitHub API"| gitRemotes
     claudeCli -.->|"authenticated HTTPS"| anthropicApi
+    mouserAdapter -.->|"TLS, API key in required query parameter"| mouserApi
     arduinoCli -.->|"compile, upload and monitor"| serialDevice
     esptool -.->|"ROM bootloader"| serialDevice
     hardwareDomains -.->|"direct scope frames"| serialDevice
@@ -150,6 +155,7 @@ The source and generated ownership split is:
 | High | `src/App.tsx` still owns most cross-panel orchestration | State interactions are difficult to render-test and easy to regress | Move pane selection, build readiness, and project lifecycle into tested stores/controllers |
 | Medium | Rust and TypeScript IPC models are mirrored manually | A field or command-name drift is a runtime failure | Generate TS contracts from Rust schemas or add a schema compatibility test |
 | Medium | Circuit validation can only verify declared component data | A wrong part number, physical wire, or omitted load can pass declaration checks | Keep datasheet verification and pre-power inspection mandatory; add richer sourced component profiles over time |
+| Medium | Mouser data is live, rate-limited distributor metadata | Searches can fail offline, exhaust the published quota, or change price/stock without a code change | Keep search user-triggered and transient, guard the published quota per process in the native layer, never require it for builds, and treat datasheets—not distributor fields—as electrical authority |
 | Medium | Board catalog data ships in code | New board revisions require an application release and careful source review | Version catalog entries independently and retain source URL/revision metadata |
 | Medium | No hosted CI is configured | Full regression checks depend on local discipline | Keep the required local check documented; add CI only if project policy changes |
 | Low | Generated SVG is a logical wiring view, not a PCB/netlist tool | It cannot prove physical layout, clearances, or manufacturability | Treat it as bench documentation; use a dedicated EDA tool for PCB design |
@@ -160,3 +166,4 @@ The source and generated ownership split is:
 2. External processes are trusted engines but fallible integrations: missing binaries, version drift, output parsing, and exit status are surfaced as explicit errors.
 3. The assistant is the adversarial action boundary: file confinement, a strict tool set, bearer-authenticated loopback MCP, upload arming, and the shared circuit/build guard all apply.
 4. Physical hardware remains outside what software can prove. A passing check means the declaration is internally consistent and synchronized with code; it does not replace datasheets, measurement, inspection, or safe bring-up.
+5. Mouser is an outbound HTTPS trust boundary. Saved/environment credentials stay in the native layer during searches, response bodies are bounded and parsed as untrusted input, returned links must be HTTPS, catalog content is not persisted, and availability never gates an offline build.

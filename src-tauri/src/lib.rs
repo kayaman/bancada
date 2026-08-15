@@ -153,6 +153,7 @@ use bancada_core::circuit::{self, CircuitManifest, CircuitSnapshot, ValidationRe
 use bancada_core::cli::ArduinoCli;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
+use bancada_core::mouser::{self, MouserClient, MouserSearchRequest, MouserSearchResponse};
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
 use bancada_core::serialring::SerialRing;
 use bancada_core::sketch::{PathStyle, SketchProject, SketchYaml};
@@ -222,6 +223,12 @@ struct AppState {
     device_browse: Mutex<Option<DeviceBrowse>>,
     /// Embedded `claude` session — another sibling slot, one at a time.
     agent: Mutex<Option<AgentSession>>,
+    /// Rolling process-local call history for the optional Mouser lookup.
+    /// The native command enforces the public 30/minute and 1,000/day caps;
+    /// a webview bug or direct IPC caller cannot spend the user's quota in a
+    /// tight loop. Calls are reserved before dispatch because failures count
+    /// against the upstream quota too.
+    mouser_searches: Mutex<MouserSearchUsage>,
     /// Serialises the four *build* paths — user Verify (`compile_sketch`),
     /// user Flash (`upload_sketch`) and the agent's MCP `verify` and `upload`
     /// tools — which share one arduino-cli build cache and were previously
@@ -1283,6 +1290,203 @@ async fn circuit_validate(
     tauri::async_runtime::spawn_blocking(move || {
         let selected = active_fqbn(&sketch_dir, profile.as_deref(), fqbn.as_deref())?;
         circuit::validate_project(Path::new(&sketch_dir), selected.as_deref()).map_err(err_str)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+// ---------- Mouser live component lookup ----------
+
+const MOUSER_API_KEY_ENV: &str = "MOUSER_API_KEY";
+const MOUSER_CALLS_PER_MINUTE: usize = 30;
+const MOUSER_CALLS_PER_DAY: usize = 1_000;
+
+#[derive(Debug, Default)]
+struct MouserSearchUsage {
+    calls: std::collections::VecDeque<Instant>,
+}
+
+fn reserve_mouser_search(usage: &Mutex<MouserSearchUsage>, now: Instant) -> Result<(), String> {
+    let mut usage = usage.lock().unwrap_or_else(|error| error.into_inner());
+    let day = Duration::from_secs(24 * 60 * 60);
+    while usage
+        .calls
+        .front()
+        .is_some_and(|call| now.saturating_duration_since(*call) >= day)
+    {
+        usage.calls.pop_front();
+    }
+    if usage.calls.len() >= MOUSER_CALLS_PER_DAY {
+        return Err(
+            "Mouser's published daily Search API limit has been reached in this session; try again after earlier calls leave the 24-hour window".into(),
+        );
+    }
+
+    let minute = Duration::from_secs(60);
+    let calls_this_minute = usage
+        .calls
+        .iter()
+        .rev()
+        .take_while(|call| now.saturating_duration_since(**call) < minute)
+        .count();
+    if calls_this_minute >= MOUSER_CALLS_PER_MINUTE {
+        return Err(
+            "Mouser's published Search API limit is 30 calls per minute; wait before searching again"
+                .into(),
+        );
+    }
+
+    usage.calls.push_back(now);
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MouserConfigStatus {
+    configured: bool,
+    /// `environment` or `private_file`; never contains the credential itself.
+    source: Option<&'static str>,
+}
+
+fn mouser_api_key_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("credentials").join("mouser-api-key"))
+        .map_err(err_str)
+}
+
+fn read_mouser_api_key_at(path: &Path) -> Result<Option<String>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "could not inspect the Mouser API key file: {error}"
+            ))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err("the Mouser API key path is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "the Mouser API key file is accessible by other users; remove it and save the key again"
+                    .into(),
+            );
+        }
+    }
+    let key = std::fs::read_to_string(path)
+        .map_err(|error| format!("could not read the Mouser API key file: {error}"))?;
+    mouser::validate_api_key(&key).map_err(err_str)?;
+    Ok(Some(key.trim().to_string()))
+}
+
+fn write_mouser_api_key_at(path: &Path, api_key: &str) -> Result<(), String> {
+    let api_key = mouser::validate_api_key(api_key).map_err(err_str)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "the Mouser API key path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create the credentials directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("could not secure the credentials directory: {error}"))?;
+    }
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(err_str)?
+        .as_nanos();
+    let temp = parent.join(format!(
+        ".mouser-api-key-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+
+    #[cfg(unix)]
+    let write_result = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(|error| format!("could not create the Mouser API key file: {error}"))?;
+        file.write_all(api_key.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.sync_all())
+    };
+    #[cfg(not(unix))]
+    let write_result = std::fs::write(&temp, format!("{api_key}\n"));
+
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("could not write the Mouser API key file: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!(
+            "could not install the Mouser API key file: {error}"
+        ));
+    }
+    Ok(())
+}
+
+fn configured_mouser_api_key(app: &AppHandle) -> Result<Option<(String, &'static str)>, String> {
+    if let Some(value) = std::env::var_os(MOUSER_API_KEY_ENV) {
+        let value = value
+            .into_string()
+            .map_err(|_| format!("{MOUSER_API_KEY_ENV} is not valid UTF-8"))?;
+        let key = mouser::validate_api_key(&value).map_err(err_str)?;
+        return Ok(Some((key.to_string(), "environment")));
+    }
+    Ok(read_mouser_api_key_at(&mouser_api_key_path(app)?)?.map(|key| (key, "private_file")))
+}
+
+#[tauri::command]
+fn mouser_config_status(app: AppHandle) -> Result<MouserConfigStatus, String> {
+    let configured = configured_mouser_api_key(&app)?;
+    Ok(MouserConfigStatus {
+        configured: configured.is_some(),
+        source: configured.map(|(_, source)| source),
+    })
+}
+
+#[tauri::command]
+fn mouser_set_api_key(app: AppHandle, api_key: String) -> Result<MouserConfigStatus, String> {
+    write_mouser_api_key_at(&mouser_api_key_path(&app)?, &api_key)?;
+    mouser_config_status(app)
+}
+
+#[tauri::command]
+fn mouser_clear_api_key(app: AppHandle) -> Result<MouserConfigStatus, String> {
+    let path = mouser_api_key_path(&app)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not remove the Mouser API key file: {error}")),
+    }
+    mouser_config_status(app)
+}
+
+#[tauri::command]
+async fn mouser_search(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: MouserSearchRequest,
+) -> Result<MouserSearchResponse, String> {
+    request.validate().map_err(err_str)?;
+    let (api_key, _) = configured_mouser_api_key(&app)?.ok_or_else(|| {
+        "configure a Mouser Search API key in Hardware → Circuit before searching".to_string()
+    })?;
+    reserve_mouser_search(&state.mouser_searches, Instant::now())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        MouserClient::new(api_key)
+            .and_then(|client| client.search(&request))
+            .map_err(err_str)
     })
     .await
     .map_err(err_str)?
@@ -4677,6 +4881,7 @@ pub fn run() {
                 mqtt: Mutex::new(None),
                 device_browse: Mutex::new(None),
                 agent: Mutex::new(None),
+                mouser_searches: Mutex::new(MouserSearchUsage::default()),
                 build_gate: Arc::new(Mutex::new(())),
             });
             // Hotplug watcher: enumeration (does the port exist?) is orders of
@@ -4757,6 +4962,10 @@ pub fn run() {
             circuit_load,
             circuit_save,
             circuit_validate,
+            mouser_config_status,
+            mouser_set_api_key,
+            mouser_clear_api_key,
+            mouser_search,
             compile_sketch,
             upload_sketch,
             git_state,
@@ -6011,6 +6220,82 @@ mod tests {
         .join();
         assert!(gate.is_poisoned());
         assert!(try_build_gate(&gate).is_ok());
+    }
+
+    // ---------- Mouser credentials ----------
+
+    #[test]
+    fn mouser_key_file_roundtrips_without_exposing_the_key_in_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/mouser-api-key");
+        write_mouser_api_key_at(&path, "test-search-api-key").unwrap();
+        assert_eq!(
+            read_mouser_api_key_at(&path).unwrap().as_deref(),
+            Some("test-search-api-key")
+        );
+        assert!(!dir.path().join("settings.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mouser_credentials_are_private_on_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials/mouser-api-key");
+        write_mouser_api_key_at(&path, "test-search-api-key").unwrap();
+        assert_eq!(
+            std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mouser_refuses_a_key_file_readable_by_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mouser-api-key");
+        std::fs::write(&path, "test-search-api-key\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = read_mouser_api_key_at(&path).unwrap_err();
+        assert!(error.contains("accessible by other users"), "{error}");
+    }
+
+    #[test]
+    fn mouser_search_gate_enforces_the_published_minute_limit() {
+        let usage = Mutex::new(MouserSearchUsage::default());
+        let start = Instant::now();
+        for offset in 0..MOUSER_CALLS_PER_MINUTE {
+            reserve_mouser_search(&usage, start + Duration::from_millis(offset as u64)).unwrap();
+        }
+        let error = reserve_mouser_search(&usage, start + Duration::from_secs(59)).unwrap_err();
+        assert!(error.contains("30 calls per minute"), "{error}");
+        assert!(reserve_mouser_search(&usage, start + Duration::from_secs(60)).is_ok());
+    }
+
+    #[test]
+    fn mouser_search_gate_enforces_the_published_daily_limit() {
+        let usage = Mutex::new(MouserSearchUsage::default());
+        let start = Instant::now();
+        for offset in 0..MOUSER_CALLS_PER_DAY {
+            reserve_mouser_search(&usage, start + Duration::from_secs(offset as u64 * 61)).unwrap();
+        }
+        let error = reserve_mouser_search(
+            &usage,
+            start + Duration::from_secs(MOUSER_CALLS_PER_DAY as u64 * 61),
+        )
+        .unwrap_err();
+        assert!(error.contains("daily"), "{error}");
     }
 
     // ---------- misc ----------

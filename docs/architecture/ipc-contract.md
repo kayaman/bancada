@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **99** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **103** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 6 tools | the AI Assistant's tools |
@@ -31,7 +31,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (99)
+## 2. Commands (103)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -102,6 +102,19 @@ The catalog and validation engine live in `core::circuit`. Saving
 guide, BOM and validation JSON. Loading and validation compare each artifact
 byte-for-byte with a fresh render and compare the manifest board with the
 active profile/FQBN.
+
+### Mouser sourcing — 4
+`mouser_config_status` · `mouser_set_api_key` · `mouser_clear_api_key` ·
+`mouser_search`
+
+The first three manage a private application credential and return only
+`{configured, source}`—never the key. `MOUSER_API_KEY` takes precedence over
+the private file. `mouser_search` accepts a typed keyword or part-number
+request, runs the blocking HTTPS call off the async runtime, validates inputs,
+and applies a process-local guard for Mouser's published 30/minute + 1,000/day
+constraints before returning normalized live metadata. Results remain webview
+state and are not persisted in project files. The frontend never supplies a
+credential with a search request.
 
 ### Build and flash — 2
 `compile_sketch` · `upload_sketch`

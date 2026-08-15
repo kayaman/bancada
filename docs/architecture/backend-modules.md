@@ -5,12 +5,12 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ src-tauri  (crate `bancada`, lib `bancada_lib`)              │
-│   lib.rs — 99 commands, AppState, threads, events, MCP       │
+│   lib.rs — 103 commands, AppState, threads, events, MCP      │
 │   Owns: processes · threads · mutexes · files · the window   │
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
 ┌───────────────────────────┴──────────────────────────────────┐
-│ core  (crate `bancada-core`) — 23 modules, no UI dependencies│
+│ core  (crate `bancada-core`) — 24 modules, no UI dependencies│
 │   Pure of Tauri. Parsers, validators, policy, wire formats.  │
 │   Owns: no long-lived state, no knowledge that a UI exists   │
 └──────────────────────────────────────────────────────────────┘
@@ -20,7 +20,7 @@ The rule and its rationale are in [conventions §1](conventions.md#1-the-layerin
 
 ---
 
-## 1. `bancada-core` — the 23 modules
+## 1. `bancada-core` — the 24 modules
 
 `core/src/lib.rs` is 61 lines: the module list, one `Error` enum, one `Result`
 alias. Every error in the crate is one of six variants — `Io`, `ToolFailed`,
@@ -45,6 +45,7 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | `clone.rs` | 1169 | Copy a project under a new name — **"Duplicate" in the UI**; the module keeps the older name. Staging directory + atomic rename, merged `.gitignore` written *into the staging dir* so credential ignore rules exist before any possible commit, best-effort `git init`. Skips `.bancada` and `.claude`. Its `retitle_main_ino` and `rewrite_sketch_yaml` are `pub(crate)` and shared with `project::rename_project`, so their warnings name no caller. |
 | `files.rs` | 389 | Explorer mutations: `validate_rel_path`, protected-path checks, collision and descendant guards. **Delete goes to the OS trash** (`trash::delete`), never `fs::remove`. |
 | `circuit.rs` | current | Versioned `hardware/circuit.yaml` model, sourced ESP32 board catalog, electrical and firmware validation, deterministic pin-header/SVG/wiring/BOM/report generation, stale-artifact checks, and the shared build guard. Reused by Tauri, MCP and the `bancada-circuit` CLI. |
+| `mouser.rs` | current | HTTPS client for Mouser Search API v1 keyword and part-number endpoints. Validates bounded inputs and documented record/part-number limits, normalizes live price/attribute responses, rejects non-HTTPS links, caps bodies, surfaces API errors, and redacts the query-string API key. |
 
 ### Libraries
 
@@ -106,7 +107,7 @@ event taxonomy, the agent safety model, the build gate and the MQTT contract.
 
 ### What it owns
 
-- **The 99 commands** — see [ipc-contract](ipc-contract.md).
+- **The 103 commands** — see [ipc-contract](ipc-contract.md).
 - **`AppState`** — five independent session slots plus the build gate. See
   [runtime-model](runtime-model.md).
 - **Every thread** — hotplug watcher, monitor readers, scope reader, MQTT

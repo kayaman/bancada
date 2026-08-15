@@ -20,7 +20,7 @@ lines of TypeScript.
 │   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/               │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  src/api.ts — the ONLY IPC module
-              99 invoke commands · 7 events · 3 Channels
+             103 invoke commands · 7 events · 3 Channels
 ┌───────────────────────────────┴───────────────────────────────────────┐
 │ src-tauri  (crate `bancada`)                                          │
 │   lib.rs — commands, AppState, threads, event emission                │
@@ -29,12 +29,13 @@ lines of TypeScript.
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │
 ┌───────────────────────────────┴───────────────────────────────────────┐
-│ core  (crate `bancada-core`) — 23 modules, no Tauri, no UI            │
+│ core  (crate `bancada-core`) — 24 modules, no Tauri, no UI            │
 │   parsers · validators · policy · wire formats · argv builders        │
 │   unit-testable headlessly; reusable from a CLI or another frontend   │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  subprocesses (all resolved from PATH)
         arduino-cli · esptool · git · gh · claude
+                       + optional Mouser HTTPS API
                                 │
                           the board on the bench
 ```
@@ -68,7 +69,7 @@ Read in this order the first time.
 | [current-state diagram and review](current-state-diagram.md) | How every layer, datastore, circuit artifact, and external integration connects; strengths and current risks. |
 | [system-context](system-context.md) | What does Bancada talk to, and why does it shell out to everything? |
 | [conventions](conventions.md) | How does this project work — layering, testing, commits, releases? |
-| [backend-modules](backend-modules.md) | What are the 22 core modules, and what does the Tauri layer add? |
+| [backend-modules](backend-modules.md) | What are the 24 core modules, and what does the Tauri layer add? |
 | [ipc-contract](ipc-contract.md) | Every command, event, channel, and the MCP surface. |
 | [frontend](frontend.md) | The shell, the three state tiers, the pure-logic tier. |
 | [runtime-model](runtime-model.md) | `AppState`, the locks, the threads, shutdown, cancellation. |
@@ -114,7 +115,7 @@ on. No refactor is proposed here.
 
 ### `src-tauri/src/lib.rs` is 6,658 lines
 
-All 99 commands live in one module. The seams are already visible — the handler
+All 103 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
 subsystems (scope, agent + MCP, mqtt, device-proxy, git, fleet, chat + usage),
 each with its own slot in `AppState` and its own threads.

@@ -445,6 +445,8 @@ describe("argument-less commands", () => {
     ["updateCoreIndex", "update_core_index"],
     ["defaultProjectParent", "default_project_parent"],
     ["loadSettings", "load_settings"],
+    ["mouserConfigStatus", "mouser_config_status"],
+    ["mouserClearApiKey", "mouser_clear_api_key"],
     ["stopMonitor", "stop_monitor"],
     ["scopeStop", "scope_stop"],
     ["mqttDisconnect", "mqtt_disconnect"],
@@ -563,6 +565,26 @@ describe("build, upload and monitor", () => {
       "circuit_validate",
       { sketchDir: "/s", profile: null, fqbn: null },
     ]);
+  });
+
+  it("Mouser wrappers keep credentials separate from search requests", async () => {
+    await api.mouserSetApiKey("private-key");
+    expect(called()).toEqual([
+      "mouser_set_api_key",
+      { apiKey: "private-key" },
+    ]);
+
+    const request: api.MouserSearchRequest = {
+      query: "ESP32-C6-WROOM-1-N8",
+      kind: "part_number",
+      records: 10,
+      starting_record: 0,
+      option: "none",
+      exact: true,
+    };
+    await api.mouserSearch(request);
+    expect(called()).toEqual(["mouser_search", { request }]);
+    expect(called()[1]).not.toHaveProperty("apiKey");
   });
 
   it("startMonitor and monitorSend pass their payloads", async () => {
