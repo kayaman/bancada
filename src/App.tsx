@@ -2212,9 +2212,6 @@ export default function App() {
                 setBuildLines([]);
                 openBottomTab("build");
               }}
-              openSketchDir={sketchDir}
-              onOpenProject={(dir) => void loadSketch(dir)}
-              openCost={offerOpenCost}
               notify={notify}
             />
           )}

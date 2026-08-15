@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boardOffer, driftLabel, projectName } from "../boardOffer";
+import { boardOffer, driftLabel } from "../boardOffer";
 import type { FleetEntry, FleetSnapshot, FlashRecord } from "../api";
 
 const rec = (over: Partial<FlashRecord> = {}): FlashRecord => ({
@@ -101,34 +101,6 @@ describe("boardOffer", () => {
     const b = board({ id: "bb:22", last_seen: 100, nickname: "other" });
     const o = boardOffer(snap([a, b]), null, none, new Set(["aa:11"]));
     expect(o?.title).toBe("other");
-  });
-});
-
-describe("projectName", () => {
-  it("takes the last path segment", () => {
-    expect(projectName("/home/u/Projects/waves1")).toBe("waves1");
-  });
-
-  it("ignores a trailing separator", () => {
-    // A recorded dir can carry one; the naive split returns "" and the card
-    // renders a blank row that reads as a bug.
-    expect(projectName("/home/u/Projects/waves1/")).toBe("waves1");
-    expect(projectName("/home/u/Projects/waves1///")).toBe("waves1");
-  });
-
-  it("handles a Windows path", () => {
-    expect(projectName("C:\\Users\\u\\Projects\\waves1")).toBe("waves1");
-    expect(projectName("C:\\Users\\u\\Projects\\waves1\\")).toBe("waves1");
-  });
-
-  it("returns a bare name unchanged", () => {
-    expect(projectName("waves1")).toBe("waves1");
-  });
-
-  it("hands back anything with no segment at all", () => {
-    // Better a recognisable oddity than an empty cell.
-    expect(projectName("/")).toBe("/");
-    expect(projectName("")).toBe("");
   });
 });
 

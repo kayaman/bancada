@@ -66,21 +66,6 @@ export function boardOffer(
 }
 
 /**
- * The project's name for a card that has no room for its path.
- *
- * The last path segment, with trailing separators ignored — a recorded
- * `/home/me/waves1/` must still read `waves1` and not empty. Windows paths
- * arrive with backslashes, so both separators split. A path that is nothing
- * but separators, or empty, has no name to give and comes back whole: the
- * full string is at least something the user can recognise, where `""` would
- * render as a blank row that looks like a bug.
- */
-export function projectName(dir: string): string {
-  const parts = dir.split(/[/\\]+/).filter((s) => s.length > 0);
-  return parts.length > 0 ? parts[parts.length - 1] : dir;
-}
-
-/**
  * How the project has moved since the board was flashed.
  *
  * `drift` is the commit count from `git_project_drift`; `null` means the
