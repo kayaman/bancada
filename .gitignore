@@ -4,3 +4,8 @@ target/
 src-tauri/target/
 *.log
 .DS_Store
+
+# Disk images downloaded into the repo root for flashing SBCs. Large enough
+# that committing one by accident is painful to undo.
+*.img
+*.img.xz
