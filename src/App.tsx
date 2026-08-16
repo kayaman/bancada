@@ -416,13 +416,20 @@ export default function App() {
       w = clampSidebarWidth(startW + (ev.clientX - startX));
       setSidebarWidth(w);
     };
+    // `pointercancel` as well as `pointerup`: a cancelled drag (an
+    // interrupted touch, the browser reclaiming the capture) releases the
+    // pointer capture but fires no `pointerup`, so tearing down on `up`
+    // alone left `onMove` bound to the handle — after which merely hovering
+    // the divider resized the panel.
     const onUp = () => {
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
       localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
     };
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
   };
 
   const setCollapsed = (next: boolean) => {
@@ -441,13 +448,16 @@ export default function App() {
       h = clampBottomHeight(startH + (startY - ev.clientY));
       setBottomHeight(h);
     };
+    // Same `pointercancel` teardown as the sidebar handle above.
     const onUp = () => {
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onUp);
       localStorage.setItem(BOTTOM_HEIGHT_KEY, String(h));
     };
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
   };
 
   // ---------- event subscriptions ----------
