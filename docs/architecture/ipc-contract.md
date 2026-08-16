@@ -288,8 +288,15 @@ Four tools (`core/src/mcp.rs`):
 |---|---|
 | `verify` | compile the open sketch, through the same build gate as the button |
 | `upload` | flash it — **no port argument**; uses the UI-selected port and the session-frozen profile, and is refused unless "Allow uploads" is armed |
-| `serial_read` | read from the rolling `SerialRing` since this session's cursor (`wait_s` clamped to 10) |
+| `serial_read` | read from the rolling `SerialRing` since this session's cursor (`wait_s` clamped to 10), auto-starting the monitor if the port is free |
 | `serial_send` | write a line to the monitor |
+
+`serial_read`'s auto-start takes the **build gate** and refuses while a build
+or flash holds it — otherwise it could take the port back in the window
+between the Flash button freeing it and esptool opening it, and the flash
+would fail looking like a hardware fault. Reading a monitor that is *already*
+open never consults the gate, so a long compile does not blind the agent. See
+[runtime-model §3](runtime-model.md#3-the-build-gate).
 
 Listener discipline (`mcp_listener_loop`), each rule the result of an observed
 failure:

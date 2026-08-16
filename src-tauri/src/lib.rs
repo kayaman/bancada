@@ -264,6 +264,33 @@ fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Free the serial port so a flash can have it, or say why it cannot.
+///
+/// Both flash paths call this — `upload_sketch` (the Upload button) and the
+/// agent's MCP `upload`. They must not disagree: for a while only the MCP
+/// path evicted, and the button relied on the frontend having stopped the
+/// monitor before it invoked. That held for a user clicking Flash, but the
+/// agent's `serial_read` auto-start is a *different thread* that knows
+/// nothing about the frontend's intent, so it could re-take the port between
+/// the frontend's stop and esptool's open — and the flash failed on a busy
+/// port, blaming the board.
+///
+/// The scope is never evicted: it is a user-driven measurement session, and
+/// silently killing it to flash would destroy a capture in progress. The
+/// caller must already hold the build gate; `serial` is a leaf lock taken
+/// under it and released here, never across the flash itself.
+fn free_port_for_flash(serial: &Mutex<Option<SerialOwner>>) -> Result<(), String> {
+    let mut guard = serial.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(SerialOwner::Scope(_)) => Err(SCOPE_OWNS_PORT.to_string()),
+        Some(SerialOwner::Monitor(_)) => {
+            evict_owner(&mut guard);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
 /// Kill and reap a monitor child process.
 fn kill_child(mut child: Child) {
     let _ = child.kill();
@@ -1267,8 +1294,15 @@ async fn upload_sketch(
 ) -> Result<RunResult, String> {
     let cli = state.cli.clone();
     let gate = state.build_gate.clone();
+    let serial = state.serial.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = try_build_gate(&gate)?;
+        // Under the gate, so a monitor cannot come back between here and
+        // esptool opening the port. The frontend stops the monitor before
+        // invoking too, but that is a courtesy — it makes the Monitor tab's
+        // state honest — and it cannot see the agent's `serial_read`
+        // auto-start, which runs on the MCP listener thread.
+        free_port_for_flash(&serial)?;
         let emit_line = |line: OutputLine| {
             let _ = app.emit("build://line", &line);
         };
@@ -2665,7 +2699,7 @@ fn mqtt_connect(
     subscribe_filter: Option<String>,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
-    let mut guard = state.mqtt.lock().unwrap();
+    let mut guard = lock_slot(&state.mqtt);
     if let Some(old) = guard.take() {
         stop_mqtt_session(old);
     }
@@ -2731,7 +2765,7 @@ fn mqtt_publish(
     payload: String,
     retain: bool,
 ) -> Result<(), String> {
-    let guard = state.mqtt.lock().unwrap();
+    let guard = lock_slot(&state.mqtt);
     let Some(session) = guard.as_ref() else {
         return Err("mqtt is not connected".to_string());
     };
@@ -2743,7 +2777,7 @@ fn mqtt_publish(
 
 #[tauri::command]
 fn mqtt_subscribe(state: State<'_, AppState>, filter: String) -> Result<(), String> {
-    let guard = state.mqtt.lock().unwrap();
+    let guard = lock_slot(&state.mqtt);
     let Some(session) = guard.as_ref() else {
         return Err("mqtt is not connected".to_string());
     };
@@ -2755,7 +2789,7 @@ fn mqtt_subscribe(state: State<'_, AppState>, filter: String) -> Result<(), Stri
 
 #[tauri::command]
 fn mqtt_unsubscribe(state: State<'_, AppState>, filter: String) -> Result<(), String> {
-    let guard = state.mqtt.lock().unwrap();
+    let guard = lock_slot(&state.mqtt);
     let Some(session) = guard.as_ref() else {
         return Err("mqtt is not connected".to_string());
     };
@@ -2764,7 +2798,7 @@ fn mqtt_unsubscribe(state: State<'_, AppState>, filter: String) -> Result<(), St
 
 #[tauri::command]
 fn mqtt_disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.mqtt.lock().unwrap();
+    let mut guard = lock_slot(&state.mqtt);
     let Some(session) = guard.take() else {
         return Err("mqtt is not connected".to_string());
     };
@@ -2990,7 +3024,7 @@ fn dev_proxy_loop(
         .timeout(Duration::from_secs(10))
         .build();
     for request in server.incoming_requests() {
-        let target = target.lock().unwrap().clone();
+        let target = lock_slot(&target).clone();
         let agent = agent.clone();
         let on_event = on_event.clone();
         std::thread::spawn(move || dev_proxy_handle(request, &target, &agent, &on_event));
@@ -3015,7 +3049,7 @@ fn device_browse_start(
 ) -> Result<u16, String> {
     let target = devproxy::parse_target(&url).map_err(err_str)?;
 
-    let mut guard = state.device_browse.lock().unwrap();
+    let mut guard = lock_slot(&state.device_browse);
     if let Some(old) = guard.take() {
         stop_device_browse(old);
     }
@@ -3049,10 +3083,10 @@ fn device_browse_start(
 #[tauri::command]
 fn device_browse_set_target(state: State<'_, AppState>, url: String) -> Result<(), String> {
     let target = devproxy::parse_target(&url).map_err(err_str)?;
-    let guard = state.device_browse.lock().unwrap();
+    let guard = lock_slot(&state.device_browse);
     match guard.as_ref() {
         Some(db) => {
-            *db.target.lock().unwrap() = target;
+            *lock_slot(&db.target) = target;
             Ok(())
         }
         None => Err("the device proxy is not running — start it first".into()),
@@ -3061,7 +3095,7 @@ fn device_browse_set_target(state: State<'_, AppState>, url: String) -> Result<(
 
 #[tauri::command]
 fn device_browse_stop(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(db) = state.device_browse.lock().unwrap().take() {
+    if let Some(db) = lock_slot(&state.device_browse).take() {
         stop_device_browse(db);
     }
     Ok(())
@@ -3124,6 +3158,19 @@ struct AgentSession {
 /// plus its 0600 temp files (I4).
 fn lock_agent(state: &AppState) -> std::sync::MutexGuard<'_, Option<AgentSession>> {
     state.agent.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Lock one of the sibling session slots (`mqtt`, `device_browse`, and the
+/// device proxy's target), recovering from poison.
+///
+/// The same policy as [`lock_agent`] and `try_build_gate`, generic because
+/// these two slots had drifted off it: they used a bare `.unwrap()`, so a
+/// panic under either lock bricked that panel for the process lifetime —
+/// while the exit handler, which *does* recover, went on tearing the slot
+/// down. `runtime-model.md` §5 described the recovering behaviour as
+/// universal; this is what makes that true.
+fn lock_slot<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A cold ESP32 platform build runs for minutes — far longer than the
@@ -3697,6 +3744,11 @@ const NO_SELECTED_TARGET: &str =
 /// user-driven measurement session the agent must never evict.
 const SCOPE_OWNS_PORT: &str =
     "the oscilloscope owns the serial port — ask the user to stop the scope first";
+/// `serial_read`'s refusal when it would have to *start* a monitor while a
+/// build or flash holds the gate. Reading a monitor that is already open is
+/// never refused — see `run_serial_read`.
+const MONITOR_BUSY_BUILDING: &str = "a build or flash is in progress, so the serial monitor \
+     cannot be started right now — call this tool again when it finishes";
 /// Byte cap on one `serial_read` result (the ring's cursor resumes where a
 /// cut left off, so nothing is lost — the agent just calls again).
 const SERIAL_READ_MAX_BYTES: usize = 16_000;
@@ -3745,14 +3797,10 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
         return (TOOL_CANCELLED.to_string(), true);
     }
 
-    {
-        let mut guard = ctx.serial.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(SerialOwner::Scope(_)) => return (SCOPE_OWNS_PORT.to_string(), true),
-            Some(SerialOwner::Monitor(_)) => evict_owner(&mut guard),
-            None => {}
-        }
-    } // dropped before the flash — `serial` never spans a long operation
+    // `serial` is taken and dropped inside here — it never spans the flash.
+    if let Err(refusal) = free_port_for_flash(&ctx.serial) {
+        return (refusal, true);
+    }
 
     emit_agent(serde_json::json!({ "type": "upload_started", "port": target.port }));
 
@@ -3781,12 +3829,21 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
             // record is of what reached the board, not of who sent it. Still
             // under the build gate, and still unable to fail the flash.
             if result.success {
+                // Looked up *before* tagging, not after, so the board's name
+                // reaches the tag body's `board:` line. Passing `None` here
+                // made "tagged exactly like the user's" untrue in the one
+                // way a reader of `git show` would notice: the agent's tags
+                // said which port and which fqbn, but never which board.
+                let board = ctx
+                    .fleet_file
+                    .as_deref()
+                    .and_then(|f| board_on_port(f, &target.port));
                 let flashed = tag_flash(
                     &ctx.sketch_dir,
                     ctx.profile.as_deref(),
                     ctx.fqbn.as_deref(),
                     &target.port,
-                    None,
+                    board.as_ref().map(|(_, name)| name.as_str()),
                     &|line| {
                         if !ctx.is_cancelled() {
                             if let Ok(value) = serde_json::to_value(&line) {
@@ -3799,10 +3856,10 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
                 // Skipping this would leave the board pointing at whatever
                 // project was flashed *before* — a confidently wrong answer,
                 // which is worse than none.
-                if let (Some(f), Some(info)) = (ctx.fleet_file.as_deref(), &flashed) {
-                    if let Some((id, _)) = board_on_port(f, &target.port) {
-                        note_flash_on_board(f, id.as_str(), &ctx.sketch_dir, info);
-                    }
+                if let (Some(f), Some((id, _)), Some(info)) =
+                    (ctx.fleet_file.as_deref(), &board, &flashed)
+                {
+                    note_flash_on_board(f, id.as_str(), &ctx.sketch_dir, info);
                 }
             }
             let summary =
@@ -3845,6 +3902,30 @@ fn run_serial_read(ctx: &McpToolCtx, emit: &Arc<EmitFn>, args: &serde_json::Valu
             Some(SerialOwner::Scope(_)) => return (SCOPE_OWNS_PORT.to_string(), true),
             Some(SerialOwner::Monitor(_)) => {}
             None => {
+                // Auto-start only: a monitor that is already open is not
+                // contending with anything, and refusing to *read* it would
+                // blind the agent for the whole of a multi-minute compile.
+                // Starting one is different — the Flash button frees the
+                // port and esptool is about to take it, so a monitor
+                // spawned in that window fails the flash.
+                //
+                // The gate is held across the spawn rather than probed and
+                // released: a probe would race the build it just checked
+                // for.
+                //
+                // This is the one site that takes `build_gate` *below*
+                // `serial`, inverting the documented order. It is safe only
+                // because the acquisition is `try_` — a try-lock never
+                // waits, so it cannot close a cycle with `upload_sketch`,
+                // which holds the gate and then wants `serial`. That thread
+                // finds `serial` busy for exactly as long as this arm takes
+                // to spawn a child and return, and this arm gives up on the
+                // gate instantly rather than waiting for it. **Do not
+                // change this to a blocking `lock()`** — that is a deadlock,
+                // not a slower version of the same thing.
+                let Ok(_gate) = try_build_gate(&ctx.build_gate) else {
+                    return (MONITOR_BUSY_BUILDING.to_string(), true);
+                };
                 let target = ctx
                     .selected_target
                     .lock()
@@ -4108,11 +4189,16 @@ fn agent_event_alarm(
                 ) {
                     continue;
                 }
-                let file_path = input.get("file_path").and_then(|v| v.as_str());
+                // Via `guarded_tool_path`, not `input["file_path"]`: the
+                // guarded tools do not agree on the key (`NotebookEdit` uses
+                // `notebook_path`), and the hook and this backstop must read
+                // exactly the same set of spellings or they disagree about
+                // what escaped.
+                let file_path = agent::guarded_tool_path(input);
                 let escapes = match file_path {
                     Some(path) => !agent::path_is_confined(Path::new(sketch_dir), path),
-                    // A guarded tool with no readable file_path: the guard
-                    // hook denies it, and so does this.
+                    // A guarded tool with no readable path: the guard hook
+                    // denies it, and so does this.
                     None => true,
                 };
                 if escapes {
@@ -5361,6 +5447,80 @@ mod tests {
         assert!(text.contains("no serial port is selected"), "{text}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn freeing_the_port_for_a_flash_evicts_a_monitor_but_never_the_scope() {
+        // Both flash paths — the Upload button and the agent's MCP `upload`
+        // — go through this, so they cannot disagree about who may hold the
+        // port. They used to: `run_upload` evicted, `upload_sketch` relied
+        // on the frontend having stopped the monitor first, which the agent
+        // knows nothing about.
+        let serial: Mutex<Option<SerialOwner>> = Mutex::new(None);
+        // Nothing holds the port: nothing to do, and no refusal.
+        assert_eq!(free_port_for_flash(&serial), Ok(()));
+
+        *serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        assert_eq!(free_port_for_flash(&serial), Ok(()));
+        assert!(
+            serial.lock().unwrap().is_none(),
+            "the monitor must be evicted and the slot left empty"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_read_will_not_auto_start_the_monitor_during_a_build() {
+        // The race this closes: the Flash button frees the port, and the
+        // agent's next `serial_read` auto-start takes it back before
+        // esptool opens it — so the flash fails on a busy port and blames
+        // the hardware. The build gate is what "a build or flash is in
+        // flight" means everywhere else in this file, so auto-start asks it
+        // too, and holds it across the spawn rather than probing and
+        // letting go (which would race the very build it just checked for).
+        let dir = tempfile::tempdir().unwrap();
+        let shared_gate = gate();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            shared_gate.clone(),
+            Arc::new(AtomicBool::new(false)),
+            HwParts::armed_with_target("/dev/ttyTEST0"),
+        );
+        let _held = shared_gate.lock().unwrap();
+        let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
+        assert!(is_error);
+        assert_eq!(text, MONITOR_BUSY_BUILDING);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_read_still_reads_an_already_running_monitor_during_a_build() {
+        // Only the *auto-start* needs the gate. A monitor the user already
+        // had open is not contending for anything, and refusing to read it
+        // would blind the agent for the whole of a multi-minute compile.
+        let dir = tempfile::tempdir().unwrap();
+        let shared_gate = gate();
+        let hw = HwParts::default();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        let serial = hw.serial.clone();
+        let ring = hw.ring.clone();
+        let l = start_listener_hw(
+            stub_cli(&dir, "exit 0"),
+            "/sketch",
+            shared_gate.clone(),
+            Arc::new(AtomicBool::new(false)),
+            hw,
+        );
+        ring.lock()
+            .unwrap()
+            .push(bancada_core::types::OutputStream::Stdout, "boot ok");
+        let _held = shared_gate.lock().unwrap();
+        let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
+        assert!(!is_error, "{text}");
+        assert!(text.contains("boot ok"), "{text}");
+        evict_owner(&mut serial.lock().unwrap());
+    }
+
     /// A long-lived stand-in for a monitor child, so tests can install a
     /// `SerialOwner::Monitor` without a real arduino-cli.
     #[cfg(unix)]
@@ -5860,6 +6020,35 @@ mod tests {
         .join();
         assert!(gate.is_poisoned());
         assert!(try_build_gate(&gate).is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_sibling_slot_still_opens() {
+        // `runtime-model.md` §5 says every AppState mutex recovers from
+        // poison, and `serial`/`serial_ring`/`agent`/`build_gate` all did —
+        // but the `mqtt` and `device_browse` commands used a bare
+        // `.unwrap()`, so one panic under either lock bricked that panel for
+        // the rest of the process. The reasoning is `lock_agent`'s: whatever
+        // the slot held has already lost its invariants by the time the
+        // panicking command returned, and refusing the lock only wedges the
+        // process on top of that.
+        fn poison<T: Send + 'static>(slot: Arc<Mutex<Option<T>>>) {
+            let p = slot.clone();
+            let _ = std::thread::spawn(move || {
+                let _guard = p.lock().unwrap();
+                panic!("a command panicked under the slot lock");
+            })
+            .join();
+            assert!(slot.is_poisoned());
+        }
+
+        let mqtt: Arc<Mutex<Option<MqttSession>>> = Arc::new(Mutex::new(None));
+        poison(mqtt.clone());
+        assert!(lock_slot(&mqtt).is_none(), "the slot must still be readable");
+
+        let browse: Arc<Mutex<Option<DeviceBrowse>>> = Arc::new(Mutex::new(None));
+        poison(browse.clone());
+        assert!(lock_slot(&browse).is_none());
     }
 
     // ---------- misc ----------
@@ -6372,6 +6561,27 @@ mod tests {
         // and alarming on it would stop sessions for looking at a library.
         let read = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/usr/include/stdio.h"}}]}}"#;
         assert!(agent_event_alarm(&event(read), &dir).is_none());
+    }
+
+    #[test]
+    fn the_backstop_reads_a_notebook_edits_own_path_key() {
+        // `NotebookEdit` carries `notebook_path`, not `file_path`. Reading
+        // only `file_path` made an ordinary in-project notebook edit look
+        // like a guarded tool with no path — which this backstop treats as
+        // an escape, so it killed the session. It must still catch a
+        // notebook edit that genuinely leaves the project.
+        let sketch = tempfile::tempdir().unwrap();
+        let dir = sketch.path().to_string_lossy().into_owned();
+        let inside = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"NotebookEdit","input":{"notebook_path":"probe.ipynb","new_source":"x"}}]}}"#;
+        assert!(
+            agent_event_alarm(&event(inside), &dir).is_none(),
+            "a notebook inside the project is an ordinary edit"
+        );
+
+        let outside = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"NotebookEdit","input":{"notebook_path":"/tmp/escape.ipynb","new_source":"x"}}]}}"#;
+        let (kind, detail) = agent_event_alarm(&event(outside), &dir).expect("an alarm");
+        assert_eq!(kind, "path_escape");
+        assert!(detail.contains("/tmp/escape.ipynb"), "{detail}");
     }
 
     #[test]

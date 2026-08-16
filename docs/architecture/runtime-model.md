@@ -58,6 +58,14 @@ writer, and joining.
   killed or joined *under* it, so taking it would deadlock the join.
 - Lock order: `build_gate` (try-only) → `serial` → nothing.
 
+**One site inverts that order**, and it is safe only for a specific reason.
+The MCP `serial_read` tool holds `serial` and then reaches for `build_gate`,
+because it must decide whether to *auto-start* a monitor while looking at the
+owner slot. A try-lock cannot close a deadlock cycle — it never waits — so it
+cannot hang against `upload_sketch`, which holds the gate and then wants
+`serial`. **Do not convert it to a blocking `lock()`.** That is a deadlock,
+not a slower version of the same thing.
+
 `serial_ring` is separate and is **never taken together with `serial`**. Reader
 threads may lock the ring, because nothing joins a thread while holding it.
 
@@ -88,10 +96,35 @@ touch the platform and library trees, not a sketch's build cache, and
 serialising them behind a long compile would make the Boards and Libraries
 panels fail for no benefit.
 
-There are **five** `try_build_gate` call sites. Four are builds — user Verify,
-user Flash, and the agent's MCP `verify` and `upload`. The fifth is
-`rename_project`, which holds the gate for a different reason: it moves the
-very tree the other four compile from, so it must not run beside them.
+There are **six** `try_build_gate` call sites, and only four of them are
+builds. Naming the rule rather than the count: *the gate is held by anything
+that must not run beside a compile or a flash.*
+
+- Four **builds** — user Verify, user Flash, and the agent's MCP `verify` and
+  `upload`.
+- `rename_project`, which moves the very tree the other four compile from.
+- The MCP `serial_read` tool, but **only on the path where it would start a
+  monitor**. Reading a monitor that is already open never consults the gate:
+  it contends for nothing, and refusing it would blind the agent for the whole
+  of a multi-minute compile. Starting one is different — the Flash button
+  frees the port and esptool is about to take it, so a monitor spawned in that
+  window fails the flash and appears to blame the board.
+
+### Who may hold the serial port during a flash
+
+Both flash paths call `free_port_for_flash` **under the gate**: it evicts a
+monitor and refuses outright if the scope owns the port (a user-driven
+measurement is never killed to make room for a flash).
+
+This used to be split across two layers, and the seam was a real race. Only
+the MCP `upload` evicted; the Upload button relied on the frontend having
+called `stopMonitor` before it invoked. That held for a user clicking Flash,
+but the agent's `serial_read` auto-start runs on the MCP listener thread and
+knows nothing about the frontend's intent — so it could take the port back
+between the frontend's stop and esptool's open.
+
+The frontend still stops the monitor first. That is now a courtesy, so the
+Monitor tab's state stays honest, not the mechanism.
 
 ---
 
