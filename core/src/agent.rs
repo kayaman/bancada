@@ -378,9 +378,6 @@ pub const REFUSED_DIRS: &[&str] = &[".claude", ".git"];
 /// path component *below* `sketch_dir` is one of [`REFUSED_DIRS`].
 ///
 /// - Relative candidates are resolved against `sketch_dir` (the agent's cwd).
-/// - `..` traversal is normalised away lexically *before* the prefix test, so
-///   `<sketch>/../../etc/passwd` is rejected rather than passing a naive
-///   `starts_with`.
 /// - Symlinks are followed as far as the filesystem allows: the longest
 ///   existing prefix of the candidate is `canonicalize`d and the not-yet-
 ///   existing tail appended. A symlink *inside* the project pointing out of
@@ -388,6 +385,13 @@ pub const REFUSED_DIRS: &[&str] = &[".claude", ".git"];
 ///   created file still gets a meaningful answer (`canonicalize` alone cannot
 ///   answer for a path that does not exist yet, which is the common case for
 ///   `Write`).
+/// - `..` traversal is folded *after* that canonicalisation, never before, so
+///   `<sketch>/../../etc/passwd` is rejected — and so is `<link>/../x` where
+///   `<link>` is a symlink out of the project. Folding first would pop the
+///   symlink as if it were a plain directory and call the result confined;
+///   the kernel resolves the link and lands `..` in the *target's* parent.
+///   Only components that do not exist are folded lexically, and something
+///   that does not exist cannot be a symlink.
 /// - `sketch_dir` itself is canonicalised the same way, so a project reached
 ///   through a symlinked parent (`/tmp` → `/private/tmp` on macOS, a
 ///   symlinked home) compares equal instead of spuriously failing.
@@ -487,38 +491,46 @@ pub fn deny_rules(project_dir: &str, temp_dir: &str) -> Vec<String> {
     ]
 }
 
-/// Normalise `p` lexically (drop `.`, fold `..`), then canonicalise the
-/// longest prefix that actually exists and re-append the rest.
+/// Canonicalise the longest prefix of `p` that actually exists, then apply
+/// the remaining components — the ones that do not exist — lexically.
 ///
 /// `Path::canonicalize` fails outright on a path whose leaf does not exist —
 /// which is the normal case for a `Write` creating a new file — so it cannot
-/// be used directly. Folding `..` lexically *first* is what makes
-/// `<sketch>/../../etc/passwd` collapse to `/etc/passwd` before any prefix
-/// comparison happens.
+/// be used directly. But it must still be given the *raw* prefix, `..` and
+/// all: only the kernel knows that `<link>/..` means the parent of the link's
+/// **target**, and a lexical fold applied first would answer "the parent of
+/// the link", which is a different — and confinable-looking — directory.
+///
+/// So components are shifted from the right into `tail` until what is left
+/// canonicalises, and only then is `tail` replayed: `..` pops, `.` is
+/// dropped, anything else is pushed. Replaying lexically is safe there
+/// precisely because those components do not exist, and what does not exist
+/// cannot be a symlink.
 fn resolve_as_far_as_possible(p: &Path) -> PathBuf {
-    let lexical = normalize_lexically(p);
-    let mut prefix = lexical.clone();
+    let mut comps: Vec<Component> = p.components().collect();
     let mut tail: Vec<OsString> = Vec::new();
-    loop {
+    while !comps.is_empty() {
+        let prefix: PathBuf = comps.iter().copied().collect();
         if let Ok(real) = prefix.canonicalize() {
             let mut out = real;
             for part in tail.iter().rev() {
-                out.push(part);
+                if part == ".." {
+                    out.pop();
+                } else if part != "." {
+                    out.push(part);
+                }
             }
             return out;
         }
-        match prefix.file_name() {
-            Some(name) => {
-                tail.push(name.to_os_string());
-                if !prefix.pop() {
-                    return lexical;
-                }
-            }
-            // A root (or a relative path fully consumed) that still won't
-            // canonicalise — nothing left to strip.
-            None => return lexical,
+        // `pop` cannot fail: the loop condition proves `comps` is non-empty.
+        if let Some(last) = comps.pop() {
+            tail.push(last.as_os_str().to_os_string());
         }
     }
+    // Nothing in the path exists — a relative path with no root, or a root
+    // that will not canonicalise. Lexical folding is all that is left, and
+    // `path_is_confined` fails closed on anything not absolute.
+    normalize_lexically(p)
 }
 
 /// `.` dropped, `..` folded against the preceding component, no filesystem
@@ -621,6 +633,26 @@ pub fn guard_hook_matcher() -> String {
     GUARDED_TOOLS.join("|")
 }
 
+/// The path a guarded tool is about to write, whichever key it lives under.
+///
+/// [`GUARDED_TOOLS`] is not uniform: `Write`/`Edit`/`MultiEdit` carry
+/// `file_path`, but `NotebookEdit` names its target `notebook_path` and has
+/// no `file_path` at all. Reading only the first spelling made every notebook
+/// edit indistinguishable from a tool with no path — denied inside the
+/// project for the wrong reason, and flagged `path_escape` by the stdout
+/// backstop, which ends the session.
+///
+/// Both callers (the hook and the backstop) go through here so the set of
+/// spellings cannot drift between them. A tool schema is not a stable
+/// contract — see the module doc on why the parser is tolerant — so a future
+/// third spelling belongs in this one function.
+pub fn guarded_tool_path(tool_input: &Value) -> Option<&str> {
+    tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("notebook_path"))
+        .and_then(Value::as_str)
+}
+
 /// Decide one `PreToolUse` hook invocation.
 ///
 /// `hook_stdin` is the JSON object the CLI writes to the hook's stdin
@@ -646,13 +678,10 @@ pub fn guard_decision(sketch_dir: &Path, hook_stdin: &str) -> Option<String> {
         return None;
     }
 
-    let file_path = input
-        .get("tool_input")
-        .and_then(|i| i.get("file_path"))
-        .and_then(Value::as_str);
+    let file_path = input.get("tool_input").and_then(guarded_tool_path);
     let Some(file_path) = file_path else {
         return deny(format!(
-            "Bancada refuses a {tool} with no file_path it can check against the project directory."
+            "Bancada refuses a {tool} with no path it can check against the project directory."
         ));
     };
 
@@ -1576,6 +1605,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn confined_rejects_dot_dot_traversal_through_a_symlink() {
+        // The escape the *lexical* fold cannot see, and the reason the fold
+        // must not run before `canonicalize`: folding pops `escape` as a
+        // plain component, so `escape/../x` collapses to `<sketch>/x` and
+        // looks confined. The kernel instead resolves `escape` to its
+        // target first, so `..` lands in the target's parent — outside.
+        let outside = tempfile::tempdir().unwrap();
+        let dir = sketch();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+
+        assert!(!path_is_confined(dir.path(), "escape/../pwned.txt"));
+        assert!(!path_is_confined(dir.path(), "escape/./../pwned.txt"));
+        assert!(!path_is_confined(dir.path(), "escape/sub/../../pwned.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn confined_accepts_a_project_reached_through_a_symlinked_parent() {
         // The false-*negative* direction: canonicalising the candidate but
         // not the root would reject every write in a project opened through
@@ -1739,6 +1785,41 @@ mod tests {
         assert!(guard_decision(dir.path(), stdin).is_some());
         let non_string = r#"{"tool_name":"Write","tool_input":{"file_path":42}}"#;
         assert!(guard_decision(dir.path(), non_string).is_some());
+    }
+
+    #[test]
+    fn guard_reads_notebook_edits_from_notebook_path() {
+        // `NotebookEdit` is the one guarded tool that does not carry
+        // `file_path` — its required params are `notebook_path` and
+        // `new_source`. Reading only `file_path` made every notebook edit
+        // look like a tool with no path at all: denied for the wrong
+        // reason inside the project, and — worse — reported as a
+        // `path_escape` by the backstop, which stops the session.
+        let dir = sketch();
+        let inside = r#"{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"probe.ipynb","new_source":"x"}}"#;
+        assert_eq!(
+            guard_decision(dir.path(), inside),
+            None,
+            "a notebook inside the project is an ordinary edit"
+        );
+
+        let outside = r#"{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/tmp/escape.ipynb","new_source":"x"}}"#;
+        let json = guard_decision(dir.path(), outside).expect("must deny");
+        assert!(deny_reason(&json).contains("/tmp/escape.ipynb"));
+    }
+
+    #[test]
+    fn guarded_tool_path_reads_both_spellings_and_nothing_else() {
+        // One helper, so the hook and the stdout backstop cannot drift on
+        // which key a tool's path lives under.
+        let file = serde_json::json!({ "file_path": "a.ino" });
+        let notebook = serde_json::json!({ "notebook_path": "a.ipynb" });
+        let neither = serde_json::json!({ "content": "x" });
+        let non_string = serde_json::json!({ "file_path": 42 });
+        assert_eq!(guarded_tool_path(&file), Some("a.ino"));
+        assert_eq!(guarded_tool_path(&notebook), Some("a.ipynb"));
+        assert_eq!(guarded_tool_path(&neither), None);
+        assert_eq!(guarded_tool_path(&non_string), None);
     }
 
     #[test]

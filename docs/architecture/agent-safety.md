@@ -75,9 +75,23 @@ function the test suite exercises. There is no generated shell script, no
 dependency on `sh` or `python3`, and no second copy that can drift.
 
 `path_is_confined` resolves relative candidates against the sketch dir,
-normalises `..` traversal lexically **before** the prefix test, and refuses any
-path whose first component below the sketch dir is in
-`REFUSED_DIRS = [".claude", ".git"]`.
+folds `..` traversal, and refuses any path whose first component below the
+sketch dir is in `REFUSED_DIRS = [".claude", ".git"]`.
+
+**The order of those two steps is the whole trick, and it was wrong once.**
+The fold must happen *after* the longest existing prefix has been
+`canonicalize`d, never before. Folding first pops a symlink as though it were
+an ordinary directory, so `<link>/../x` — where `<link>` points out of the
+project — collapses to `<sketch>/x` and reports as confined, while the kernel
+resolves the link and lands `..` in the *target's* parent. Only components
+that do not exist are folded lexically, and something that does not exist
+cannot be a symlink. `confined_rejects_dot_dot_traversal_through_a_symlink`
+pins it.
+
+Both consumers of a tool's path — this hook and the layer-4 backstop — read it
+through `core::agent::guarded_tool_path`, because [`GUARDED_TOOLS`] is not
+uniform: `NotebookEdit` names its target `notebook_path`, not `file_path`. A
+new spelling belongs in that one function.
 
 Probe-verified end to end, including that a permissive hook alongside it does
 not override the deny. Its refusals *do* appear in `permission_denials`.
