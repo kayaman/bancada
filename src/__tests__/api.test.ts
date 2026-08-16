@@ -454,6 +454,7 @@ describe("argument-less commands", () => {
     ["scopeStop", "scope_stop"],
     ["mqttDisconnect", "mqtt_disconnect"],
     ["loadMqttConfig", "load_mqtt_config"],
+    ["ghAvailable", "gh_available"],
   ] as const)("%s invokes %s with no arguments", async (fn, command) => {
     await (api as unknown as Record<string, () => Promise<unknown>>)[fn]();
     expect(called()[0]).toBe(command);
@@ -630,6 +631,11 @@ describe("git commands", () => {
     expect(called()).toEqual(["git_state", { sketchDir: "/s" }]);
   });
 
+  it("gitInit passes sketchDir", async () => {
+    await api.gitInit("/s");
+    expect(called()).toEqual(["git_init", { sketchDir: "/s" }]);
+  });
+
   it("gitCommit passes sketchDir and message", async () => {
     await api.gitCommit("/s", "checkpoint: x");
     expect(called()).toEqual(["git_commit", { sketchDir: "/s", message: "checkpoint: x" }]);
@@ -709,6 +715,74 @@ describe("scope and mqtt payloads", () => {
     const cfg = { url: "mqtt://localhost" } as never;
     await api.saveMqttConfig(cfg);
     expect(called()).toEqual(["save_mqtt_config", { cfg }]);
+  });
+
+  // The two Channel openers were the only commands in the whole surface
+  // whose argument keys nothing pinned — and they carry the least
+  // conventional key in it. Both Rust signatures take `on_message`, so both
+  // wrappers must send `onMessage`; `scopeStart`'s callback parameter is
+  // named `onMessage` and `mqttConnect`'s is named `onEvent`, which is
+  // exactly the kind of near-miss that would send `onEvent` over the wire
+  // and fail only when a user opened the panel.
+  it("scopeStart sends the channel as onMessage alongside the port config", async () => {
+    const cfg = { channel: 0 } as never;
+    await api.scopeStart("/dev/ttyACM0", 921600, cfg, () => {});
+    const [command, args] = called();
+    expect(command).toBe("scope_start");
+    expect(Object.keys(args).sort()).toEqual(["baud", "cfg", "onMessage", "port"]);
+    expect(args.port).toBe("/dev/ttyACM0");
+    expect(args.baud).toBe(921600);
+    expect(args.cfg).toBe(cfg);
+    expect(args.onMessage).toBeTypeOf("object");
+  });
+
+  it("mqttConnect sends subscribeFilter and the channel as onMessage", async () => {
+    await api.mqttConnect("mqtt://localhost:1883", "bench/#", () => {});
+    const [command, args] = called();
+    expect(command).toBe("mqtt_connect");
+    expect(Object.keys(args).sort()).toEqual([
+      "onMessage",
+      "subscribeFilter",
+      "url",
+    ]);
+    expect(args.url).toBe("mqtt://localhost:1883");
+    expect(args.subscribeFilter).toBe("bench/#");
+    expect(args.onMessage).toBeTypeOf("object");
+  });
+
+  it("mqttConnect passes a null filter through rather than dropping the key", async () => {
+    // `subscribe_filter: Option<String>` — omitting the key entirely and
+    // sending null are not the same thing to Tauri's deserialiser.
+    await api.mqttConnect("mqtt://localhost:1883", null, () => {});
+    expect(called()[1].subscribeFilter).toBeNull();
+  });
+});
+
+describe("chat transcripts", () => {
+  it("chatAppend passes the sketch, the file and the line", async () => {
+    await api.chatAppend("/s", "2026-08-15T09-04-20.ndjson", '{"op":"push"}');
+    expect(called()).toEqual([
+      "chat_append",
+      {
+        sketchDir: "/s",
+        file: "2026-08-15T09-04-20.ndjson",
+        line: '{"op":"push"}',
+      },
+    ]);
+  });
+
+  it("chatList and chatTotals pass sketchDir alone", async () => {
+    await api.chatList("/s");
+    expect(called()).toEqual(["chat_list", { sketchDir: "/s" }]);
+    await api.chatTotals("/s");
+    expect(called()).toEqual(["chat_totals", { sketchDir: "/s" }]);
+  });
+
+  it("chatLoad and chatDelete pass sketchDir and file", async () => {
+    await api.chatLoad("/s", "a.ndjson");
+    expect(called()).toEqual(["chat_load", { sketchDir: "/s", file: "a.ndjson" }]);
+    await api.chatDelete("/s", "a.ndjson");
+    expect(called()).toEqual(["chat_delete", { sketchDir: "/s", file: "a.ndjson" }]);
   });
 });
 
