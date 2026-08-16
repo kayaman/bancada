@@ -41,7 +41,7 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | Module | LoC | Responsibility |
 |---|---|---|
 | `sketch.rs` | 1019 | `SketchYaml` / `Profile` / `PlatformDep` / `LibraryDep`, and `SketchProject` — the sketch on disk. File walk (`SKIP_DIRS`), profile create/add/retarget, library and platform pinning. **The only file schema Bancada itself owns.** |
-| `project.rs` | 852 | Project policy: name validation, starter templates (`TEMPLATES`), profile naming from an FQBN, board-required libraries, default parent directory — **and `rename_project`**, which moves the folder and its main `.ino` together and rolls the `.ino` back if the directory move fails. |
+| `project.rs` | 908 | Project policy: name validation, starter templates (`TEMPLATES`), profile naming from an FQBN, board-required libraries, default parent directory — **and `rename_project`**, which moves the folder and its main `.ino` together and rolls the `.ino` back if the directory move fails. |
 | `clone.rs` | 1169 | Copy a project under a new name — **"Duplicate" in the UI**; the module keeps the older name. Staging directory + atomic rename, merged `.gitignore` written *into the staging dir* so credential ignore rules exist before any possible commit, best-effort `git init`. Skips `.bancada` and `.claude`. Its `retitle_main_ino` and `rewrite_sketch_yaml` are `pub(crate)` and shared with `project::rename_project`, so their warnings name no caller. |
 | `files.rs` | 389 | Explorer mutations: `validate_rel_path`, protected-path checks, collision and descendant guards. **Delete goes to the OS trash** (`trash::delete`), never `fs::remove`. |
 
@@ -56,13 +56,13 @@ Tauri layer is uniformly `.map_err(err_str)`.
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `git.rs` | 1805 | `git` and `gh`. Gitignore policy (`GITIGNORE_REQUIRED`, `merged_gitignore`), `parse_status_v2`, `suggested_message`, `tracked_secrets`, `repo_state`, commit/sync, and `gh repo create` with `Visibility` + description. Also the flash-provenance primitives — `flash_tag_name` (pure, takes unix seconds from the caller), `tag_annotated`, `flash_tags_at_head`, `push_tag`. The `gh` path deliberately retains the stderr tail, because that is where `gh` explains auth problems ("run: gh auth login"). |
+| `git.rs` | 1994 | `git` and `gh`. Gitignore policy (`GITIGNORE_REQUIRED`, `merged_gitignore`), `parse_status_v2`, `suggested_message`, `tracked_secrets`, `repo_state`, commit/sync, and `gh repo create` with `Visibility` + description. Also the flash-provenance primitives — `flash_tag_name` (pure, takes unix seconds from the caller), `tag_annotated`, `flash_tags_at_head`, `push_tag`. The `gh` path deliberately retains the stderr tail, because that is where `gh` explains auth problems ("run: gh auth login"). |
 
 ### Hardware
 
 | Module | LoC | Responsibility |
 |---|---|---|
-| `fleet.rs` | 928 | The board registry. Identity from a MAC address or USB descriptors (`BoardIdKind`), nicknames, last-seen tracking, the `fleet.json` model. Writes are skipped unless a board is new or `last_seen` is stale, to avoid churn. |
+| `fleet.rs` | 1265 | The board registry. Identity from a MAC address or USB descriptors (`BoardIdKind`), nicknames, last-seen tracking, the `fleet.json` model. Writes are skipped unless a board is new or `last_seen` is stale, to avoid churn. |
 | `ports.rs` | 119 | Hotplug identity: `port_key` (name + vid:pid:serial) and `ports_changed`. The only consumer of raw `serialport` enumeration. |
 | `serialring.rs` | 243 | Rolling serial scrollback with monotonic sequence numbers, capped at 500 lines / 4096 bytes per line. Feeds the agent's `serial_read` tool; sequence numbers survive monitor restarts. |
 

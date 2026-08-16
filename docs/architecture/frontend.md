@@ -26,7 +26,7 @@ providers, no context, and no global store.
 
 ## 1. The shell
 
-`src/App.tsx` is 2,217 lines and is the de-facto orchestrator: it owns nearly
+`src/App.tsx` is 2,472 lines and is the de-facto orchestrator: it owns nearly
 all cross-panel state and registers every backend subscription. Its render tree
 begins around line 1783.
 
@@ -164,10 +164,10 @@ owns "now".**
 
 ## 4. The IPC layer
 
-`src/api.ts` (920 lines) is the only file importing `@tauri-apps/api/core` or
+`src/api.ts` (983 lines) is the only file importing `@tauri-apps/api/core` or
 `/event`. Elsewhere only `plugin-dialog` and `getVersion` appear.
 
-It holds the TypeScript mirrors of the Rust types, 94 `invoke` wrappers, the
+It holds the TypeScript mirrors of the Rust types, 96 `invoke` wrappers, the
 three `Channel` openers, and the seven `listen` subscriptions. Full surface:
 [ipc-contract](ipc-contract.md).
 
@@ -234,7 +234,7 @@ the dumb `ObsLog` component.
 
 ## 6. Styling
 
-One stylesheet: `src/styles.css`, 2,807 lines, imported once. No CSS modules, no
+One stylesheet: `src/styles.css`, 2,868 lines, imported once. No CSS modules, no
 Tailwind, no CSS-in-JS.
 
 Design tokens in `:root` — `--bg`, `--bg-panel`, `--bg-raised`, `--bg-hover`,

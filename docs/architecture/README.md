@@ -111,7 +111,7 @@ Each is deliberate, and each looks like a bug until you know why.
 Named honestly, so a newcomer does not read them as intentional design and pile
 on. No refactor is proposed here.
 
-### `src-tauri/src/lib.rs` is 6,658 lines
+### `src-tauri/src/lib.rs` is 7,107 lines
 
 All 96 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
@@ -125,7 +125,7 @@ rustdoc header is doing the work a module tree would otherwise do.
 `EmitFn` seam intact — it is the only reason ~69 unit tests can live in this
 file.
 
-### `src/App.tsx` is 2,217 lines
+### `src/App.tsx` is 2,472 lines
 
 It owns nearly all cross-panel state and every subscription, and passes ~30
 props to `Toolbar` alone. The mitigation is real — 17 pure-logic modules have

@@ -23,6 +23,13 @@ pub struct Target {
 /// — a path would silently vanish from every proxied request, and https
 /// is refused because the forwarder speaks plain http (bench devices
 /// don't do TLS, and pretending otherwise would mislead).
+///
+/// Known limitation: **a bare IPv6 literal is not accepted.** The port is
+/// split on the last `:`, so `http://[::1]` parses as host `[:` and port
+/// `:1]` and is refused as a bad port number. Bench devices are reached by
+/// mDNS name or IPv4 in practice, so this has not been worth the bracket
+/// handling — but the error message blames the port, which is misleading if
+/// you ever do hit it.
 pub fn parse_target(raw: &str) -> Result<Target> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
