@@ -234,6 +234,16 @@ bancada.sidebarCollapsed
    scoped to a single line.
 4. **Avoid write churn.** Anything on a poll loop must check whether the write
    is needed at all, as `fleet_sync` does.
+5. **Stage through `core::staging_path`, never a fixed `.tmp` name.** All four
+   JSON stores write a temp file and rename it over the target, which is
+   atomic — but only against *itself*. With a fixed `fleet.json.tmp`, two
+   Bancada windows could interleave: one truncates and starts writing while
+   the other renames the same file into place, and what lands is a
+   half-written record. Because rule 3 makes the loaders refuse a corrupt
+   file rather than empty it, the user sees the panel error out, which reads
+   as losing the registry. `staging_path` carries the pid and a per-call
+   counter, and stays a **sibling** of the target so the rename does not
+   cross a filesystem and quietly stop being atomic.
 
 ---
 

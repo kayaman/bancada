@@ -82,15 +82,14 @@ pub fn load(path: &Path) -> AppSettings {
         .unwrap_or_default()
 }
 
-/// Atomic write (temp file + rename) so a crash mid-write can't corrupt.
+/// Atomic write (staging file + rename) so neither a crash mid-write nor a
+/// second Bancada window can corrupt it — see `crate::replace_file_atomically`.
 pub fn save(path: &Path, s: &AppSettings) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(s).expect("AppSettings always serializes");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)?;
+    crate::replace_file_atomically(path, &text)?;
     Ok(())
 }
 

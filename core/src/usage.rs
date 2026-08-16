@@ -101,13 +101,11 @@ impl UsageStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self).map_err(|source| Error::Json {
             what: "the usage record".to_string(),
             source,
         })?;
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)?;
+        crate::replace_file_atomically(path, &text)?;
         Ok(())
     }
 
