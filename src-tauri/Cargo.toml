@@ -29,5 +29,13 @@ tiny_http = "0.12"
 # refuses https targets up front (core::devproxy::parse_target).
 ureq = { version = "2", default-features = false }
 
+# SIGTERM, which std cannot send: `Child::kill` is SIGKILL only, and
+# arduino-cli has to handle the signal itself or the `serial-monitor`
+# grandchild actually holding the tty survives as an orphan (see
+# `kill_child`). Already in the tree transitively (serialport, tauri), so
+# this adds no compilation.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

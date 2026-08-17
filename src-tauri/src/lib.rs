@@ -295,8 +295,60 @@ fn free_port_for_flash(serial: &Mutex<Option<SerialOwner>>) -> Result<(), String
     }
 }
 
-/// Kill and reap a monitor child process.
+/// How long a monitor child gets to shut itself down before it is killed.
+///
+/// Measured cost of the graceful path is tens of milliseconds; this is the
+/// ceiling, not the expected wait. It is spent under the `serial` lock, which
+/// the runtime model otherwise wants held only across bounded-short work — a
+/// deliberate trade, because the alternative is an orphan holding the port
+/// (see [`kill_child`]) and that is unbounded.
+const MONITOR_TERM_GRACE: Duration = Duration::from_millis(1000);
+
+/// Stop a monitor child **gracefully**, then reap it.
+///
+/// `arduino-cli monitor` never opens the port itself: it spawns a
+/// `serial-monitor` pluggable tool that does. `Child::kill` sends SIGKILL,
+/// which arduino-cli cannot handle, so that grandchild survived — reparented
+/// to init, still holding the tty and still draining the byte stream.
+///
+/// On the bench this presented as two unrelated-looking faults at once:
+/// esptool reporting it could not connect (the port was taken) and a freshly
+/// started monitor printing nothing (the orphan was eating the data), while
+/// the UI correctly believed it had stopped the monitor. Every subsequent
+/// start leaked another one, which is why swapping cables or sockets never
+/// helped.
+///
+/// **Killing the process group does not fix this** — that was tried first.
+/// `serial-monitor` puts itself in its *own* process group (verified live:
+/// `pgid == its own pid`, not arduino-cli's), so `killpg` on the child's
+/// group never reaches it. The only thing that cleans it up is arduino-cli's
+/// own signal handling, so the shutdown has to be polite:
+///
+/// 1. SIGTERM, and wait up to [`MONITOR_TERM_GRACE`] — verified live to take
+///    both processes down and release the port.
+/// 2. SIGKILL as the backstop, so a wedged child still cannot outlive this.
 fn kill_child(mut child: Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        if pid > 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            let deadline = Instant::now() + MONITOR_TERM_GRACE;
+            loop {
+                match child.try_wait() {
+                    // Exited on its own: its pluggable tool went with it, and
+                    // `try_wait` has already reaped it.
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    // Out of grace, or the wait itself failed — fall through
+                    // to SIGKILL rather than block here.
+                    _ => break,
+                }
+            }
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -5449,6 +5501,97 @@ mod tests {
         let (is_error, text) = call_tool(&l, "serial_read", serde_json::json!({}));
         assert!(is_error);
         assert!(text.contains("no serial port is selected"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_child_leaves_no_orphan_holding_the_port() {
+        // The bug this pins, observed on the bench: `arduino-cli monitor`
+        // does not touch the port itself — it spawns a `serial-monitor`
+        // pluggable tool that does. `Child::kill` signals only arduino-cli,
+        // so that grandchild survived, reparented to init, and held
+        // /dev/ttyACM1 for the whole of a flash. esptool reported it could
+        // not connect and a fresh monitor printed nothing, while the UI
+        // believed the port had been released. Every new monitor leaked
+        // another one.
+        use std::io::BufRead;
+
+        // "Holding the port", not merely "has a pid". A killed process stays
+        // visible as a zombie until something reaps it, and under a subreaper
+        // that can outlast the test — but a zombie has no file descriptors,
+        // so it holds no tty. `kill(pid, 0)` cannot tell the two apart; the
+        // state field in /proc/<pid>/stat can.
+        let holding = |pid: libc::pid_t| -> bool {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false; // gone entirely
+            };
+            // Field 3 is the state, after the parenthesised comm — which can
+            // itself contain spaces and parens, so split on the LAST ')'.
+            let Some((_, rest)) = stat.rsplit_once(')') else {
+                return false;
+            };
+            !matches!(rest.trim().chars().next(), Some('Z') | None)
+        };
+        let alive = holding;
+
+        // The stand-in has to match arduino-cli in the one property that
+        // makes this hard: measured on the bench, `serial-monitor` runs in
+        // its OWN process group (pgid == its own pid), not arduino-cli's. So
+        // signalling the parent's group does not reach it either — the only
+        // thing that cleans it up is arduino-cli's own SIGTERM handling.
+        // Hence `setsid` for the grandchild and a TERM trap on the parent.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let script = dir.path().join("stand-in-monitor.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             setsid sh -c 'echo $$ > \"$PIDFILE\"; exec sleep 300' &\n\
+             while [ ! -s \"$PIDFILE\" ]; do sleep 0.02; done\n\
+             trap 'kill -9 $(cat \"$PIDFILE\") 2>/dev/null; exit 0' TERM\n\
+             cat \"$PIDFILE\"\n\
+             while :; do sleep 0.2; done\n",
+        )
+        .unwrap();
+
+        let mut child = std::process::Command::new("sh")
+            .arg(&script)
+            .env("PIDFILE", &pidfile)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the stand-in monitor");
+
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("stdout"))
+            .read_line(&mut line)
+            .expect("read the grandchild pid");
+        let grandchild: libc::pid_t = line.trim().parse().expect("a pid");
+        assert!(alive(grandchild), "the grandchild should be running");
+        // It really is in a group of its own — the property the fix turns on.
+        assert_eq!(
+            unsafe { libc::getpgid(grandchild) },
+            grandchild,
+            "the stand-in must reproduce serial-monitor's own-process-group \
+             behaviour, or this test proves nothing"
+        );
+
+        kill_child(child);
+
+        // Death is asynchronous; give it a bounded moment rather than a
+        // fixed sleep, so the test is neither flaky nor slow.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(grandchild) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survived = alive(grandchild);
+        if survived {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert!(
+            !survived,
+            "the grandchild outlived the kill — it is now an orphan holding \
+             the serial port, which is exactly the bench failure"
+        );
     }
 
     #[cfg(unix)]

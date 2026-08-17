@@ -94,6 +94,7 @@ version = "0.18.0"
 dependencies = [
  "bancada-core",
  "base64 0.22.1",
+ "libc",
  "serde",
  "serde_json",
  "tauri",

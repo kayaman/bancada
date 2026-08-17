@@ -46,6 +46,30 @@ writer, and joining.
 
 `identify_board` evicts too, because esptool needs the port to itself.
 
+### Evicting the monitor is a *graceful* stop, not a kill
+
+`arduino-cli monitor` never opens the port itself — it spawns a
+`serial-monitor` pluggable tool that does. So `kill_child` sends **SIGTERM and
+waits** (up to `MONITOR_TERM_GRACE`, 1 s; measured cost ~10 ms), falling back
+to SIGKILL only if that grace expires.
+
+SIGKILL alone left the grandchild alive, reparented to init, still holding the
+tty and still draining the byte stream. It produced two faults that looked
+unrelated: a flash failing with *esptool could not connect* (the port was
+taken) and a freshly started monitor printing nothing (the orphan was eating
+the data) — while the UI correctly believed it had stopped the monitor. Every
+subsequent start leaked another one, so swapping cables or sockets never
+helped.
+
+**Killing the process group is not the fix, and was tried first.**
+`serial-monitor` puts itself in its *own* process group (verified live: its
+pgid is its own pid, not arduino-cli's), so `killpg` on the child's group never
+reaches it. Only arduino-cli's own signal handling tears it down.
+
+This is the one place the leaf-lock "bounded-short only" rule is stretched: the
+grace is spent under `serial`. That is deliberate — an orphan holding the port
+is unbounded, and 1 s is not.
+
 ### The lock contract
 
 `serial` is a **leaf lock**:
