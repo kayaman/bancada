@@ -295,16 +295,25 @@ fn free_port_for_flash(serial: &Mutex<Option<SerialOwner>>) -> Result<(), String
     }
 }
 
-/// How long a monitor child gets to shut itself down before it is killed.
+/// How long a child gets to shut itself down before it is killed.
 ///
-/// Measured cost of the graceful path is tens of milliseconds; this is the
-/// ceiling, not the expected wait. It is spent under the `serial` lock, which
-/// the runtime model otherwise wants held only across bounded-short work — a
-/// deliberate trade, because the alternative is an orphan holding the port
-/// (see [`kill_child`]) and that is unbounded.
+/// Named for the case that forces it — a monitor's pluggable tool orphaning
+/// itself onto the port (see [`kill_child`]) — but it bounds every caller,
+/// the agent session included. Measured cost of the graceful path is tens of
+/// milliseconds; this is the ceiling, not the expected wait.
+///
+/// Only the flash path spends it under a lock: `free_port_for_flash` evicts
+/// the monitor while holding `serial`, which the runtime model otherwise
+/// wants held only across bounded-short work. That is the deliberate trade —
+/// an orphan holding the port is unbounded, and 1 s is not. The agent paths
+/// take the session out of `agent` *before* calling and wait with no lock
+/// held, so the ceiling costs them teardown latency and nothing else.
 const MONITOR_TERM_GRACE: Duration = Duration::from_millis(1000);
 
-/// Stop a monitor child **gracefully**, then reap it.
+/// Stop a child **gracefully**, then reap it.
+///
+/// Serves both the serial monitor and the agent CLI session; the monitor is
+/// what forces the graceful path.
 ///
 /// `arduino-cli monitor` never opens the port itself: it spawns a
 /// `serial-monitor` pluggable tool that does. `Child::kill` sends SIGKILL,
