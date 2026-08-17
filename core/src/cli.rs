@@ -569,7 +569,15 @@ mod tests {
         let args = upload_args("/s", Some("p"), None, "/dev/ttyUSB0");
         assert_eq!(
             args,
-            ["compile", "-u", "-p", "/dev/ttyUSB0", "--profile", "p", "/s"]
+            [
+                "compile",
+                "-u",
+                "-p",
+                "/dev/ttyUSB0",
+                "--profile",
+                "p",
+                "/s"
+            ]
         );
         assert_eq!(args.last().unwrap(), "/s");
     }

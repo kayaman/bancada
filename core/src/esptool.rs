@@ -294,15 +294,16 @@ EXT_MAC:            ff:fe
 
     #[test]
     fn read_mac_with_failing_exit_reports_tool_failed_with_stderr() {
-        with_fake_esptool("echo 'serial port busy' >&2; exit 2", |script| {
-            match retry_busy(|| read_mac_with(script, "/dev/ttyACM0")).unwrap_err() {
+        with_fake_esptool(
+            "echo 'serial port busy' >&2; exit 2",
+            |script| match retry_busy(|| read_mac_with(script, "/dev/ttyACM0")).unwrap_err() {
                 Error::ToolFailed { status, stderr, .. } => {
                     assert_eq!(status, 2);
                     assert!(stderr.contains("serial port busy"), "{stderr}");
                 }
                 other => panic!("expected ToolFailed, got {other:?}"),
-            }
-        });
+            },
+        );
     }
 
     #[test]

@@ -221,7 +221,10 @@ mod tests {
     #[test]
     fn abs_path_joins_validated_rel() {
         let (_t, proj) = sample();
-        assert_eq!(proj.abs_path("src/util.h").unwrap(), proj.dir.join("src/util.h"));
+        assert_eq!(
+            proj.abs_path("src/util.h").unwrap(),
+            proj.dir.join("src/util.h")
+        );
         assert!(proj.abs_path("../x").is_err());
     }
 
@@ -231,7 +234,10 @@ mod tests {
     fn create_file_makes_empty_file() {
         let (_t, proj) = sample();
         proj.create_file("notes.txt").unwrap();
-        assert_eq!(std::fs::read_to_string(proj.dir.join("notes.txt")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(proj.dir.join("notes.txt")).unwrap(),
+            ""
+        );
         assert!(rel_paths(&proj).contains(&"notes.txt".to_string()));
     }
 
@@ -306,7 +312,8 @@ mod tests {
     #[test]
     fn rename_into_fresh_parent_creates_it() {
         let (_t, proj) = sample();
-        proj.rename_entry("src/util.h", "deep/nested/util.h").unwrap();
+        proj.rename_entry("src/util.h", "deep/nested/util.h")
+            .unwrap();
         assert!(proj.dir.join("deep/nested/util.h").is_file());
     }
 

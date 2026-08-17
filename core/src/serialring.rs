@@ -87,7 +87,9 @@ impl SerialRing {
     pub fn read_since(&self, cursor: u64, max_bytes: usize) -> ReadResult {
         let oldest = self.entries.front().map(|e| e.seq).unwrap_or(self.next_seq);
         let effective = cursor.max(oldest);
-        let dropped = effective.saturating_sub(cursor).min(self.next_seq.saturating_sub(cursor));
+        let dropped = effective
+            .saturating_sub(cursor)
+            .min(self.next_seq.saturating_sub(cursor));
 
         let mut text = String::new();
         let mut new_cursor = effective;
@@ -106,7 +108,11 @@ impl SerialRing {
             text.push_str(&rendered);
             new_cursor = e.seq + 1;
         }
-        ReadResult { text, new_cursor, dropped }
+        ReadResult {
+            text,
+            new_cursor,
+            dropped,
+        }
     }
 }
 
@@ -211,7 +217,11 @@ mod tests {
         let long = "x".repeat(100);
         r.push(OutputStream::Stdout, &long);
         let res = r.read_since(0, 4096);
-        assert!(res.text.len() < 100, "line was not truncated: {}", res.text.len());
+        assert!(
+            res.text.len() < 100,
+            "line was not truncated: {}",
+            res.text.len()
+        );
         assert!(res.text.contains("…"));
     }
 

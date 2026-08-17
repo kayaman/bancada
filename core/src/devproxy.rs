@@ -33,7 +33,9 @@ pub struct Target {
 pub fn parse_target(raw: &str) -> Result<Target> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(Error::Other("enter a device URL, e.g. http://unoq.local".into()));
+        return Err(Error::Other(
+            "enter a device URL, e.g. http://unoq.local".into(),
+        ));
     }
     if let Some(rest) = trimmed.strip_prefix("https://") {
         let _ = rest;
@@ -57,9 +59,9 @@ pub fn parse_target(raw: &str) -> Result<Target> {
     }
     let (host, port) = match origin.rsplit_once(':') {
         Some((h, p)) if !h.is_empty() => {
-            let port: u16 = p.parse().map_err(|_| {
-                Error::Other(format!("`{p}` is not a port number"))
-            })?;
+            let port: u16 = p
+                .parse()
+                .map_err(|_| Error::Other(format!("`{p}` is not a port number")))?;
             (h.to_string(), port)
         }
         _ => (origin.to_string(), 80),
@@ -131,16 +133,26 @@ mod tests {
     fn parses_a_bare_host_defaulting_to_port_80() {
         assert_eq!(
             parse_target("http://unoq.local").unwrap(),
-            Target { host: "unoq.local".into(), port: 80 }
+            Target {
+                host: "unoq.local".into(),
+                port: 80
+            }
         );
     }
 
     #[test]
     fn parses_host_port_and_tolerates_a_trailing_slash_and_whitespace() {
-        for raw in ["http://192.168.0.7:8080", "http://192.168.0.7:8080/", "  http://192.168.0.7:8080  "] {
+        for raw in [
+            "http://192.168.0.7:8080",
+            "http://192.168.0.7:8080/",
+            "  http://192.168.0.7:8080  ",
+        ] {
             assert_eq!(
                 parse_target(raw).unwrap(),
-                Target { host: "192.168.0.7".into(), port: 8080 },
+                Target {
+                    host: "192.168.0.7".into(),
+                    port: 8080
+                },
                 "{raw:?}"
             );
         }
@@ -148,7 +160,9 @@ mod tests {
 
     #[test]
     fn refuses_a_path_with_a_message_that_says_why() {
-        let err = parse_target("http://unoq.local/status").unwrap_err().to_string();
+        let err = parse_target("http://unoq.local/status")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("origin"), "got: {err}");
         assert!(err.contains("drop the path"), "got: {err}");
     }
@@ -163,21 +177,33 @@ mod tests {
     fn refuses_empty_and_garbage_with_an_example() {
         for bad in ["", "   ", "unoq.local", "ftp://x", "http://", "http:///"] {
             let err = parse_target(bad).unwrap_err().to_string();
-            assert!(err.contains("http://") || err.contains("host"), "{bad:?} → {err}");
+            assert!(
+                err.contains("http://") || err.contains("host"),
+                "{bad:?} → {err}"
+            );
         }
     }
 
     #[test]
     fn refuses_a_non_numeric_port() {
-        let err = parse_target("http://unoq.local:web").unwrap_err().to_string();
+        let err = parse_target("http://unoq.local:web")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("port"), "got: {err}");
     }
 
     #[test]
     fn hop_by_hop_covers_the_rfc_list_case_insensitively() {
         for h in [
-            "connection", "Keep-Alive", "TE", "trailer", "Transfer-Encoding",
-            "upgrade", "Proxy-Authenticate", "proxy-authorization", "Proxy-Connection",
+            "connection",
+            "Keep-Alive",
+            "TE",
+            "trailer",
+            "Transfer-Encoding",
+            "upgrade",
+            "Proxy-Authenticate",
+            "proxy-authorization",
+            "Proxy-Connection",
         ] {
             assert!(is_hop_by_hop(h), "{h}");
         }
@@ -188,7 +214,10 @@ mod tests {
 
     #[test]
     fn preview_returns_short_utf8_bodies_verbatim() {
-        assert_eq!(body_preview(b"{\"t\":24.5}", 64), ("{\"t\":24.5}".into(), false));
+        assert_eq!(
+            body_preview(b"{\"t\":24.5}", 64),
+            ("{\"t\":24.5}".into(), false)
+        );
     }
 
     #[test]

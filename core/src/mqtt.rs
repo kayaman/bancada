@@ -46,9 +46,7 @@ pub struct BrokerAddr {
 pub fn parse_url(url: &str) -> std::result::Result<BrokerAddr, String> {
     let url = url.trim();
     let Some(rest) = url.strip_prefix("mqtt://") else {
-        return Err(format!(
-            "broker URL must start with mqtt:// (got {url:?})"
-        ));
+        return Err(format!("broker URL must start with mqtt:// (got {url:?})"));
     };
 
     // The last '@' separates userinfo from host, so passwords may contain '@'.
@@ -104,11 +102,7 @@ pub fn redact_password(url: &str) -> String {
     let Some(colon) = userinfo.find(':') else {
         return url.to_string();
     };
-    format!(
-        "{}***{}",
-        &url[..scheme_end + 3 + colon + 1],
-        &rest[at..]
-    )
+    format!("{}***{}", &url[..scheme_end + 3 + colon + 1], &rest[at..])
 }
 
 // ---------- topic filters ----------

@@ -188,10 +188,8 @@ pub fn project_totals(chats_root: &Path, key: &str) -> ProjectTotals {
                 .unwrap_or(0.0);
             t.turns += ev.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0);
             if let Some(u) = ev.get("usage") {
-                t.input_tokens +=
-                    u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-                t.output_tokens +=
-                    u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                t.input_tokens += u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                t.output_tokens += u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
             }
         }
     }
@@ -261,10 +259,8 @@ pub fn list_chats_with_usage(chats_root: &Path, key: &str) -> Vec<SessionEntry> 
                     .unwrap_or(0.0);
                 e.turns += ev.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0);
                 if let Some(u) = ev.get("usage") {
-                    e.input_tokens +=
-                        u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-                    e.output_tokens +=
-                        u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    e.input_tokens += u.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+                    e.output_tokens += u.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
                 }
             }
             if e.title.is_empty() {
@@ -358,15 +354,16 @@ pub fn delete_chat(chats_root: &Path, key: &str, file: &str) -> Result<()> {
 /// never surface into the chat flow that triggered it.
 pub fn prune(chats_root: &Path, key: &str, keep: usize) {
     let dir = chats_root.join(key);
-    let mut snapshot: Vec<(String, Option<std::time::SystemTime>)> = chat_file_names(chats_root, key)
-        .into_iter()
-        .map(|name| {
-            let mtime = std::fs::metadata(dir.join(&name))
-                .and_then(|m| m.modified())
-                .ok();
-            (name, mtime)
-        })
-        .collect();
+    let mut snapshot: Vec<(String, Option<std::time::SystemTime>)> =
+        chat_file_names(chats_root, key)
+            .into_iter()
+            .map(|name| {
+                let mtime = std::fs::metadata(dir.join(&name))
+                    .and_then(|m| m.modified())
+                    .ok();
+                (name, mtime)
+            })
+            .collect();
     snapshot.sort_by(|(a, ma), (b, mb)| match (ma, mb) {
         (Some(ma), Some(mb)) => mb.cmp(ma).then_with(|| b.cmp(a)),
         (Some(_), None) => std::cmp::Ordering::Less,
@@ -564,11 +561,19 @@ mod tests {
     #[test]
     fn list_survives_corrupt_and_foreign_files() {
         let tmp = tempfile::tempdir().unwrap();
-        write_chat(tmp.path(), "k", "2026-08-05T08-00-00.ndjson", &["{not json"]);
+        write_chat(
+            tmp.path(),
+            "k",
+            "2026-08-05T08-00-00.ndjson",
+            &["{not json"],
+        );
         write_chat(tmp.path(), "k", "notes.txt", &["not a chat"]);
         let list = list_chats(tmp.path(), "k");
         assert_eq!(list.len(), 1, "foreign extensions are not chats");
-        assert_eq!(list[0].title, "2026-08-05T08-00-00", "corrupt line falls back to stem");
+        assert_eq!(
+            list[0].title, "2026-08-05T08-00-00",
+            "corrupt line falls back to stem"
+        );
     }
 
     #[test]
@@ -581,7 +586,10 @@ mod tests {
     fn load_returns_lines() {
         let tmp = tempfile::tempdir().unwrap();
         write_chat(tmp.path(), "k", "a.ndjson", &["l1", "l2"]);
-        assert_eq!(load_chat(tmp.path(), "k", "a.ndjson").unwrap(), vec!["l1", "l2"]);
+        assert_eq!(
+            load_chat(tmp.path(), "k", "a.ndjson").unwrap(),
+            vec!["l1", "l2"]
+        );
         assert!(load_chat(tmp.path(), "k", "../a.ndjson").is_err());
     }
 
@@ -693,15 +701,20 @@ mod tests {
         prune(tmp.path(), "b", 2);
 
         let remaining = |key: &str| {
-            let mut v: Vec<String> =
-                list_chats(tmp.path(), key).into_iter().map(|e| e.file).collect();
+            let mut v: Vec<String> = list_chats(tmp.path(), key)
+                .into_iter()
+                .map(|e| e.file)
+                .collect();
             v.sort();
             v
         };
         let a = remaining("a");
         let b = remaining("b");
         assert_eq!(a.len(), 2, "prune must still keep exactly `keep` files");
-        assert_eq!(a, b, "identical directory snapshots must prune to identical sets");
+        assert_eq!(
+            a, b,
+            "identical directory snapshots must prune to identical sets"
+        );
     }
 
     #[test]
@@ -735,7 +748,10 @@ mod tests {
         // Newest first, like list_chats.
         assert_eq!(list[0].file, "2026-08-05T09-00-00.ndjson");
         assert_eq!(list[0].title, "2026-08-05T09-00-00", "no userSent → stem");
-        assert!((list[0].cost_usd).abs() < 1e-9, "corrupt/non-result lines add nothing");
+        assert!(
+            (list[0].cost_usd).abs() < 1e-9,
+            "corrupt/non-result lines add nothing"
+        );
         assert_eq!(list[1].file, "2026-08-04T10-00-00.ndjson");
         assert_eq!(list[1].title, "one");
         assert!((list[1].cost_usd - 0.03).abs() < 1e-9);
@@ -774,8 +790,18 @@ mod tests {
         // Two histories under one key would interleave two projects' chats,
         // so this is a conflict to report, not something to merge.
         let tmp = tempfile::tempdir().unwrap();
-        write_chat(tmp.path(), "old-key", "2026-08-05T09-00-00.ndjson", &["mine"]);
-        write_chat(tmp.path(), "new-key", "2026-08-05T09-00-00.ndjson", &["theirs"]);
+        write_chat(
+            tmp.path(),
+            "old-key",
+            "2026-08-05T09-00-00.ndjson",
+            &["mine"],
+        );
+        write_chat(
+            tmp.path(),
+            "new-key",
+            "2026-08-05T09-00-00.ndjson",
+            &["theirs"],
+        );
 
         let err = rename_key(tmp.path(), "old-key", "new-key")
             .unwrap_err()

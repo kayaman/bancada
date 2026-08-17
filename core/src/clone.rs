@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::{ghlib, library, project, sketch, Error, Result};
 use crate::git::merged_gitignore;
+use crate::{ghlib, library, project, sketch, Error, Result};
 
 /// Directories excluded from a clone on top of the sketch walker's skip
 /// list: `.bancada` is re-fetchable from `bancada.yaml`, and `.claude` is
@@ -66,11 +66,7 @@ impl Drop for Staging {
 /// All-or-nothing: a failure part-way through leaves the destination absent
 /// and the source untouched. Git being missing or broken is a warning, not
 /// an error — the clone is still a valid sketch without a repository.
-pub fn clone_project(
-    src_dir: &Path,
-    dest_parent: &Path,
-    new_name: &str,
-) -> Result<ClonedProject> {
+pub fn clone_project(src_dir: &Path, dest_parent: &Path, new_name: &str) -> Result<ClonedProject> {
     let name = project::validate_project_name(new_name)?;
 
     let src_name = src_dir
@@ -258,11 +254,15 @@ fn copy_dir(
                 // fs::copy would refuse.
                 let target = std::fs::read_link(&path)?;
                 std::os::unix::fs::symlink(&target, dst.join(&name))?;
-                warnings.push(format!("`{rel}` is a symlink shared with the source project"));
+                warnings.push(format!(
+                    "`{rel}` is a symlink shared with the source project"
+                ));
             }
             #[cfg(not(unix))]
             {
-                warnings.push(format!("`{rel}` is a symlink and was not copied on this platform"));
+                warnings.push(format!(
+                    "`{rel}` is a symlink and was not copied on this platform"
+                ));
             }
         } else if ft.is_dir() {
             if is_skipped_dir(&name_s) {
@@ -297,7 +297,6 @@ fn copy_dir(
     }
     Ok(())
 }
-
 
 /// Rewrite a main ino's title comment: when line 1 is exactly a
 /// `// <src_name>` prefix followed by a non-alphanumeric character (or the
@@ -533,7 +532,13 @@ mod tests {
     fn exclusions_skip_state_dirs_everywhere_but_not_files_named_build() {
         let tmp = tempfile::tempdir().unwrap();
         let src = sample_sketch(tmp.path(), "Src");
-        for dir in ["build", ".git", ".bancada/libs", ".claude", "node_modules/pkg"] {
+        for dir in [
+            "build",
+            ".git",
+            ".bancada/libs",
+            ".claude",
+            "node_modules/pkg",
+        ] {
             std::fs::create_dir_all(src.join(dir)).unwrap();
         }
         std::fs::write(src.join("build/junk.o"), "o").unwrap();
@@ -587,7 +592,11 @@ mod tests {
             !made.dir.join(".git").is_file(),
             ".git in the clone must be absent or the fresh init directory"
         );
-        assert_eq!(read(src.join(".git")), gitfile, "source .git file untouched");
+        assert_eq!(
+            read(src.join(".git")),
+            gitfile,
+            "source .git file untouched"
+        );
     }
 
     #[test]
@@ -696,7 +705,10 @@ mod tests {
         std::fs::write(src.join(".gitignore"), "build\n.env\n").unwrap();
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         let text = read(made.dir.join(".gitignore"));
-        assert_eq!(text, "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n");
+        assert_eq!(
+            text,
+            "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n"
+        );
         let build_lines = text
             .lines()
             .filter(|l| matches!(l.trim(), "build" | "build/" | "/build" | "/build/"))
@@ -801,7 +813,11 @@ mod tests {
 
         let made = clone_project(&src, &tmp.path().join("b"), "New").unwrap();
 
-        assert_eq!(read(made.dir.join("sketch.yaml")), yaml, "must stay verbatim");
+        assert_eq!(
+            read(made.dir.join("sketch.yaml")),
+            yaml,
+            "must stay verbatim"
+        );
         assert!(
             made.warnings
                 .iter()
@@ -896,14 +912,13 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
 
         assert_eq!(read(shared), yaml, "link target must be untouched");
-        assert!(
-            made.dir
-                .join("sketch.yaml")
-                .symlink_metadata()
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(made
+            .dir
+            .join("sketch.yaml")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert!(
             made.warnings.iter().any(|w| w.contains("not rewritten")),
             "{:?}",
@@ -928,7 +943,11 @@ mod tests {
 
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
 
-        assert_eq!(read(made.dir.join("sketch.yaml")), yaml, "must stay verbatim");
+        assert_eq!(
+            read(made.dir.join("sketch.yaml")),
+            yaml,
+            "must stay verbatim"
+        );
         assert!(
             made.warnings
                 .iter()
@@ -947,7 +966,9 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         assert_eq!(read(made.dir.join("sketch.yaml")), garbage);
         assert!(
-            made.warnings.iter().any(|w| w.contains("could not be parsed")),
+            made.warnings
+                .iter()
+                .any(|w| w.contains("could not be parsed")),
             "{:?}",
             made.warnings
         );
@@ -1102,7 +1123,10 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         let link = made.dir.join("alias.h");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("src/util.h"));
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            PathBuf::from("src/util.h")
+        );
         assert!(
             made.warnings
                 .iter()
@@ -1160,7 +1184,13 @@ mod tests {
         assert!(made.dir.join(".git").is_dir());
         // Unborn HEAD: the repository exists but holds no commits yet.
         let out = std::process::Command::new("git")
-            .args(["-C", made.dir.to_str().unwrap(), "rev-parse", "--verify", "HEAD"])
+            .args([
+                "-C",
+                made.dir.to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                "HEAD",
+            ])
             .output()
             .unwrap();
         assert!(!out.status.success(), "HEAD must be unborn (no commits)");

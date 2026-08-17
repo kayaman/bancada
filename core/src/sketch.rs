@@ -174,7 +174,10 @@ impl SketchProject {
                 .profiles
                 .get(src.trim())
                 .ok_or_else(|| {
-                    Error::Other(format!("profile `{}` not found to copy libraries from", src.trim()))
+                    Error::Other(format!(
+                        "profile `{}` not found to copy libraries from",
+                        src.trim()
+                    ))
                 })?
                 .libraries
                 .clone(),
@@ -832,7 +835,10 @@ profiles:
         proj.init_profile("weather", "esp32:esp32:esp32s3").unwrap();
 
         let err = proj.init_profile("weather", "esp32:esp32:esp32c6");
-        assert!(err.is_err(), "a second `weather` must not overwrite the first");
+        assert!(
+            err.is_err(),
+            "a second `weather` must not overwrite the first"
+        );
         // The original is untouched.
         assert_eq!(
             proj.load_yaml().unwrap().profiles["weather"].fqbn,
@@ -852,7 +858,11 @@ profiles:
 
         let y = proj.init_profile("c6", "esp32:esp32:esp32c6").unwrap();
 
-        assert_eq!(y.default_profile.as_deref(), Some("base"), "default must not move");
+        assert_eq!(
+            y.default_profile.as_deref(),
+            Some("base"),
+            "default must not move"
+        );
         assert_eq!(y.profiles["base"].fqbn, "esp32:esp32:esp32");
         assert_eq!(y.profiles["c6"].fqbn, "esp32:esp32:esp32c6");
     }
@@ -874,13 +884,22 @@ profiles:
         let mut y = proj.load_yaml().unwrap();
         y.profiles.get_mut("uno").unwrap().libraries = vec![
             LibraryDep::Registry("ArduinoJson (7.4.2)".into()),
-            LibraryDep::Dependency { dependency: "MsgPack (0.4.2)".into() },
-            LibraryDep::Local { dir: "../libs/Foo".into() },
+            LibraryDep::Dependency {
+                dependency: "MsgPack (0.4.2)".into(),
+            },
+            LibraryDep::Local {
+                dir: "../libs/Foo".into(),
+            },
         ];
         proj.save_yaml(&y).unwrap();
 
         let out = proj
-            .add_profile("nano", "arduino:avr:nano", Some("arduino:avr (1.8.8)"), Some("uno"))
+            .add_profile(
+                "nano",
+                "arduino:avr:nano",
+                Some("arduino:avr (1.8.8)"),
+                Some("uno"),
+            )
             .unwrap();
         let nano = &out.profiles["nano"];
         assert_eq!(nano.fqbn, "arduino:avr:nano");
@@ -888,7 +907,10 @@ profiles:
         assert_eq!(nano.platforms.len(), 1);
         assert_eq!(nano.platforms[0].platform, "arduino:avr (1.8.8)");
         // The addition is persisted, not just returned.
-        assert_eq!(proj.load_yaml().unwrap().profiles["nano"].fqbn, "arduino:avr:nano");
+        assert_eq!(
+            proj.load_yaml().unwrap().profiles["nano"].fqbn,
+            "arduino:avr:nano"
+        );
     }
 
     #[test]
@@ -949,12 +971,17 @@ default_profile: unoq
         assert_eq!(libs.len(), 3);
         assert_eq!(
             libs[0],
-            LibraryDep::Dependency { dependency: "Arduino_RPClite (0.3.0)".into() }
+            LibraryDep::Dependency {
+                dependency: "Arduino_RPClite (0.3.0)".into()
+            }
         );
         // Round-trip: saving must keep the mapping form arduino-cli understands.
         proj.save_yaml(&y).unwrap();
         let text = std::fs::read_to_string(proj.dir.join("sketch.yaml")).unwrap();
-        assert!(text.contains("dependency: Arduino_RPClite (0.3.0)"), "{text}");
+        assert!(
+            text.contains("dependency: Arduino_RPClite (0.3.0)"),
+            "{text}"
+        );
     }
 
     // ---------- retarget_profile ----------
@@ -982,11 +1009,17 @@ default_profile: unoq
         assert_eq!(p.platforms.len(), 1);
         assert_eq!(p.platforms[0].platform, "arduino:zephyr (0.90.0)");
         // The point of "in place": name, libraries, port and notes survive.
-        assert_eq!(p.libraries, vec![LibraryDep::Registry("ArduinoJson (7.4.2)".into())]);
+        assert_eq!(
+            p.libraries,
+            vec![LibraryDep::Registry("ArduinoJson (7.4.2)".into())]
+        );
         assert_eq!(p.port.as_deref(), Some("/dev/ttyACM0"));
         assert_eq!(p.notes.as_deref(), Some("bench uno"));
         // Persisted, and default_profile untouched.
-        assert_eq!(proj.load_yaml().unwrap().profiles["uno"].fqbn, "arduino:zephyr:unoq");
+        assert_eq!(
+            proj.load_yaml().unwrap().profiles["uno"].fqbn,
+            "arduino:zephyr:unoq"
+        );
         assert_eq!(out.default_profile.as_deref(), Some("uno"));
     }
 
@@ -1006,9 +1039,14 @@ default_profile: unoq
     fn retarget_rejects_an_unknown_profile_and_blank_inputs() {
         let tmp = tempfile::tempdir().unwrap();
         let proj = SketchProject::open(tmp.path()).unwrap();
-        proj.add_profile("uno", "arduino:avr:uno", None, None).unwrap();
-        assert!(proj.retarget_profile("mega", "arduino:avr:nano", "arduino:avr (1.8.8)").is_err());
-        assert!(proj.retarget_profile("uno", "  ", "arduino:avr (1.8.8)").is_err());
+        proj.add_profile("uno", "arduino:avr:uno", None, None)
+            .unwrap();
+        assert!(proj
+            .retarget_profile("mega", "arduino:avr:nano", "arduino:avr (1.8.8)")
+            .is_err());
+        assert!(proj
+            .retarget_profile("uno", "  ", "arduino:avr (1.8.8)")
+            .is_err());
         // Blank profile name must also be rejected with the same error as add_profile uses
         let err = proj
             .retarget_profile("  ", "arduino:avr:nano", "arduino:avr (1.8.8)")

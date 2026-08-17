@@ -251,7 +251,11 @@ fn sketch_dir_from_meta(chats_root: &Path, key: &str) -> Option<String> {
             continue;
         };
         use std::io::BufRead;
-        for line in std::io::BufReader::new(f).lines().take(3).map_while(|l| l.ok()) {
+        for line in std::io::BufReader::new(f)
+            .lines()
+            .take(3)
+            .map_while(|l| l.ok())
+        {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
@@ -293,13 +297,19 @@ mod tests {
             tmp.path(),
             "aaaa-blink",
             "2026-08-08T10-00-00.ndjson",
-            &[r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#, &r1],
+            &[
+                r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#,
+                &r1,
+            ],
         );
         write_chat(
             tmp.path(),
             "aaaa-blink",
             "2026-08-09T09-00-00.ndjson",
-            &[r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#, &r2],
+            &[
+                r#"{"op":"meta","sketchDir":"/home/me/Blink","startedAt":"t"}"#,
+                &r2,
+            ],
         );
         // A directory with chats but no results still counts its sessions.
         write_chat(
@@ -325,7 +335,9 @@ mod tests {
     #[test]
     fn backfill_of_missing_root_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(backfill(&tmp.path().join("never-created")).projects.is_empty());
+        assert!(backfill(&tmp.path().join("never-created"))
+            .projects
+            .is_empty());
     }
 
     #[test]
@@ -333,8 +345,12 @@ mod tests {
         // Old or hand-damaged chats may lack the meta line; the key is at
         // least recognisable (it ends with the sanitized basename).
         let tmp = tempfile::tempdir().unwrap();
-        write_chat(tmp.path(), "cccc-mystery", "2026-08-01T08-00-00.ndjson",
-            &[&result_line(0.01, 1, 1, 1)]);
+        write_chat(
+            tmp.path(),
+            "cccc-mystery",
+            "2026-08-01T08-00-00.ndjson",
+            &[&result_line(0.01, 1, 1, 1)],
+        );
         let s = backfill(tmp.path());
         assert_eq!(s.projects["cccc-mystery"].sketch_dir, "cccc-mystery");
     }
@@ -349,8 +365,12 @@ mod tests {
 
         let mut s = UsageStore::default();
         s.note_new_chat("k1", "/home/me/Blink");
-        s.record_line("k1", "/home/me/Blink", "2026-08-09T10-00-00.ndjson",
-            &result_line(0.05, 500, 50, 3));
+        s.record_line(
+            "k1",
+            "/home/me/Blink",
+            "2026-08-09T10-00-00.ndjson",
+            &result_line(0.05, 500, 50, 3),
+        );
         s.save(&path).unwrap();
         let back = UsageStore::load(&path).unwrap();
         assert_eq!(back.projects, s.projects);
@@ -371,14 +391,27 @@ mod tests {
         let mut s = UsageStore::default();
         // Non-result ops and garbage change nothing and report no change.
         assert!(!s.record_line("k", "/s", "a.ndjson", r#"{"op":"userSent","text":"hi"}"#));
-        assert!(!s.record_line("k", "/s", "a.ndjson", r#"{"op":"push","ev":{"type":"assistant"}}"#));
+        assert!(!s.record_line(
+            "k",
+            "/s",
+            "a.ndjson",
+            r#"{"op":"push","ev":{"type":"assistant"}}"#
+        ));
         assert!(!s.record_line("k", "/s", "a.ndjson", "{not json"));
         assert!(s.projects.is_empty());
 
-        assert!(s.record_line("k", "/s", "2026-08-09T10-00-00.ndjson",
-            &result_line(0.01, 100, 10, 2)));
-        assert!(s.record_line("k", "/s", "2026-08-09T11-00-00.ndjson",
-            &result_line(0.02, 200, 20, 3)));
+        assert!(s.record_line(
+            "k",
+            "/s",
+            "2026-08-09T10-00-00.ndjson",
+            &result_line(0.01, 100, 10, 2)
+        ));
+        assert!(s.record_line(
+            "k",
+            "/s",
+            "2026-08-09T11-00-00.ndjson",
+            &result_line(0.02, 200, 20, 3)
+        ));
         let p = &s.projects["k"];
         assert!((p.cost_usd - 0.03).abs() < 1e-9);
         assert_eq!(p.input_tokens, 300);
@@ -402,8 +435,12 @@ mod tests {
     fn rename_project_key_moves_the_entry_and_repoints_its_path() {
         let mut s = UsageStore::default();
         s.note_new_chat("old", "/home/me/Old");
-        s.record_line("old", "/home/me/Old", "2026-08-09T10-00-00.ndjson",
-            &result_line(0.05, 500, 50, 3));
+        s.record_line(
+            "old",
+            "/home/me/Old",
+            "2026-08-09T10-00-00.ndjson",
+            &result_line(0.05, 500, 50, 3),
+        );
 
         s.rename_project_key("old", "new", "/home/me/New");
 
@@ -424,11 +461,19 @@ mod tests {
         // under the target key; clobbering them would lose recorded spend.
         let mut s = UsageStore::default();
         s.note_new_chat("old", "/home/me/Old");
-        s.record_line("old", "/home/me/Old", "2026-08-09T10-00-00.ndjson",
-            &result_line(0.05, 500, 50, 3));
+        s.record_line(
+            "old",
+            "/home/me/Old",
+            "2026-08-09T10-00-00.ndjson",
+            &result_line(0.05, 500, 50, 3),
+        );
         s.note_new_chat("new", "/home/me/New");
-        s.record_line("new", "/home/me/New", "2026-08-01T10-00-00.ndjson",
-            &result_line(0.01, 100, 10, 1));
+        s.record_line(
+            "new",
+            "/home/me/New",
+            "2026-08-01T10-00-00.ndjson",
+            &result_line(0.01, 100, 10, 1),
+        );
 
         s.rename_project_key("old", "new", "/home/me/New");
 
@@ -476,7 +521,11 @@ mod tests {
         s.record_line("bbbb-two", "/two", "y.ndjson", &result_line(0.90, 1, 1, 1));
         let rows = s.overview();
         let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
-        assert_eq!(keys, ["bbbb-two", "aaaa-one"], "sorted by cost, key preserved");
+        assert_eq!(
+            keys,
+            ["bbbb-two", "aaaa-one"],
+            "sorted by cost, key preserved"
+        );
     }
 
     #[test]
@@ -499,8 +548,14 @@ mod tests {
         );
         let rows = backfill(tmp.path()).overview();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].sketch_dir, "/home/u/Projects/led-test", "stale, by design");
-        assert_eq!(rows[0].key, key, "addressing must not go through sketch_dir");
+        assert_eq!(
+            rows[0].sketch_dir, "/home/u/Projects/led-test",
+            "stale, by design"
+        );
+        assert_eq!(
+            rows[0].key, key,
+            "addressing must not go through sketch_dir"
+        );
         assert_ne!(
             crate::chatlog::sketch_key(&rows[0].sketch_dir),
             rows[0].key,
@@ -526,8 +581,11 @@ mod tests {
         // Forward compat rides #[serde(default)], like AppSettings/Fleet.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("usage.json");
-        std::fs::write(&path,
-            r#"{"version":1,"projects":{"k":{"sketch_dir":"/s","cost_usd":1.0}}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"projects":{"k":{"sketch_dir":"/s","cost_usd":1.0}}}"#,
+        )
+        .unwrap();
         let s = UsageStore::load(&path).unwrap();
         assert_eq!(s.projects["k"].input_tokens, 0);
         assert_eq!(s.projects["k"].sessions, 0);

@@ -62,15 +62,30 @@ mod tests {
     fn same_name_different_device_is_a_change() {
         // The bench case: native USB-Serial/JTAG (303a:1001) swapped for the
         // CH343 bridge (1a86:55d3), both landing on /dev/ttyACM0.
-        let before = keyset(&[usb("/dev/ttyACM0", 0x303a, 0x1001, Some("20:6E:F1:08:9F:80"))]);
+        let before = keyset(&[usb(
+            "/dev/ttyACM0",
+            0x303a,
+            0x1001,
+            Some("20:6E:F1:08:9F:80"),
+        )]);
         let after = keyset(&[usb("/dev/ttyACM0", 0x1a86, 0x55d3, Some("5B8E084513"))]);
         assert!(ports_changed(Some(&before), &after));
     }
 
     #[test]
     fn identical_ports_are_not_a_change() {
-        let a = keyset(&[usb("/dev/ttyACM0", 0x303a, 0x1001, Some("20:6E:F1:08:9F:80"))]);
-        let b = keyset(&[usb("/dev/ttyACM0", 0x303a, 0x1001, Some("20:6E:F1:08:9F:80"))]);
+        let a = keyset(&[usb(
+            "/dev/ttyACM0",
+            0x303a,
+            0x1001,
+            Some("20:6E:F1:08:9F:80"),
+        )]);
+        let b = keyset(&[usb(
+            "/dev/ttyACM0",
+            0x303a,
+            0x1001,
+            Some("20:6E:F1:08:9F:80"),
+        )]);
         assert!(!ports_changed(Some(&a), &b));
     }
 

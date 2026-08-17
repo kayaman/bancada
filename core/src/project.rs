@@ -516,7 +516,11 @@ mod tests {
             assert!(!s.contains("{name}"), "{}: unsubstituted name", t.id);
             assert!(s.contains("void setup()"), "{}: no setup", t.id);
             assert!(s.contains("void loop()"), "{}: no loop", t.id);
-            assert!(s.contains("Serial.begin(115200)"), "{}: not serial-verbose", t.id);
+            assert!(
+                s.contains("Serial.begin(115200)"),
+                "{}: not serial-verbose",
+                t.id
+            );
         }
     }
 
@@ -534,7 +538,10 @@ mod tests {
         // (everything that isn't ESP32) — found the hard way by retargeting
         // an i2c-scan project from esp32s3 to arduino:zephyr:unoq
         let s = sketch_from_template("i2c-scan", "ScanNode").unwrap();
-        assert!(!s.contains("Serial.printf"), "printf is an ESP32-core extra");
+        assert!(
+            !s.contains("Serial.printf"),
+            "printf is an ESP32-core extra"
+        );
         assert!(
             s.contains("#if defined(ARDUINO_ARCH_ESP32)"),
             "runtime pin override exists only on ESP32 cores and must be guarded"
@@ -562,7 +569,10 @@ mod tests {
         // learned by being retargeted onto a Uno Q.
         for id in ["blink", "waveforms", "analog-plot", "serial-echo"] {
             let s = sketch_from_template(id, "AnyNode").unwrap();
-            assert!(!s.contains("Serial.printf"), "{id}: printf is an ESP32-core extra");
+            assert!(
+                !s.contains("Serial.printf"),
+                "{id}: printf is an ESP32-core extra"
+            );
             assert!(!s.contains("ESP."), "{id}: ESP.* is ESP-only");
             assert!(!s.contains("<WiFi.h>"), "{id}: WiFi is not universal");
         }
@@ -589,7 +599,9 @@ mod tests {
     fn unknown_template_is_rejected_with_the_valid_ids() {
         assert!(sketch_from_template("nope", "X").is_none());
         let tmp = tempfile::tempdir().unwrap();
-        let err = write_main_ino(tmp.path(), "X", "nope").unwrap_err().to_string();
+        let err = write_main_ino(tmp.path(), "X", "nope")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown sketch template"), "{err}");
         assert!(err.contains("blink"), "should list valid ids: {err}");
     }
@@ -731,7 +743,11 @@ mod tests {
 
         let made = rename_project(&dir, "New").unwrap();
 
-        assert_eq!(read(made.dir.join("sketch.yaml")), yaml, "must stay verbatim");
+        assert_eq!(
+            read(made.dir.join("sketch.yaml")),
+            yaml,
+            "must stay verbatim"
+        );
         assert!(made.warnings.is_empty(), "{:?}", made.warnings);
     }
 
@@ -854,7 +870,11 @@ mod tests {
         let err = rename_project(&dir, "New").unwrap_err().to_string();
         assert!(err.contains("worktree"), "{err}");
         assert!(err.contains("git worktree move"), "{err}");
-        assert_eq!(read(dir.join(".git")), gitfile, "the .git file is untouched");
+        assert_eq!(
+            read(dir.join(".git")),
+            gitfile,
+            "the .git file is untouched"
+        );
         assert!(dir.join("Old.ino").is_file(), "the project must survive");
     }
 
@@ -889,9 +909,15 @@ mod tests {
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(err.contains("Old"), "{err}");
-        assert!(!parent.join("New").exists(), "the project must not have moved");
+        assert!(
+            !parent.join("New").exists(),
+            "the project must not have moved"
+        );
         assert!(dir.join("Old.ino").is_file(), "the main ino must be back");
-        assert!(!dir.join("New.ino").exists(), "the renamed ino must be gone");
+        assert!(
+            !dir.join("New.ino").exists(),
+            "the renamed ino must be gone"
+        );
         assert_eq!(read(dir.join("Old.ino")), before_ino, "title restored");
         assert_eq!(read(dir.join("sketch.yaml")), yaml, "sketch.yaml restored");
     }

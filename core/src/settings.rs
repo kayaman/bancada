@@ -215,7 +215,10 @@ mod tests {
         let s = load(&p);
         assert_eq!(s.last_sketch_dir, Some("/home/me/sketch".to_string()));
         assert_eq!(s.last_open_file, Some("src/x.cpp".to_string()));
-        assert_eq!(s.last_new_project_parent, Some("/home/me/Projects".to_string()));
+        assert_eq!(
+            s.last_new_project_parent,
+            Some("/home/me/Projects".to_string())
+        );
         assert!(s.recent_projects.is_empty());
     }
 

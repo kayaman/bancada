@@ -442,10 +442,7 @@ mod tests {
         }"#;
         let r: BoardListResponse = serde_json::from_str(json).unwrap();
         let p = &r.detected_ports[0];
-        assert_eq!(
-            p.port.properties.get("serialNumber").unwrap(),
-            "3477325620"
-        );
+        assert_eq!(p.port.properties.get("serialNumber").unwrap(), "3477325620");
         assert_eq!(p.matching_boards[0].fqbn, "arduino:zephyr:unoq");
     }
 

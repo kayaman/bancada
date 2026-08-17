@@ -247,13 +247,7 @@ impl Fleet {
     /// Updates in place, never reorders — a re-sighting should read as an edit
     /// rather than jumping the board to the end of the list. `first_seen` is
     /// preserved; only `last_seen` and the mutable details move.
-    pub fn sight(
-        &mut self,
-        id: &BoardId,
-        port: &Port,
-        name: Option<&str>,
-        now: u64,
-    ) -> bool {
+    pub fn sight(&mut self, id: &BoardId, port: &Port, name: Option<&str>, now: u64) -> bool {
         let vid = port.properties.get("vid").cloned();
         let pid = port.properties.get("pid").cloned();
         let address = (!port.address.is_empty()).then(|| port.address.clone());
@@ -809,10 +803,14 @@ mod tests {
     #[test]
     fn nicknames_round_trip_and_can_be_cleared() {
         let (mut f, _) = fleet_with_esp(1);
-        f.set_nickname("44:1b:f6:ce:a3:b8", Some("  bench probe  ")).unwrap();
+        f.set_nickname("44:1b:f6:ce:a3:b8", Some("  bench probe  "))
+            .unwrap();
         assert_eq!(f.boards[0].nickname.as_deref(), Some("bench probe"));
         f.set_nickname("44:1b:f6:ce:a3:b8", Some("")).unwrap();
-        assert_eq!(f.boards[0].nickname, None, "a blank clears rather than stores");
+        assert_eq!(
+            f.boards[0].nickname, None,
+            "a blank clears rather than stores"
+        );
         f.set_nickname("44:1b:f6:ce:a3:b8", None).unwrap();
         assert_eq!(f.boards[0].nickname, None);
     }
@@ -842,7 +840,8 @@ mod tests {
     fn display_name_prefers_nickname_then_board_name_then_id() {
         let (mut f, _) = fleet_with_esp(1);
         assert_eq!(f.boards[0].display_name(), "Ozobot DRVKit");
-        f.set_nickname("44:1b:f6:ce:a3:b8", Some("bench probe")).unwrap();
+        f.set_nickname("44:1b:f6:ce:a3:b8", Some("bench probe"))
+            .unwrap();
         assert_eq!(f.boards[0].display_name(), "bench probe");
         f.boards[0].nickname = None;
         f.boards[0].board_name = None;
@@ -863,7 +862,12 @@ mod tests {
         f.note_fqbn("3477325620", "esp32:esp32:esp32").unwrap();
 
         let new_id = f
-            .merge_identified(Some("3477325620"), "44:1B:F6:CE:A3:B8", Some("ESP32-S3"), 200)
+            .merge_identified(
+                Some("3477325620"),
+                "44:1B:F6:CE:A3:B8",
+                Some("ESP32-S3"),
+                200,
+            )
             .unwrap();
 
         assert_eq!(new_id, "44:1b:f6:ce:a3:b8");
@@ -885,7 +889,8 @@ mod tests {
         let esp = esp_port();
         let esp_id = identify(&esp).unwrap();
         f.sight(&esp_id, &esp, Some("Ozobot DRVKit"), 50);
-        f.set_nickname("44:1b:f6:ce:a3:b8", Some("the good one")).unwrap();
+        f.set_nickname("44:1b:f6:ce:a3:b8", Some("the good one"))
+            .unwrap();
         // Also known by a serial, with its own fqbn history.
         let ser = serial_port();
         let ser_id = identify(&ser).unwrap();
@@ -897,7 +902,11 @@ mod tests {
 
         assert_eq!(f.boards.len(), 1);
         let e = &f.boards[0];
-        assert_eq!(e.nickname.as_deref(), Some("the good one"), "MAC record wins");
+        assert_eq!(
+            e.nickname.as_deref(),
+            Some("the good one"),
+            "MAC record wins"
+        );
         assert_eq!(e.fqbns, ["esp32:esp32:esp32c3"], "history is folded in");
         assert_eq!(e.first_seen, 50);
     }
@@ -928,10 +937,20 @@ mod tests {
     #[test]
     fn re_identifying_the_same_board_is_idempotent() {
         let (mut f, _) = fleet_with_esp(100);
-        f.merge_identified(Some("44:1b:f6:ce:a3:b8"), "44:1B:F6:CE:A3:B8", Some("ESP32-S3"), 200)
-            .unwrap();
-        f.merge_identified(Some("44:1b:f6:ce:a3:b8"), "44:1B:F6:CE:A3:B8", Some("ESP32-S3"), 300)
-            .unwrap();
+        f.merge_identified(
+            Some("44:1b:f6:ce:a3:b8"),
+            "44:1B:F6:CE:A3:B8",
+            Some("ESP32-S3"),
+            200,
+        )
+        .unwrap();
+        f.merge_identified(
+            Some("44:1b:f6:ce:a3:b8"),
+            "44:1B:F6:CE:A3:B8",
+            Some("ESP32-S3"),
+            300,
+        )
+        .unwrap();
         assert_eq!(f.boards.len(), 1);
         assert_eq!(f.boards[0].first_seen, 100);
         assert_eq!(f.boards[0].last_seen, 300);
@@ -1184,8 +1203,10 @@ mod tests {
         let p = tmp.path().join("deep/nested/fleet.json");
 
         let (mut f, _) = fleet_with_esp(1000);
-        f.set_nickname("44:1b:f6:ce:a3:b8", Some("bench probe")).unwrap();
-        f.note_fqbn("44:1b:f6:ce:a3:b8", "esp32:esp32:esp32s3").unwrap();
+        f.set_nickname("44:1b:f6:ce:a3:b8", Some("bench probe"))
+            .unwrap();
+        f.note_fqbn("44:1b:f6:ce:a3:b8", "esp32:esp32:esp32s3")
+            .unwrap();
         f.boards[0].chip_type = Some("ESP32-S3".into());
         f.save(&p).unwrap();
         assert!(p.is_file(), "save must create parent dirs");

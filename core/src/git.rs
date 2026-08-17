@@ -24,8 +24,8 @@
 //!   configured identity keeps the user's own authorship, and only a
 //!   genuinely identity-less repo falls back to Bancada's.
 
-use crate::{Error, Result};
 use crate::types::{OutputLine, OutputStream};
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -120,13 +120,25 @@ pub fn run_streaming(args: &[&str], mut on_line: impl FnMut(OutputLine)) -> Resu
     let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
     let tx_err = tx.clone();
     let t_out = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-            let _ = tx.send(OutputLine { stream: OutputStream::Stdout, line });
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(|l| l.ok())
+        {
+            let _ = tx.send(OutputLine {
+                stream: OutputStream::Stdout,
+                line,
+            });
         }
     });
     let t_err = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            let _ = tx_err.send(OutputLine { stream: OutputStream::Stderr, line });
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(|l| l.ok())
+        {
+            let _ = tx_err.send(OutputLine {
+                stream: OutputStream::Stderr,
+                line,
+            });
         }
     });
     for line in rx {
@@ -387,7 +399,11 @@ fn strip_root_prefix(root: &Path, dir: &Path, dirty: Vec<ChangedPath>) -> Vec<Ch
     dirty
         .into_iter()
         .map(|mut c| {
-            if let Some(stripped) = c.path.strip_prefix(&prefix).and_then(|s| s.strip_prefix('/')) {
+            if let Some(stripped) = c
+                .path
+                .strip_prefix(&prefix)
+                .and_then(|s| s.strip_prefix('/'))
+            {
                 c.path = stripped.to_string();
             }
             c
@@ -412,7 +428,16 @@ pub fn repo_state(dir: &Path) -> Result<RepoState> {
 
     // `-z`: NUL-terminated records with unquoted paths, so a non-ASCII
     // filename comes back exact instead of C-quoted. See `parse_status_v2`.
-    let status = run(&["-C", dir_s, "status", "--porcelain=v2", "--branch", "-z", "--", "."])?;
+    let status = run(&[
+        "-C",
+        dir_s,
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--",
+        ".",
+    ])?;
     let parsed = parse_status_v2(&status);
 
     if root != dir {
@@ -476,7 +501,12 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
 
     let mut args: Vec<&str> = vec!["-C", d];
     if !has_usable_identity(d) {
-        args.extend(["-c", "user.name=Bancada", "-c", "user.email=bancada@localhost"]);
+        args.extend([
+            "-c",
+            "user.name=Bancada",
+            "-c",
+            "user.email=bancada@localhost",
+        ]);
     }
     args.extend([
         "-c",
@@ -538,9 +568,14 @@ pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutco
     let state = repo_state(dir)?;
     let (branch, detached, dirty, remote, has_upstream) = match state {
         RepoState::NoGit | RepoState::Nested { .. } => return Ok(SyncOutcome::NotRoot),
-        RepoState::Root { branch, detached, dirty, remote, has_upstream, .. } => {
-            (branch, detached, dirty, remote, has_upstream)
-        }
+        RepoState::Root {
+            branch,
+            detached,
+            dirty,
+            remote,
+            has_upstream,
+            ..
+        } => (branch, detached, dirty, remote, has_upstream),
     };
     if remote.is_none() {
         return Ok(SyncOutcome::NoRemote);
@@ -558,7 +593,9 @@ pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutco
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
 
     if !run_streaming(&["-C", d, "fetch", "origin"], &mut on_line)? {
-        return Err(Error::Other("git fetch failed — see the Build console".into()));
+        return Err(Error::Other(
+            "git fetch failed — see the Build console".into(),
+        ));
     }
 
     // Rebase only onto a branch the remote actually has: a fresh remote (or
@@ -577,7 +614,9 @@ pub fn sync(dir: &Path, mut on_line: impl FnMut(OutputLine)) -> Result<SyncOutco
         run_streaming(&["-C", d, "push", "-u", "origin", "HEAD"], &mut on_line)?
     };
     if !pushed {
-        return Err(Error::Other("git push failed — see the Build console".into()));
+        return Err(Error::Other(
+            "git push failed — see the Build console".into(),
+        ));
     }
     Ok(SyncOutcome::Synced)
 }
@@ -674,9 +713,24 @@ pub fn tag_annotated(dir: &Path, name: &str, message: &str) -> Result<()> {
     }
     let mut args: Vec<&str> = vec!["-C", d];
     if !has_usable_identity(d) {
-        args.extend(["-c", "user.name=Bancada", "-c", "user.email=bancada@localhost"]);
+        args.extend([
+            "-c",
+            "user.name=Bancada",
+            "-c",
+            "user.email=bancada@localhost",
+        ]);
     }
-    args.extend(["-c", "tag.gpgSign=false", "-c", "core.hooksPath=", "tag", "-a", "-m", message, name]);
+    args.extend([
+        "-c",
+        "tag.gpgSign=false",
+        "-c",
+        "core.hooksPath=",
+        "tag",
+        "-a",
+        "-m",
+        message,
+        name,
+    ]);
     run(&args)?;
     Ok(())
 }
@@ -888,13 +942,25 @@ pub fn create_remote(
     let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
     let tx_err = tx.clone();
     let t_out = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-            let _ = tx.send(OutputLine { stream: OutputStream::Stdout, line });
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(|l| l.ok())
+        {
+            let _ = tx.send(OutputLine {
+                stream: OutputStream::Stdout,
+                line,
+            });
         }
     });
     let t_err = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            let _ = tx_err.send(OutputLine { stream: OutputStream::Stderr, line });
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(|l| l.ok())
+        {
+            let _ = tx_err.send(OutputLine {
+                stream: OutputStream::Stderr,
+                line,
+            });
         }
     });
     let mut tail = Vec::new();
@@ -1119,8 +1185,15 @@ mod tests {
         std::fs::write(dir.join("new.h"), "#pragma once\n").unwrap();
 
         match repo_state(&dir).unwrap() {
-            RepoState::Root { dirty, remote, has_upstream, tracked_secrets,
-                              suggested_message: msg, detached, .. } => {
+            RepoState::Root {
+                dirty,
+                remote,
+                has_upstream,
+                tracked_secrets,
+                suggested_message: msg,
+                detached,
+                ..
+            } => {
                 let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
                 assert_eq!(paths, ["Proj.ino", "new.h"]);
                 assert_eq!(remote, None);
@@ -1148,9 +1221,23 @@ mod tests {
         // itself from ambient identity via GIT_CONFIG_GLOBAL/SYSTEM.
         std::fs::write(sketch.join("tracked.ino"), "void setup() {}\n").unwrap();
         run(&["-C", sketch.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
-        run(&["-C", sketch.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
+        run(&[
+            "-C",
+            sketch.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@t",
+        ])
+        .unwrap();
         run(&["-C", sketch.to_str().unwrap(), "add", "tracked.ino"]).unwrap();
-        run(&["-C", sketch.to_str().unwrap(), "commit", "-m", "add tracked file"]).unwrap();
+        run(&[
+            "-C",
+            sketch.to_str().unwrap(),
+            "commit",
+            "-m",
+            "add tracked file",
+        ])
+        .unwrap();
 
         // Modify the tracked file
         std::fs::write(sketch.join("tracked.ino"), "void setup() { }\n").unwrap();
@@ -1186,8 +1273,14 @@ mod tests {
     fn strip_root_prefix_removes_the_sketchs_root_relative_prefix() {
         let root = Path::new("/repo");
         let dirty = vec![
-            ChangedPath { path: "inner/tracked.ino".into(), status: ".M".into() },
-            ChangedPath { path: "inner/new.ino".into(), status: "??".into() },
+            ChangedPath {
+                path: "inner/tracked.ino".into(),
+                status: ".M".into(),
+            },
+            ChangedPath {
+                path: "inner/new.ino".into(),
+                status: "??".into(),
+            },
         ];
         let stripped = strip_root_prefix(root, Path::new("/repo/inner"), dirty);
         let paths: Vec<&str> = stripped.iter().map(|c| c.path.as_str()).collect();
@@ -1197,7 +1290,10 @@ mod tests {
     #[test]
     fn strip_root_prefix_is_a_no_op_at_the_repo_root() {
         let root = Path::new("/repo");
-        let dirty = vec![ChangedPath { path: "a.ino".into(), status: ".M".into() }];
+        let dirty = vec![ChangedPath {
+            path: "a.ino".into(),
+            status: ".M".into(),
+        }];
         let stripped = strip_root_prefix(root, root, dirty.clone());
         assert_eq!(stripped, dirty);
     }
@@ -1213,7 +1309,9 @@ mod tests {
         run(&["-C", dir.to_str().unwrap(), "add", "-f", "secrets.h"]).unwrap();
 
         match repo_state(&dir).unwrap() {
-            RepoState::Root { tracked_secrets, .. } => {
+            RepoState::Root {
+                tracked_secrets, ..
+            } => {
                 assert_eq!(tracked_secrets, vec!["secrets.h"]);
             }
             other => panic!("expected Root, got {other:?}"),
@@ -1247,7 +1345,11 @@ mod tests {
         std::fs::write(dir.join("térmica.ino"), "void setup() { }\n").unwrap();
 
         match repo_state(&dir).unwrap() {
-            RepoState::Root { dirty, tracked_secrets, .. } => {
+            RepoState::Root {
+                dirty,
+                tracked_secrets,
+                ..
+            } => {
                 let paths: Vec<&str> = dirty.iter().map(|c| c.path.as_str()).collect();
                 assert_eq!(
                     paths,
@@ -1299,7 +1401,10 @@ mod tests {
     fn merged_gitignore_variant_spellings_are_not_duplicated() {
         let existing = "build\n.env\n";
         let result = merged_gitignore(existing);
-        assert_eq!(result, "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n");
+        assert_eq!(
+            result,
+            "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n"
+        );
         let build_lines = result
             .lines()
             .filter(|l| matches!(l.trim(), "build" | "build/" | "/build" | "/build/"))
@@ -1364,7 +1469,16 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         let s = parse_status_v2(STATUS_V2);
         let paths: Vec<&str> = s.dirty.iter().map(|c| c.path.as_str()).collect();
         // The rename reports its *new* path, not the tab-joined pair.
-        assert_eq!(paths, ["sketch.ino", "web/index.html", "renamed.h", "conflict.txt", "notes.txt"]);
+        assert_eq!(
+            paths,
+            [
+                "sketch.ino",
+                "web/index.html",
+                "renamed.h",
+                "conflict.txt",
+                "notes.txt"
+            ]
+        );
         assert_eq!(s.dirty[0].status, ".M");
         assert_eq!(s.dirty[3].status, "UU");
         assert_eq!(s.dirty[4].status, "??");
@@ -1391,7 +1505,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
     fn suggested_message_names_two_files_and_counts_the_rest() {
         let dirty: Vec<ChangedPath> = ["a.ino", "sketch.yaml", "web/x.py", "y.h"]
             .iter()
-            .map(|p| ChangedPath { path: p.to_string(), status: ".M".into() })
+            .map(|p| ChangedPath {
+                path: p.to_string(),
+                status: ".M".into(),
+            })
             .collect();
         assert_eq!(
             suggested_message(&dirty),
@@ -1419,7 +1536,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         init_repo(&dir).unwrap();
         std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
 
-        assert_eq!(commit(&dir, "checkpoint: b.h").unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            commit(&dir, "checkpoint: b.h").unwrap(),
+            CommitOutcome::Committed
+        );
         let d = dir.to_str().unwrap();
         let log = run(&["-C", d, "log", "--oneline"]).unwrap();
         assert!(log.contains("checkpoint: b.h"), "log {log:?}");
@@ -1481,7 +1601,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         run(&["-C", d, "config", "user.email", "t@example.com"]).unwrap();
 
         std::fs::write(dir.join("b.h"), "#pragma once\n").unwrap();
-        assert_eq!(commit(&dir, "checkpoint: b.h").unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            commit(&dir, "checkpoint: b.h").unwrap(),
+            CommitOutcome::Committed
+        );
 
         let author_name = run(&["-C", d, "log", "-1", "--format=%an"]).unwrap();
         let author_email = run(&["-C", d, "log", "-1", "--format=%ae"]).unwrap();
@@ -1496,7 +1619,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.ino"), "void setup() {}\n").unwrap();
         init_repo(&dir).unwrap();
-        assert_eq!(commit(&dir, "no-op").unwrap(), CommitOutcome::NothingToCommit);
+        assert_eq!(
+            commit(&dir, "no-op").unwrap(),
+            CommitOutcome::NothingToCommit
+        );
     }
 
     /// A nested sketch's commit takes the sketch subtree only — the parent
@@ -1511,9 +1637,15 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         std::fs::write(sketch.join("n.ino"), "void loop() {}\n").unwrap();
         std::fs::write(root.join("unrelated.txt"), "leave me be\n").unwrap();
 
-        assert_eq!(commit(&sketch, "checkpoint: n.ino").unwrap(), CommitOutcome::Committed);
+        assert_eq!(
+            commit(&sketch, "checkpoint: n.ino").unwrap(),
+            CommitOutcome::Committed
+        );
         let status = run(&["-C", root.to_str().unwrap(), "status", "--porcelain"]).unwrap();
-        assert!(status.contains("unrelated.txt"), "must stay dirty: {status:?}");
+        assert!(
+            status.contains("unrelated.txt"),
+            "must stay dirty: {status:?}"
+        );
         assert!(!status.contains("n.ino"), "must be committed: {status:?}");
     }
 
@@ -1535,16 +1667,52 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         let origin = base.join("origin.git");
         run(&["init", "--bare", "--quiet", origin.to_str().unwrap()]).unwrap();
         // Bare repos default to whatever HEAD says; pin the branch name.
-        run(&["-C", origin.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/main"]).unwrap();
+        run(&[
+            "-C",
+            origin.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ])
+        .unwrap();
         let a = base.join("a");
-        run(&["clone", "--quiet", origin.to_str().unwrap(), a.to_str().unwrap()]).unwrap();
-        run(&["-C", a.to_str().unwrap(), "checkout", "--quiet", "-B", "main"]).unwrap();
+        run(&[
+            "clone",
+            "--quiet",
+            origin.to_str().unwrap(),
+            a.to_str().unwrap(),
+        ])
+        .unwrap();
+        run(&[
+            "-C",
+            a.to_str().unwrap(),
+            "checkout",
+            "--quiet",
+            "-B",
+            "main",
+        ])
+        .unwrap();
         run(&["-C", a.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
         run(&["-C", a.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
         commit_file(&a, "seed.ino", "void setup() {}\n", "seed");
-        run(&["-C", a.to_str().unwrap(), "push", "--quiet", "-u", "origin", "main"]).unwrap();
+        run(&[
+            "-C",
+            a.to_str().unwrap(),
+            "push",
+            "--quiet",
+            "-u",
+            "origin",
+            "main",
+        ])
+        .unwrap();
         let b = base.join("b");
-        run(&["clone", "--quiet", origin.to_str().unwrap(), b.to_str().unwrap()]).unwrap();
+        run(&[
+            "clone",
+            "--quiet",
+            origin.to_str().unwrap(),
+            b.to_str().unwrap(),
+        ])
+        .unwrap();
         run(&["-C", b.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
         run(&["-C", b.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
         (a, b)
@@ -1684,14 +1852,41 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         let dir = repo_with_identity(&tmp, "Tagged");
         let d = dir.to_str().unwrap();
 
-        tag_annotated(&dir, "flash/2026-08-12T1430", "esp32:esp32:esp32c6 on /dev/ttyACM0").unwrap();
+        tag_annotated(
+            &dir,
+            "flash/2026-08-12T1430",
+            "esp32:esp32:esp32c6 on /dev/ttyACM0",
+        )
+        .unwrap();
 
         let kind = run(&["-C", d, "cat-file", "-t", "flash/2026-08-12T1430"]).unwrap();
         assert_eq!(kind.trim(), "tag", "must be an annotated tag object");
-        let msg = run(&["-C", d, "tag", "-l", "--format=%(contents)", "flash/2026-08-12T1430"]).unwrap();
-        assert!(msg.contains("esp32:esp32:esp32c6 on /dev/ttyACM0"), "message was {msg:?}");
-        let tagger = run(&["-C", d, "tag", "-l", "--format=%(taggeremail)", "flash/2026-08-12T1430"]).unwrap();
-        assert!(tagger.contains("t@example.com"), "own identity must be kept: {tagger:?}");
+        let msg = run(&[
+            "-C",
+            d,
+            "tag",
+            "-l",
+            "--format=%(contents)",
+            "flash/2026-08-12T1430",
+        ])
+        .unwrap();
+        assert!(
+            msg.contains("esp32:esp32:esp32c6 on /dev/ttyACM0"),
+            "message was {msg:?}"
+        );
+        let tagger = run(&[
+            "-C",
+            d,
+            "tag",
+            "-l",
+            "--format=%(taggeremail)",
+            "flash/2026-08-12T1430",
+        ])
+        .unwrap();
+        assert!(
+            tagger.contains("t@example.com"),
+            "own identity must be kept: {tagger:?}"
+        );
     }
 
     /// Same failure modes `commit` guards against, one step later: tagging a
@@ -1722,12 +1917,31 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
 
         tag_annotated(&dir, "flash/1970-01-01T0000", "flashed").unwrap();
 
-        let tagger = run(&["-C", d, "tag", "-l", "--format=%(taggeremail)", "flash/1970-01-01T0000"]).unwrap();
+        let tagger = run(&[
+            "-C",
+            d,
+            "tag",
+            "-l",
+            "--format=%(taggeremail)",
+            "flash/1970-01-01T0000",
+        ])
+        .unwrap();
         assert!(tagger.contains("bancada@localhost"), "tagger {tagger:?}");
         // And the override really took: an unsigned tag has no signature,
         // however well-configured the gpg agent on this machine happens to be.
-        let sig = run(&["-C", d, "tag", "-l", "--format=%(contents:signature)", "flash/1970-01-01T0000"]).unwrap();
-        assert!(sig.trim().is_empty(), "tag.gpgSign=false was not honoured: {sig:?}");
+        let sig = run(&[
+            "-C",
+            d,
+            "tag",
+            "-l",
+            "--format=%(contents:signature)",
+            "flash/1970-01-01T0000",
+        ])
+        .unwrap();
+        assert!(
+            sig.trim().is_empty(),
+            "tag.gpgSign=false was not honoured: {sig:?}"
+        );
     }
 
     #[test]
@@ -1748,7 +1962,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         let dir = repo_with_identity(&tmp, "Points");
         let d = dir.to_str().unwrap();
 
-        assert!(flash_tags_at_head(&dir).unwrap().is_empty(), "premise: no tags yet");
+        assert!(
+            flash_tags_at_head(&dir).unwrap().is_empty(),
+            "premise: no tags yet"
+        );
 
         // The fixture's own lightweight tags carry `-c tag.gpgSign=false`
         // because the machine running the tests may well sign tags by
@@ -1784,8 +2001,17 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         tag_annotated(&a, "flash/2026-08-12T1430", "esp32:esp32:esp32c6").unwrap();
         assert!(push_tag(&a, "flash/2026-08-12T1430", |_| {}).unwrap());
 
-        let refs = run(&["-C", base.join("origin.git").to_str().unwrap(), "for-each-ref", "refs/tags"]).unwrap();
-        assert!(refs.contains("flash/2026-08-12T1430"), "origin tags: {refs:?}");
+        let refs = run(&[
+            "-C",
+            base.join("origin.git").to_str().unwrap(),
+            "for-each-ref",
+            "refs/tags",
+        ])
+        .unwrap();
+        assert!(
+            refs.contains("flash/2026-08-12T1430"),
+            "origin tags: {refs:?}"
+        );
     }
 
     /// A non-zero exit is a `false`, not an `Err` — same contract as
@@ -1807,7 +2033,10 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         let dir = repo_with_identity(&tmp, "Head");
         let sha = head_sha(&dir).unwrap();
         assert_eq!(sha.len(), 40, "sha was {sha:?}");
-        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "sha was {sha:?}");
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "sha was {sha:?}"
+        );
         let expected = run(&["-C", dir.to_str().unwrap(), "rev-parse", "HEAD"]).unwrap();
         assert_eq!(sha, expected.trim());
     }
@@ -1921,17 +2150,36 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
                 Visibility::Private,
                 None,
             ),
-            ["repo", "create", "teste-uno-veia", "--private",
-             "--source", "/home/u/Projects/teste-uno-veia", "--push"]
+            [
+                "repo",
+                "create",
+                "teste-uno-veia",
+                "--private",
+                "--source",
+                "/home/u/Projects/teste-uno-veia",
+                "--push"
+            ]
         );
     }
 
     #[test]
     fn create_remote_args_can_publish_a_public_repo() {
         assert_eq!(
-            create_remote_args("aberto", "/home/u/Projects/aberto", Visibility::Public, None),
-            ["repo", "create", "aberto", "--public",
-             "--source", "/home/u/Projects/aberto", "--push"]
+            create_remote_args(
+                "aberto",
+                "/home/u/Projects/aberto",
+                Visibility::Public,
+                None
+            ),
+            [
+                "repo",
+                "create",
+                "aberto",
+                "--public",
+                "--source",
+                "/home/u/Projects/aberto",
+                "--push"
+            ]
         );
     }
 
@@ -1946,9 +2194,17 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
                 Visibility::Public,
                 Some("Leitura térmica com AHT20"),
             ),
-            ["repo", "create", "termometro", "--public",
-             "--description", "Leitura térmica com AHT20",
-             "--source", "/home/u/Projects/termometro", "--push"]
+            [
+                "repo",
+                "create",
+                "termometro",
+                "--public",
+                "--description",
+                "Leitura térmica com AHT20",
+                "--source",
+                "/home/u/Projects/termometro",
+                "--push"
+            ]
         );
     }
 
@@ -1957,10 +2213,27 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
     /// argument, and a whitespace-only one is a user leaving the field blank.
     #[test]
     fn create_remote_args_omit_a_blank_description() {
-        let expected = ["repo", "create", "x", "--private", "--source", "/d", "--push"];
-        assert_eq!(create_remote_args("x", "/d", Visibility::Private, Some("")), expected);
-        assert_eq!(create_remote_args("x", "/d", Visibility::Private, Some("   ")), expected);
-        assert_eq!(create_remote_args("x", "/d", Visibility::Private, None), expected);
+        let expected = [
+            "repo",
+            "create",
+            "x",
+            "--private",
+            "--source",
+            "/d",
+            "--push",
+        ];
+        assert_eq!(
+            create_remote_args("x", "/d", Visibility::Private, Some("")),
+            expected
+        );
+        assert_eq!(
+            create_remote_args("x", "/d", Visibility::Private, Some("   ")),
+            expected
+        );
+        assert_eq!(
+            create_remote_args("x", "/d", Visibility::Private, None),
+            expected
+        );
     }
 
     #[test]
@@ -1989,6 +2262,9 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         assert_eq!(url.trim(), origin.to_str().unwrap());
         // And the push -u actually landed the baseline.
         let refs = run(&["-C", origin.to_str().unwrap(), "for-each-ref"]).unwrap();
-        assert!(!refs.trim().is_empty(), "remote should have the branch: {refs:?}");
+        assert!(
+            !refs.trim().is_empty(),
+            "remote should have the branch: {refs:?}"
+        );
     }
 }

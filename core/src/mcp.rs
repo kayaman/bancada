@@ -539,10 +539,7 @@ mod tests {
     fn serial_send_tool_requires_the_data_line() {
         let def = serial_send_tool_def();
         assert_eq!(def.name, "serial_send");
-        assert_eq!(
-            def.input_schema["properties"]["data"]["type"],
-            "string"
-        );
+        assert_eq!(def.input_schema["properties"]["data"]["type"], "string");
         assert_eq!(def.input_schema["required"], serde_json::json!(["data"]));
         assert_eq!(def.input_schema["additionalProperties"], false);
     }
