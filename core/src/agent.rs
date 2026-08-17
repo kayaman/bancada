@@ -296,13 +296,39 @@ pub struct AgentCfg {
 /// `--tools` is a genuine allow-list over the CLI's built-in set, unlike
 /// `--disallowedTools` (see `agent_args`'s doc). Verified against `claude`
 /// 2.1.220 by reading the `system`/`init` line's `tools` array: without it a
-/// session lists 25 built-ins including `Skill`, `Task*`, `Monitor`,
-/// `Workflow`, `SendMessage`, `LSP`, `EnterWorktree` and `Cron*`; with it the
-/// array was exactly the allow-listed built-ins plus the `mcp__bancada__*`
-/// tools. `WebFetch`/`WebSearch` joined in 0.12.0 (deliberate egress
-/// trade-off — see the README's safety section); re-probe the init line
-/// whenever this list or the CLI version changes.
-pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch";
+/// session lists 25 built-ins including `Task*`, `Monitor`, `Workflow`,
+/// `SendMessage`, `LSP`, `EnterWorktree` and `Cron*`; with it the array was
+/// exactly the allow-listed built-ins plus the `mcp__bancada__*` tools.
+/// `WebFetch`/`WebSearch` joined in 0.12.0 (deliberate egress trade-off — see
+/// the README's safety section); re-probe the init line whenever this list or
+/// the CLI version changes.
+///
+/// ## Why `Skill` is here
+///
+/// Left out, the session announces "The Skill tool is disabled here, so I'll
+/// proceed directly" and ignores the user's own workflows — which defeats the
+/// point of running their Claude Code configuration instead of a bare
+/// session (the same reasoning that rejected `--bare`).
+///
+/// It adds no *capability*: invoking a skill loads instructions into the
+/// context, and anything those instructions then ask for is still gated by
+/// this very list. A skill that wants `Bash` or a subagent still cannot have
+/// one — `Task` is absent here and named in `--disallowedTools`.
+///
+/// What it does add is an **instruction surface**: skill bodies come from the
+/// user's `~/.claude/skills`, their plugins, and the project's own
+/// `.claude/skills`, and they become instructions the model follows. That is
+/// the same trust level as the user's hooks, which this design already loads
+/// and cannot suppress — and the agent cannot author one, because
+/// `.claude/**` is covered by [`deny_rules`] and by the containment hook. So
+/// this widens *what the session may be told to do*, never *what it may do*.
+///
+/// Probe-verified against CLI **2.1.233**: this exact `--tools` value yields
+/// an `init` array of exactly the eight names above and nothing else, so
+/// [`unexpected_tools`] stays empty and the A2 backstop does not fire. That
+/// check is the one that matters when adding a name here — a built-in that
+/// drags a sibling in with it would stop every session at init.
+pub const BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill";
 
 /// The complete set of tools an embedded session is expected to report in its
 /// `system`/`init` line — [`BUILTIN_TOOLS`] plus the bancada MCP tools.
@@ -318,6 +344,7 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "Grep",
     "WebFetch",
     "WebSearch",
+    "Skill",
     "mcp__bancada__verify",
     "mcp__bancada__upload",
     "mcp__bancada__serial_read",
@@ -801,7 +828,7 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--tools".to_string(),
         BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
-        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
          mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
             .to_string(),
         "--disallowedTools".to_string(),
@@ -1279,7 +1306,7 @@ mod tests {
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(
             args[allowed_idx + 1],
-            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,mcp__bancada__verify,\
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
              mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
         );
     }
@@ -1375,10 +1402,17 @@ mod tests {
             .iter()
             .position(|a| a == "--tools")
             .expect("--tools must be present");
-        assert_eq!(args[idx + 1], "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch");
+        assert_eq!(
+            args[idx + 1],
+            "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
+        );
         assert!(
             !args[idx + 1].contains("Bash"),
             "Bash must never be in the built-in allow-list"
+        );
+        assert!(
+            !args[idx + 1].contains("Task"),
+            "a subagent would run outside everything this model reasons about"
         );
     }
 
@@ -2021,13 +2055,15 @@ mod tests {
 
     #[test]
     fn an_extra_tool_is_reported_sorted_and_deduped() {
+        // `Skill` used to be the second example here; it is an expected tool
+        // now, so the sample uses two that are still genuinely out of bounds.
         let tools: Vec<String> = [
-            "Read", "Bash", "Edit", "Skill", "Write", "Glob", "Grep", "Bash",
+            "Read", "Bash", "Edit", "Task", "Write", "Glob", "Grep", "Bash",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Skill"]);
+        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Task"]);
     }
 
     #[test]
@@ -2042,6 +2078,47 @@ mod tests {
         assert_eq!(
             unexpected_tools(&tools),
             vec!["mcp__someones_plugin__deploy"]
+        );
+    }
+
+    #[test]
+    fn the_session_is_given_the_skill_tool_at_all_three_sites() {
+        // Without `Skill` in `--tools` the embedded assistant announces "The
+        // Skill tool is disabled here, so I'll proceed directly" and skips
+        // the user's own workflows — the whole point of running their Claude
+        // Code configuration rather than a bare session.
+        //
+        // Pinned at all three sites together because that is the standing
+        // rule for this list (agent-safety §3): `--tools` is what grants it,
+        // `--allowedTools` is what permits it without a prompt, and
+        // EXPECTED_TOOLS is what stops the A2 backstop alarming on it. Any
+        // one of the three alone is a broken session.
+        assert!(
+            BUILTIN_TOOLS.split(',').any(|t| t == "Skill"),
+            "--tools must grant Skill: {BUILTIN_TOOLS}"
+        );
+        assert!(
+            EXPECTED_TOOLS.contains(&"Skill"),
+            "the backstop would alarm on every session at init"
+        );
+        let cfg = AgentCfg {
+            mcp_config_path: "/tmp/x.json".to_string(),
+            settings_path: "/tmp/s.json".to_string(),
+            system_prompt_extra: String::new(),
+            resume_session_id: None,
+        };
+        let args = agent_args(&cfg);
+        let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert!(
+            args[allowed_idx + 1].split(',').any(|t| t == "Skill"),
+            "--allowedTools must list Skill: {}",
+            args[allowed_idx + 1]
+        );
+        // And it must not be handed back on the disallow list.
+        let denied_idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(
+            !args[denied_idx + 1].split(',').any(|t| t == "Skill"),
+            "Skill cannot be both allowed and disallowed"
         );
     }
 

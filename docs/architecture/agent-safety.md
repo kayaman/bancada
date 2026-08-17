@@ -129,7 +129,7 @@ signal at all**.
 ## 3. The tool surface
 
 ```rust
-BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch"
+BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
 
 EXPECTED_TOOLS = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send}
 ```
@@ -141,6 +141,25 @@ permission-layer nudge — a session with it set still lists 25 built-in tools.
 > `BUILTIN_TOOLS`, `EXPECTED_TOOLS` and the `--allowedTools` literal in
 > `agent_args` **must change in the same commit**. Drift either alarms on every
 > session at init or silently stops asserting anything.
+
+### `Skill` widens what the session can be *told*, not what it can *do*
+
+Without it the session announces "The Skill tool is disabled here, so I'll
+proceed directly" and ignores the user's own workflows — which defeats the
+point of loading their Claude Code configuration at all, the same reasoning
+that rejected `--bare`.
+
+It grants no capability. Invoking a skill loads instructions into the context,
+and anything those instructions then ask for is still gated by this list: a
+skill wanting `Bash` or a subagent still cannot have one, since `Task` is
+absent from `--tools` *and* named in `--disallowedTools`.
+
+What it does add is an **instruction surface**. Skill bodies come from
+`~/.claude/skills`, the user's plugins, and the project's own
+`.claude/skills`, and they become instructions the model follows. That is the
+same trust level as the user's hooks, which this design already loads and
+cannot suppress (§1) — and the agent cannot author one, because `.claude/**`
+is covered by the layer-1 deny rules and by the containment hook.
 
 ### The web pair is a deliberate egress trade
 

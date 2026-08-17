@@ -102,10 +102,14 @@
 //! What is **not** a boundary: `--disallowedTools` (a permission-layer
 //! nudge — a session with it set still lists 25 built-in tools). What is:
 //! `--tools`, which genuinely narrows the built-in set to
-//! `Read,Edit,Write,Glob,Grep,WebFetch,WebSearch` while leaving the MCP
-//! tools intact. The web pair is a 0.12.0 addition and a deliberate
+//! `Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill` while leaving the
+//! MCP tools intact. The web pair is a 0.12.0 addition and a deliberate
 //! *egress* trade-off (reads were never confined; web access lets what is
 //! read leave the machine) — recorded in the README's safety section.
+//! `Skill` grants no capability of its own — a skill's instructions are
+//! still gated by this same list — but it does widen the *instruction*
+//! surface to the user's skill directories; see
+//! `docs/architecture/agent-safety.md` §3.
 //! Hardware stays structurally scoped rather than policy-scoped: the MCP
 //! `upload` tool takes no port argument (it flashes the UI-selected port
 //! with the session-frozen profile/fqbn, through the same build gate as the
