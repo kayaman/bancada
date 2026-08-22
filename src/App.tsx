@@ -35,6 +35,23 @@ import {
 } from "./editorTabs";
 import { arrivals, bridgeArrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
+import {
+  type ToastState,
+  dismissToast,
+  emptyToasts,
+  expireToasts,
+  kindOfNotify,
+  nextExpiry,
+  pushToast,
+} from "./notifications";
+import type { Activity, ActivityKey, LastResult } from "./statusLine";
+import {
+  type BuildProgress,
+  reduceBuildLine,
+  startProgress,
+} from "./buildProgress";
+import { estimateFraction, loadDurations, recordDuration } from "./buildHistory";
+import { projectButtonLabel } from "./toolbarModel";
 import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
 import { AgentStore } from "./agent/agentStore";
 import { ChatRecorder, chatFileName, applyChatOps } from "./agent/chatLog";
@@ -59,6 +76,8 @@ import WsPanel from "./components/WsPanel";
 import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
 import BottomTabBar from "./components/BottomTabBar";
+import ToastStack from "./components/ToastStack";
+import StatusBar from "./components/StatusBar";
 import { type BottomTab } from "./bottomTabs";
 
 type SideGroup = "software" | "hardware";
@@ -325,8 +344,33 @@ export default function App() {
    *  world moved on while it was suspended, and it must abort rather than
    *  write into (or spawn a child for) whatever chat/session is now live. */
   const teardownEpochRef = useRef(0);
-  const [status, setStatus] = useState("Bancada ready — open a project folder.");
-  const [statusIsError, setStatusIsError] = useState(false);
+  /** Every `notify` lands here as a card in the corner. The old single-slot
+   *  status string could only ever show the newest message, so a warning was
+   *  erased by whatever the same action said next — the reason so much of the
+   *  code below used to reason about what would "overwrite" what. The stack
+   *  keeps up to four, errors stay until dismissed, and the status bar is
+   *  free to say what is *happening* instead. */
+  const [toasts, setToasts] = useState<ToastState>(emptyToasts);
+  /** What is running right now, or null at rest. Must be set and cleared in
+   *  lockstep with `busy` — `progressMode` draws nothing while `busy` is
+   *  false, so an activity without it shows a clock above an empty track. */
+  const [activity, setActivity] = useState<Activity | null>(null);
+  /** Mirror of `activity` for `endActivity`, which needs the start time and
+   *  is itself called from `[]`-deps handlers that may not read state.
+   *
+   *  Written by hand rather than assigned during render, because it is read
+   *  synchronously in the same tick it is set — a render mirror would still
+   *  hold the previous value at that point. Every writer of `activity` below
+   *  (`beginActivity`, `endActivity`, `clearAgentActivity`, and the one label
+   *  rewrite in `flashScopeFirmware`) must keep this in step. */
+  const activityRef = useRef<Activity | null>(null);
+  /** The last thing that finished, for the bar's second tier. */
+  const [lastResult, setLastResult] = useState<LastResult | null>(null);
+  /** Parsed out of the uploader's own output. The ref is the one the
+   *  `[]`-deps `onBuildLine` subscription reads and writes; the state exists
+   *  only to repaint. */
+  const [progress, setProgress] = useState<BuildProgress | null>(null);
+  const progressRef = useRef<BuildProgress | null>(null);
 
   // Hotplug plumbing. busyRef mirrors `busy` for the event listener;
   // pendingScanRef queues a rescan that arrived mid-flash; prevOnlineRef
@@ -341,8 +385,83 @@ export default function App() {
   const prevUnidentifiedRef = useRef<string[] | null>(null);
 
   const notify = useCallback((msg: string, isError = false) => {
-    setStatus(msg);
-    setStatusIsError(isError);
+    setToasts((s) => pushToast(s, kindOfNotify(msg, isError), msg, Date.now()));
+  }, []);
+
+  // Nothing in `notifications.ts` owns a clock, so the expiry timer is here:
+  // one timeout armed for the *soonest* deadline in the stack, re-armed after
+  // every push and every sweep. `nextExpiry` returning null (an empty stack,
+  // or nothing but errors, which never expire) means arm nothing at all —
+  // this must not become a poll that runs for the life of the app.
+  useEffect(() => {
+    const next = nextExpiry(toasts);
+    if (next === null) return;
+    const id = window.setTimeout(
+      () => setToasts((s) => expireToasts(s, Date.now())),
+      Math.max(0, next - Date.now()),
+    );
+    return () => window.clearTimeout(id);
+  }, [toasts]);
+
+  /** Announce that something long-running has started. `op` additionally arms
+   *  the build-progress parser, which then feeds off `onBuildLine`.
+   *
+   *  Callers must set `busy` (`setUserBusy`/`setAgentBuilding`) from the same
+   *  place: the bar draws no progress at all while `busy` is false. */
+  const beginActivity = useCallback(
+    (key: ActivityKey, label: string, op?: "compile" | "upload") => {
+      const a: Activity = { key, label, startedAt: Date.now() };
+      activityRef.current = a;
+      setActivity(a);
+      if (op) {
+        const p = startProgress(op);
+        progressRef.current = p;
+        setProgress(p);
+      }
+    },
+    [],
+  );
+
+  /** Close out whatever `beginActivity` opened: bank the duration for the
+   *  next run's "usually ~" hint, leave the verdict on the bar, and clear the
+   *  clock and the bar.
+   *
+   *  Call this from a `finally`. An IPC call that throws must not leave
+   *  "Compiling…" counting up forever. */
+  const endActivity = useCallback((ok: boolean, label: string) => {
+    const a = activityRef.current;
+    // Closing nothing reports nothing. A `done` event can arrive with no
+    // matching `started` — a straggler from a session that was already torn
+    // down clears the store's pid, so the pid guard upstream waves it
+    // through — and "✓ Assistant compile in 0:00" for a build nobody ran is
+    // worse than silence.
+    if (!a) return;
+    const now = Date.now();
+    const durationMs = now - a.startedAt;
+    const dir = sketchDirRef.current;
+    // The estimate is read back under `compile`/`upload` only, so those are
+    // the only keys worth banking. The agent's builds are deliberately left
+    // out: the "usually ~" hint should describe a run the user watched.
+    if (dir && (a.key === "compile" || a.key === "upload"))
+      recordDuration(window.localStorage, dir, a.key, durationMs, now);
+    setLastResult({ ok, label, durationMs, at: now });
+    setActivity(null);
+    activityRef.current = null;
+    progressRef.current = null;
+    setProgress(null);
+  }, []);
+
+  /** Drop the clock and the bar without a verdict, for the paths that end an
+   *  agent op without knowing how it went: a security kill, a torn-down
+   *  session. Scoped to the agent's own activities on purpose — "New
+   *  session" while the *user* has a compile running must not blank a bar
+   *  that has nothing to do with the agent. */
+  const clearAgentActivity = useCallback(() => {
+    if (!activityRef.current?.key.startsWith("agent_")) return;
+    setActivity(null);
+    activityRef.current = null;
+    progressRef.current = null;
+    setProgress(null);
   }, []);
 
   useEffect(() => {
@@ -447,6 +566,19 @@ export default function App() {
         setBuildLines((prev) => appendCapped(prev, l));
         if (bottomTabRef.current !== "build")
           setUnseen((u) => ({ ...u, build: true }));
+        // The progress bar is fed from the same stream the console shows.
+        // Via the ref, never state: this subscription is registered once.
+        // `reduceBuildLine` returns the same reference for a line it has
+        // nothing to say about — which is most of them — so the common case
+        // costs one comparison and no render.
+        const cur = progressRef.current;
+        if (cur) {
+          const next = reduceBuildLine(cur, l.line);
+          if (next !== cur) {
+            progressRef.current = next;
+            setProgress(next);
+          }
+        }
       }),
       api.onSerialLine((l) => {
         setSerialLines((prev) => appendCapped(prev, l));
@@ -1063,12 +1195,12 @@ export default function App() {
   /** Refuse a build/flash while the agent's edits and the user's disagree.
    *
    *  `saveAll` already declines to overwrite a conflicted buffer, but that
-   *  alone is not enough for Verify/Upload: its warning is a transient
-   *  `notify`, immediately overwritten by "Compiling…", and the build then
+   *  alone is not enough for Verify/Upload: it only *warned*, and the build
    *  ran anyway. The user would see a compile — or a **flash** — of the
-   *  agent's on-disk version while their own unsaved edits were invisible
-   *  and unmentioned. Both callers now stop here, the same way
-   *  `sendToAgent` already did. */
+   *  agent's on-disk version while their own unsaved edits sat unwritten.
+   *  Both callers now stop here, the same way `sendToAgent` already did.
+   *  (The warning itself is a sticky error toast now, but a notice the user
+   *  can dismiss is still no substitute for refusing the build.) */
   const refuseOnConflict = (action: string): boolean => {
     const block = blockedByConflict([...agentConflictsRef.current], action);
     if (block.blocked) notify(block.message ?? "", true);
@@ -1126,14 +1258,20 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify("Compiling…");
+    beginActivity("compile", "Compiling…", "compile");
+    // Declared out here because the `finally` cannot see `r`. The activity
+    // has to be closed there and not on the happy path: an IPC call that
+    // throws would otherwise leave "Compiling…" counting up for good.
+    let ok = false;
     try {
       const r = await api.compileSketch(sketchDir, target.profile, target.fqbn);
+      ok = r.success;
       notify(r.success ? "✓ Compile OK" : "Compile failed", !r.success);
     } catch (e) {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
+      endActivity(ok, ok ? "Compiled" : "Compile failed");
     }
   };
 
@@ -1151,8 +1289,8 @@ export default function App() {
     openBottomTab("build");
     setUserBusy(true);
     // The profile silently outranks the detected board, so a disagreement is
-    // announced on the status line for the whole build — a separate notify
-    // would be overwritten by the next one before anyone could read it.
+    // announced as an error toast, which sticks until dismissed — it stays on
+    // screen for the whole build and past the end of it.
     const profileFqbn = target.profile
       ? sketchYaml?.profiles?.[target.profile]?.fqbn
       : undefined;
@@ -1172,6 +1310,10 @@ export default function App() {
     } else {
       notify(`Building and flashing to ${selectedPortName()}…`);
     }
+    // Unconditional, unlike the toasts above: whichever of them fired, the
+    // bar still has to say what is running and for how long.
+    beginActivity("upload", `Flashing to ${selectedPortName()}…`, "upload");
+    let ok = false;
     try {
       // Compiles as part of the flash — a sketch that fails to build stops
       // here with its compiler error and never reaches the board.
@@ -1181,6 +1323,7 @@ export default function App() {
         target.profile,
         target.fqbn,
       );
+      ok = r.success;
       notify(
         r.success
           ? `✓ Flashed via ${selectedPort}`
@@ -1228,6 +1371,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
+      endActivity(ok, ok ? "Flashed" : "Flash failed");
     }
   };
 
@@ -1251,7 +1395,8 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify("Syncing…");
+    beginActivity("sync", "Syncing…");
+    let ok = false;
     try {
       const outcome = await api.gitSync(sketchDir);
       const msg: Record<api.SyncOutcome, [string, boolean]> = {
@@ -1265,11 +1410,13 @@ export default function App() {
         not_root: ["Sync works from the repository root", true],
       };
       const [text, isErr] = msg[outcome];
+      ok = !isErr;
       notify(text, isErr);
     } catch (e) {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
+      endActivity(ok, ok ? "Synced" : "Sync failed");
       refreshGitState(sketchDir);
     }
   };
@@ -1311,14 +1458,17 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify(`Creating ${visibility} GitHub repo ${name}…`);
+    beginActivity("remote", `Creating ${visibility} GitHub repo ${name}…`);
+    let ok = false;
     try {
       await api.gitCreateRemote(sketchDir, name, visibility, description);
+      ok = true;
       notify(`✓ Created and pushed to ${name}`);
     } catch (e) {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
+      endActivity(ok, ok ? "Repo created" : "Repo creation failed");
       refreshGitState(sketchDir);
     }
   };
@@ -1328,21 +1478,24 @@ export default function App() {
     setBuildLines([]);
     openBottomTab("build");
     setUserBusy(true);
-    notify("Setting remote and pushing…");
+    beginActivity("remote", "Setting remote and pushing…");
+    let ok = false;
     try {
       await api.gitSetRemote(sketchDir, url);
+      ok = true;
       notify("✓ Remote set and pushed");
     } catch (e) {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
+      endActivity(ok, ok ? "Remote set" : "Remote setup failed");
       refreshGitState(sketchDir);
     }
   };
 
   // ---------- serial monitor ----------
 
-  /** Best-effort monitor start (auto-capture); errors stay off the status bar. */
+  /** Best-effort monitor start (auto-capture); errors are never announced. */
   /**
    * Try again later, while the standing request holds.
    *
@@ -1507,15 +1660,27 @@ export default function App() {
       setBuildLines([]);
       openBottomTab("build");
       setUserBusy(true);
-      notify("Compiling companion firmware…");
+      // One activity spanning both halves — the user asked for "flash the
+      // companion firmware", not for a compile and then an upload. The label
+      // is re-worded in place when the second half starts; `startedAt` is
+      // untouched so the clock keeps running through the handover.
+      beginActivity("firmware", "Compiling companion firmware…", "upload");
+      let ok = false;
       try {
         const c = await api.compileSketch(dir, chipProfile);
         if (!c.success) {
           notify("Companion firmware compile failed", true);
           return false;
         }
-        notify(`Flashing companion firmware to ${selectedPortName()}…`);
+        const relabel = (a: Activity | null) =>
+          a && {
+            ...a,
+            label: `Flashing companion firmware to ${selectedPortName()}…`,
+          };
+        activityRef.current = relabel(activityRef.current);
+        setActivity(relabel);
         const u = await api.uploadSketch(dir, selectedPort, chipProfile);
+        ok = u.success;
         notify(
           u.success
             ? "✓ Companion firmware flashed"
@@ -1528,9 +1693,13 @@ export default function App() {
         return false;
       } finally {
         setUserBusy(false);
+        endActivity(
+          ok,
+          ok ? "Companion firmware flashed" : "Companion firmware failed",
+        );
       }
     },
-    [selectedPort, stopMonitorIfOn, notify],
+    [selectedPort, stopMonitorIfOn, notify, beginActivity, endActivity],
   );
 
   // ---------- agent (Assistant panel) ----------
@@ -1587,6 +1756,11 @@ export default function App() {
       const ours = agentStore.snapshot().pid;
       if (pid !== undefined && ours !== undefined && pid !== ours) return;
       setAgentBuilding(ev.type === "verify_started");
+      // Same bar as a user-driven build: whose build it is changes the
+      // wording, not whether the machine looks busy.
+      if (ev.type === "verify_started")
+        beginActivity("agent_compile", "Assistant compiling…");
+      else endActivity(ev.success, "Assistant compile");
       return;
     }
     // An agent flash: disable the toolbar's build buttons like a verify,
@@ -1599,6 +1773,11 @@ export default function App() {
       const flashing = ev.type === "upload_started";
       agentFlashingRef.current = flashing;
       setAgentBuilding(flashing);
+      // The agent's flash streams through the same build console, so the
+      // same parser reads its progress — hence the `"upload"` op.
+      if (ev.type === "upload_started")
+        beginActivity("agent_upload", "Assistant flashing…", "upload");
+      else endActivity(ev.success, "Assistant flash");
       if (!flashing) openBottomTab("serial");
       return;
     }
@@ -1606,6 +1785,10 @@ export default function App() {
     if (ev.type === "security_alarm") {
       setAgentBuilding(false);
       agentFlashingRef.current = false;
+      // No verdict: the child was killed mid-op, so nothing finished. A
+      // `lastResult` here would leave "✗ Assistant compile" on the bar for a
+      // compile that was never allowed to fail on its own terms.
+      clearAgentActivity();
       return;
     }
     if (ev.type !== "user") return;
@@ -1927,6 +2110,10 @@ export default function App() {
     // leaving the toolbar disabled forever.
     setAgentBuilding(false);
     agentFlashingRef.current = false;
+    // Same reasoning, for the bar: no `verify_done` is coming, so the clock
+    // has to be stopped here or it counts up forever. No verdict — the op
+    // was cancelled, not decided.
+    clearAgentActivity();
     // Arming is per-session and dangerous-by-default: a new session starts
     // locked no matter what the last one was allowed to do.
     setUploadsArmed(false);
@@ -1993,6 +2180,45 @@ export default function App() {
     }
   };
 
+  // ---------- status bar inputs ----------
+
+  /** How long this op took last time, for the "usually ~" hint and for the
+   *  dashed estimate bar. Only compiles and uploads are remembered — a sync
+   *  is dominated by the network and a remembered number would be a lie. */
+  const estimate = useMemo(
+    () =>
+      activity &&
+      sketchDir &&
+      (activity.key === "compile" || activity.key === "upload")
+        ? (loadDurations(window.localStorage, sketchDir)?.[
+            activity.key === "compile" ? "compileMs" : "uploadMs"
+          ] ?? null)
+        : null,
+    [activity, sketchDir],
+  );
+
+  /** `StatusBar` owns the clock behind its own text, but `estimateFraction`
+   *  is a prop it is handed, so the elapsed time behind *that* has to move
+   *  out here. Armed only while something is running and keyed on the
+   *  activity's identity rather than the object — the same rules the bar's
+   *  ticker follows, so the dashes and the clock advance together. At rest
+   *  no timer exists at all. */
+  const [statusNow, setStatusNow] = useState(() => Date.now());
+  const activityId = activity ? `${activity.key}:${activity.startedAt}` : null;
+  useEffect(() => {
+    if (activityId === null) return;
+    // Read the clock before arming: `statusNow` has been frozen since the
+    // last activity ended, so without this the first half-second of a build
+    // is measured from whenever the ticker last stopped.
+    setStatusNow(Date.now());
+    const id = window.setInterval(() => setStatusNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [activityId]);
+
+  const estimateWidth = activity
+    ? estimateFraction(statusNow - activity.startedAt, estimate)
+    : null;
+
   // ---------- render ----------
 
   return (
@@ -2049,11 +2275,12 @@ export default function App() {
         />
       )}
 
-      {/* Persistent, because the status bar is not. `saveAll` used to warn
-          about an unflushed conflicted buffer with a transient notify that
-          "Compiling…" overwrote a moment later, leaving the user looking at
-          a build of the assistant's on-disk version with no sign their own
-          edits were still unsaved. This stays until the conflict is
+      {/* Tied to the conflict itself, not to a notification. `saveAll` used
+          to warn about an unflushed conflicted buffer with a transient
+          status line that "Compiling…" overwrote a moment later, leaving the
+          user looking at a build of the assistant's on-disk version with no
+          sign their own edits were still unsaved. A toast would survive that
+          now, but it is still dismissible; this stays until the conflict is
           actually resolved, and Verify/Upload refuse while it is up. */}
       {offer && (
         <BoardOffer
@@ -2398,10 +2625,21 @@ export default function App() {
         )}
       </section>
 
-      <footer className={`statusbar ${statusIsError ? "error" : ""}`}>
-        {busy ? "⏳ " : ""}
-        {status}
-      </footer>
+      <ToastStack
+        toasts={toasts.toasts}
+        onDismiss={(id) => setToasts((s) => dismissToast(s, id))}
+      />
+
+      <StatusBar
+        activity={activity}
+        lastResult={lastResult}
+        project={sketchDir ? projectButtonLabel(sketchDir) : null}
+        portName={selectedPort ? selectedPortName() : null}
+        busy={busy}
+        measuredFraction={progress?.fraction ?? null}
+        estimateMs={estimate}
+        estimateFraction={estimateWidth}
+      />
     </div>
   );
 }
