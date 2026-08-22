@@ -461,8 +461,12 @@ export default function App() {
   const uploadsArmedRef = useRef(false);
   uploadsArmedRef.current = uploadsArmed;
   /** An agent flash is in flight — suppresses the monitor auto-start effect
-   *  (a monitor grabbing the port mid-flash kills the flash). */
+   *  (a monitor grabbing the port mid-flash kills the flash). The ref is what
+   *  the `[]`-deps handlers and effects read; `agentFlashing` is its render
+   *  mirror, for the controls that have to grey out while it is true. Write
+   *  both together, always. */
   const agentFlashingRef = useRef(false);
+  const [agentFlashing, setAgentFlashing] = useState(false);
   /** "Continue this chat" bookkeeping — see `ContinuationStash` and
    *  `sendToAgent`/`fallbackRespawn`/`teardownAgentSession` below. */
   const continuationRef = useRef<ContinuationStash | null>(null);
@@ -2283,6 +2287,7 @@ export default function App() {
       if (pid !== undefined && ours !== undefined && pid !== ours) return;
       const flashing = ev.type === "upload_started";
       agentFlashingRef.current = flashing;
+      setAgentFlashing(flashing);
       setAgentBuilding(flashing);
       // The agent's flash streams through the same build console, so the
       // same parser reads its progress — hence the `"upload"` op.
@@ -2299,6 +2304,7 @@ export default function App() {
     if (ev.type === "security_alarm") {
       setAgentBuilding(false);
       agentFlashingRef.current = false;
+      setAgentFlashing(false);
       // No verdict: the child was killed mid-op, so nothing finished. A
       // `lastResult` here would leave "✗ Assistant compile" on the bar for a
       // compile that was never allowed to fail on its own terms.
@@ -2624,6 +2630,7 @@ export default function App() {
     // leaving the toolbar disabled forever.
     setAgentBuilding(false);
     agentFlashingRef.current = false;
+    setAgentFlashing(false);
     // Same reasoning, for the bar: no `verify_done` is coming, so the clock
     // has to be stopped here or it counts up forever. No verdict — the op
     // was cancelled, not decided.
@@ -2715,12 +2722,21 @@ export default function App() {
    *  than that — a verify or a fleet sync sets it too — and the Monitor's
    *  Start/Stop button must only be taken away for the case that actually
    *  holds the port. Read off the activity rather than `agentFlashingRef`
-   *  because a ref does not re-render the button when it changes. */
+   *  because a ref does not re-render the button when it changes.
+   *
+   *  Both signals are needed, and neither covers the other. `agentFlashing`
+   *  alone misses the user's own flash and the companion firmware; the
+   *  activity alone misses an agent flash that started while a user compile
+   *  or sync was live, because `beginActivity` drops an agent key rather than
+   *  relabel a bar the user owns — esptool would hold the port with
+   *  `agent_upload` never on the bar at all, and `toggleMonitor` has no guard
+   *  of its own: this disabled button *is* the guard. */
   const flashOwnsPort =
-    activity !== null &&
-    (activity.key === "upload" ||
-      activity.key === "agent_upload" ||
-      activity.key === "firmware");
+    agentFlashing ||
+    (activity !== null &&
+      (activity.key === "upload" ||
+        activity.key === "agent_upload" ||
+        activity.key === "firmware"));
 
   /** What the Monitor's status chip shows. `retrying` only while the standing
    *  request is still live. The attempt counter alone is not enough: a
