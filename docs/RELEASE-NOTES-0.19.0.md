@@ -206,7 +206,9 @@ jump rather than landing on a wrong line.
 
 ## Notes
 
-`cargo test --workspace` 674 passed, `vitest` 984 passed, `tsc --noEmit` clean.
+`cargo test --workspace` 674 passed, `vitest` 997 passed, `tsc --noEmit` clean,
+`npm run build` (vite build) clean — the fourth gate exists because vitest
+never parses `styles.css`.
 The opt-in suites and the hardware pass have not been run for this cut.
 
 One flake to know about: `cargo test --workspace` in parallel can fail

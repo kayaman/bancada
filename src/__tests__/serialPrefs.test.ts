@@ -12,6 +12,7 @@ import {
   lineEndingBytes,
   loadBaudOverrides,
   loadUiPrefs,
+  overrideFor,
   saveBaudOverride,
   saveUiPrefs,
   withLineEnding,
@@ -222,5 +223,38 @@ describe("effectiveBaud", () => {
 
   it("prefers the user's override over the sketch", () => {
     expect(effectiveBaud(9600, 74880)).toEqual({ baud: 9600, source: "override" });
+  });
+});
+
+describe("overrideFor", () => {
+  const overrides = { "/p/blink": 9600, "/p/scope": 921600 };
+
+  it("picks the open sketch's stored override", () => {
+    expect(overrideFor("/p/blink", overrides, null)).toBe(9600);
+    expect(overrideFor("/p/scope", overrides, 250000)).toBe(921600);
+  });
+
+  it("has nothing to say for a sketch that never overrode", () => {
+    expect(overrideFor("/p/other", overrides, null)).toBeUndefined();
+  });
+
+  it("uses the session choice when no project is open", () => {
+    // The regression this exists for: with no sketchDir there is no key to
+    // store under, and the picker was simply ignored.
+    expect(overrideFor(null, overrides, 9600)).toBe(9600);
+    expect(overrideFor(null, overrides, null)).toBeUndefined();
+    // …and no persisted entry may leak in through the back door.
+    expect(overrideFor(null, { "": 4800 }, null)).toBeUndefined();
+  });
+
+  it("feeds effectiveBaud with no project open", () => {
+    expect(effectiveBaud(overrideFor(null, {}, 9600), null)).toEqual({
+      baud: 9600,
+      source: "override",
+    });
+    expect(effectiveBaud(overrideFor(null, {}, null), null)).toEqual({
+      baud: DEFAULT_BAUD,
+      source: "default",
+    });
   });
 });

@@ -41,6 +41,7 @@ import {
   detectBaud,
   effectiveBaud,
   loadBaudOverrides,
+  overrideFor,
   saveBaudOverride,
 } from "./serialPrefs";
 import { SerialStore } from "./serial/serialStore";
@@ -336,16 +337,23 @@ export default function App() {
   const [baudOverrides, setBaudOverrides] = useState(() =>
     loadBaudOverrides(localStorage),
   );
+  /** The picker's rate with no project open. There is no key to persist it
+   *  under — and a bare port with no sketch folder is a real bench case (a
+   *  board somebody else flashed, printing at 9600) — so it lives for the
+   *  session. Dropping it on the floor was the regression: the `<select>`
+   *  moved and the monitor stayed where it was. */
+  const [noProjectBaud, setNoProjectBaud] = useState<number | null>(null);
   /** The rate the open sketch calls `Serial.begin` with, or null when that is
    *  not one clear answer. Re-sniffed on load and on save, never per
-   *  keystroke — `detectBaud` walks every source. */
+   *  keystroke — `detectBaud` re-parses the main `.ino` and every open
+   *  buffer each time. */
   const [sketchBaud, setSketchBaud] = useState<number | null>(null);
   /** Keeping the name `baudrate` for the *effective* rate is deliberate:
    *  every consumer (the monitor start, the target mirrored to Rust for the
    *  agent, ScopeView) wants the rate the port is actually opened at, not the
    *  raw override — and none of them had to change. */
   const { baud: baudrate, source: baudSource } = effectiveBaud(
-    sketchDir ? baudOverrides[sketchDir] : undefined,
+    overrideFor(sketchDir, baudOverrides, noProjectBaud),
     sketchBaud,
   );
   // Live mirror of monitorOn for callbacks captured by timers (post-upload
@@ -1032,9 +1040,12 @@ export default function App() {
 
   /** Re-sniff the rate the sketch opens `Serial` at.
    *
-   *  Every open buffer votes alongside the on-disk main `.ino`, so an unsaved
-   *  edit to the rate is reflected — but this runs on load, on save and on an
-   *  agent edit only, never per keystroke: `detectBaud` walks every source. */
+   *  Every open buffer votes alongside the main `.ino` (its dirty buffer when
+   *  there is one, the file on disk otherwise), so an unsaved edit to the rate
+   *  is reflected. It is *not* every file in the sketch — an unopened `.cpp`
+   *  calling `Serial.begin` does not vote. This runs on load, on save and on
+   *  an agent edit only, never per keystroke: `detectBaud` re-parses each
+   *  source it is handed, comments and `#define`s and all. */
   const refreshSketchBaud = useCallback(async (dir: string) => {
     const rel = `${dir.split("/").pop()}.ino`;
     // A dir with no main `.ino` (or one that will not read) simply votes
@@ -1631,11 +1642,11 @@ export default function App() {
       );
     } else if (silent) {
       notify(`⚠ ${silent}`, true);
-    } else {
-      notify(`Building and flashing to ${selectedPortName()}…`);
     }
-    // Unconditional, unlike the toasts above: whichever of them fired, the
-    // bar still has to say what is running and for how long.
+    // No `else` toast: the toasts above are *warnings*, and "building and
+    // flashing…" is not an outcome — what is running belongs to the activity
+    // channel, which says it immediately below (frontend.md §1, "two
+    // announcement channels, and they do not mix").
     beginActivity("upload", `Flashing to ${selectedPortName()}…`, "upload");
     let ok = false;
     try {
@@ -2060,8 +2071,13 @@ export default function App() {
    * the choice is still stored and simply applies at the next start.
    */
   const changeBaud = async (baud: number | null) => {
-    if (!sketchDir) return;
-    setBaudOverrides(saveBaudOverride(localStorage, sketchDir, baud));
+    // Persisted per sketch when there is one to key it under; otherwise held
+    // for the session. Either way the picker moves and the port follows —
+    // returning early with no project open left the `<select>` showing a rate
+    // nothing was listening at.
+    if (sketchDir)
+      setBaudOverrides(saveBaudOverride(localStorage, sketchDir, baud));
+    else setNoProjectBaud(baud);
     const next = effectiveBaud(baud ?? undefined, sketchBaud).baud;
     // `monitorOnRef`, not the render value: this handler is called from the
     // panel's own event closure, which may predate the last close.
@@ -2135,7 +2151,12 @@ export default function App() {
       // companion firmware", not for a compile and then an upload. The label
       // is re-worded in place when the second half starts; `startedAt` is
       // untouched so the clock keeps running through the handover.
-      beginActivity("firmware", "Compiling companion firmware…", "upload");
+      //
+      // The *progress parser*, though, is per half. Armed as "upload" here it
+      // would read this compile's own `Sketch uses …` as the handover to
+      // flashing and show "uploading" for the whole compile; it gets a fresh
+      // upload parser below, once there really is an upload.
+      beginActivity("firmware", "Compiling companion firmware…", "compile");
       let ok = false;
       try {
         const c = await api.compileSketch(dir, chipProfile);
@@ -2150,6 +2171,10 @@ export default function App() {
           };
         activityRef.current = relabel(activityRef.current);
         setActivity(relabel);
+        // Second half: a parser that has seen none of the compile's output.
+        const flashProgress = startProgress("upload");
+        progressRef.current = flashProgress;
+        setProgress(flashProgress);
         const u = await api.uploadSketch(dir, selectedPort, chipProfile);
         ok = u.success;
         notify(
@@ -2686,9 +2711,23 @@ export default function App() {
     [activity, sketchDir],
   );
 
+  /** A flash owns the serial port; nothing else here does. `busy` is wider
+   *  than that — a verify or a fleet sync sets it too — and the Monitor's
+   *  Start/Stop button must only be taken away for the case that actually
+   *  holds the port. Read off the activity rather than `agentFlashingRef`
+   *  because a ref does not re-render the button when it changes. */
+  const flashOwnsPort =
+    activity !== null &&
+    (activity.key === "upload" ||
+      activity.key === "agent_upload" ||
+      activity.key === "firmware");
+
   /** What the Monitor's status chip shows. `retrying` only while the standing
-   *  request is still live: the attempt counter outlives a give-up, and a
-   *  stale "↻ 5/5" under a deliberate Stop would be a lie. */
+   *  request is still live. The attempt counter alone is not enough: a
+   *  deliberate Stop (and the flash handoff, which goes through the same
+   *  path) clears the standing request but leaves the counter where the last
+   *  ladder left it, so a stale "↻ 3/5" would sit under a monitor the user
+   *  switched off. A genuine give-up zeroes both. */
   const serialConnection: SerialConnection = monitorOn
     ? { state: "on" }
     : recaptureAttempt > 0 && monitorWantedRef.current
@@ -3055,7 +3094,7 @@ export default function App() {
           active={bottomTab === "serial"}
           store={serialStore}
           monitorOn={monitorOn}
-          busy={busy}
+          flashing={flashOwnsPort}
           portLabel={selectedPort ? selectedPortName() : null}
           baud={monitorOn ? (openBaudRef.current ?? baudrate) : baudrate}
           baudSource={baudSource}
@@ -3122,6 +3161,7 @@ export default function App() {
         busy={busy}
         measuredFraction={progress?.fraction ?? null}
         estimateMs={estimate}
+        note={progress?.note ?? null}
       />
     </div>
   );

@@ -225,8 +225,13 @@ pure helper for exactly this reason — `BoardPicker.fallbackFqbnLabel` and
 `DeviceBrowserPanel.exchangeRow`.
 
 Injected clocks are used throughout for the same testability reason:
-`ObsStore.push(ts)`, `chatFileName(now)`, the resume-watch timeouts. **`App.tsx`
-owns "now".**
+`ObsStore.push(ts)`, `chatFileName(now)`, the resume-watch timeouts. `App.tsx`
+stamps events with `Date.now()` as they happen — a toast's expiry, an
+activity's `startedAt`, a serial row's timestamp — but it owns no *clock*:
+**`StatusBar` holds the only ticking `now` in the app**, a 500 ms interval
+armed only while an activity is live, and derives the estimate fraction from
+it. A second interval upstairs would re-render the whole tree twice a second
+to move one dashed bar.
 
 ---
 
@@ -321,7 +326,7 @@ same contract `ObsStore` keeps. `SerialMonitor.tsx` is the only consumer.
 
 ## 6. Styling
 
-One stylesheet: `src/styles.css`, 3,152 lines, imported once. No CSS modules, no
+One stylesheet: `src/styles.css`, 3,153 lines, imported once. No CSS modules, no
 Tailwind, no CSS-in-JS.
 
 Design tokens in `:root` — `--bg`, `--bg-panel`, `--bg-raised`, `--bg-hover`,

@@ -217,6 +217,22 @@ export function saveUiPrefs(s: StorageLike, p: SerialUiPrefs): void {
   }
 }
 
+/** Which stored override applies right now.
+ *
+ *  With no project open there is no key to store under — but the picker is
+ *  still on screen and still has to work, because the monitor does: a bare
+ *  port with no sketch folder is how you listen to a board somebody else
+ *  flashed. That choice lives for the session only (`sessionOverride`) and is
+ *  deliberately not persisted: there is nothing to persist it *against*. */
+export function overrideFor(
+  sketchDir: string | null,
+  overrides: Record<string, number>,
+  sessionOverride: number | null,
+): number | undefined {
+  if (sketchDir === null) return sessionOverride ?? undefined;
+  return overrides[sketchDir];
+}
+
 /** Where the baud in the toolbar came from — the "Use sketch's N" button only
  *  appears when the user has overridden a rate the sketch disagrees with. */
 export type BaudSource = "override" | "sketch" | "default";

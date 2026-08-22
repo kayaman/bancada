@@ -38,7 +38,7 @@ function setup(over: Partial<Props> = {}) {
     active: true,
     store,
     monitorOn: true,
-    busy: false,
+    flashing: false,
     portLabel: "/dev/ttyACM0",
     baud: 115200,
     baudSource: "default",
@@ -103,12 +103,34 @@ describe("SerialMonitor toolbar", () => {
   });
 
   it("blocks Start during a flash and says why", () => {
-    setup({ monitorOn: false, busy: true });
+    setup({ monitorOn: false, flashing: true });
     const start = screen.getByRole("button", { name: "Start" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
     expect(start.title).toBe(
       "Flashing — the monitor restarts when the flash finishes",
     );
+  });
+
+  it("leaves Stop alone for a verify — only a flash owns the port", () => {
+    // `busy` used to cover verify and fleet sync too, so a compile greyed out
+    // Stop and claimed the board was being flashed. Both halves were wrong,
+    // and the second took away the only control that frees a stuck monitor.
+    setup({ monitorOn: true, flashing: false });
+    const stop = screen.getByRole("button", { name: "Stop" }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(false);
+    expect(stop.title).toBe("Stop the serial monitor");
+  });
+
+  it("marks the toggle buttons pressed for assistive tech", async () => {
+    setup({ storage: fakeStorage() });
+    const pressed = (name: string) =>
+      screen.getByRole("button", { name }).getAttribute("aria-pressed");
+    expect(pressed("Timestamps")).toBe("false");
+    expect(pressed("Autoscroll")).toBe("true");
+    expect(pressed("⏸ Pause")).toBe("false");
+    screen.getByRole("button", { name: "Timestamps" }).click();
+    await tick();
+    expect(pressed("Timestamps")).toBe("true");
   });
 
   it("blocks Start with no port and says why", () => {
@@ -254,6 +276,77 @@ describe("SerialMonitor log", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("SerialMonitor autoscroll", () => {
+  /** 1000 rows in a 180 px viewport, autoscroll on by default. */
+  function bigLog(over: Partial<Props> = {}) {
+    const store = new SerialStore();
+    for (let i = 0; i < 1000; i++) store.push("stdout", `line ${i}`, ts + i);
+    return setup({ store, ...over });
+  }
+
+  it("windows from the bottom while following, not from the last scroll event", async () => {
+    // The bug: the window came from `scrollTop`, which only catches up a
+    // frame after the rows are added. Above ~80 lines/s that position was
+    // hundreds of rows stale every tick and the viewport painted blank.
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(180);
+    try {
+      bigLog();
+      await tick();
+      // `scrollTop` state is still 0 — nothing has fired a scroll event.
+      expect(screen.getByText("line 999")).toBeTruthy();
+      expect(screen.queryByText("line 0")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("un-follows on a scroll away without touching the stored pref", async () => {
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(180);
+    try {
+      const storage = fakeStorage();
+      bigLog({ storage });
+      await tick();
+      const log = document.querySelector(".serial-log") as HTMLElement;
+      Object.defineProperty(log, "scrollHeight", {
+        configurable: true,
+        value: 18_000,
+      });
+      log.scrollTop = 0;
+      fireEvent.scroll(log);
+      await tick();
+      // Followed the scroll…
+      expect(screen.getByText("line 0")).toBeTruthy();
+      // …and left `bancada.serial.ui` alone. Reading an old line is a look,
+      // not a preference: it must not disable autoscroll for every relaunch.
+      expect(storage.map.get(UI_KEY)).toBeUndefined();
+      expect(
+        screen.getByRole("button", { name: "Autoscroll" }).getAttribute("aria-pressed"),
+      ).toBe("true");
+
+      // Scrolling back to the bottom re-follows, terminal-style.
+      log.scrollTop = 17_820;
+      fireEvent.scroll(log);
+      await tick();
+      expect(screen.getByText("line 999")).toBeTruthy();
+      expect(storage.map.get(UI_KEY)).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("only the Autoscroll button writes the pref", async () => {
+    const storage = fakeStorage();
+    setup({ storage });
+    screen.getByRole("button", { name: "Autoscroll" }).click();
+    await tick();
+    expect(JSON.parse(storage.map.get(UI_KEY)!).autoscroll).toBe(false);
   });
 });
 

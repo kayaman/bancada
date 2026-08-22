@@ -56,6 +56,9 @@ export function statusLineText(i: {
   portName: string | null;
   /** How long this op took last time, from `buildHistory`. */
   estimateMs?: number | null;
+  /** What the uploader is doing right now, from `buildProgress`'s `note` —
+   *  "Connecting…", "Writing", "Verifying". Only the active tier shows it. */
+  note?: string | null;
 }): { text: string; isError: boolean } {
   if (i.activity) {
     let text = `${i.activity.label} ${formatElapsed(i.now - i.activity.startedAt)}`;
@@ -64,6 +67,13 @@ export function statusLineText(i: {
     // way costs nothing and stops the bar lying when the build is slower.
     if (typeof i.estimateMs === "number")
       text += ` (usually ~${formatElapsed(i.estimateMs)})`;
+    // Last, and after the habit: the note is the fastest-moving thing on the
+    // line (esptool changes it several times per flash), so it goes where a
+    // reader's eye can track it without re-reading the label every second.
+    // A bar sitting on "Flashing… 0:31" with no number is the case this
+    // exists for — "· Verifying" is the difference between "it is working"
+    // and "it has hung".
+    if (i.note) text += ` · ${i.note}`;
     return { text, isError: false };
   }
 

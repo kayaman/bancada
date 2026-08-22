@@ -11,7 +11,7 @@
 // MqttPanel/ScopeView pattern): unmounting would throw away the scrollback
 // and the scroll position every time the user looked at the build log.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
 import {
@@ -33,7 +33,7 @@ import {
   recall,
   type TxHistory,
 } from "../serial/txHistory";
-import { isNearBottom, visibleRange } from "../serial/virtualize";
+import { ROW_HEIGHT, isNearBottom, visibleRange } from "../serial/virtualize";
 import { fileStamp, hms } from "../timeFormat";
 
 /** Retrying is the auto-reconnect state the parent drives after a hotplug. */
@@ -47,8 +47,12 @@ interface Props {
   active: boolean;
   store: SerialStore;
   monitorOn: boolean;
-  /** A build/flash is running: the port is about to change hands. */
-  busy: boolean;
+  /** A flash is running: esptool holds the port, so there is nothing here to
+   *  start and nothing to stop. Deliberately narrower than App's `busy` — a
+   *  verify or a fleet sync does not touch the port, and greying out Stop
+   *  during one (while telling the user it was "Flashing") was a lie that
+   *  also took away the one control that frees a wedged monitor. */
+  flashing: boolean;
   portLabel: string | null;
   baud: number;
   baudSource: BaudSource;
@@ -80,7 +84,7 @@ export default function SerialMonitor({
   active,
   store,
   monitorOn,
-  busy,
+  flashing,
   portLabel,
   baud,
   baudSource,
@@ -104,6 +108,13 @@ export default function SerialMonitor({
   const [, setTick] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewport, setViewport] = useState(0);
+  /** Whether the view is still stuck to the bottom. Session-local on purpose:
+   *  scrolling up to read something is a look, not a preference change, and
+   *  writing `autoscroll:false` to storage for it meant one glance at an old
+   *  line disabled autoscroll for every future launch. The stored pref is the
+   *  *intent* ("follow the tail"); this flag is whether we are following it
+   *  right now. Scrolling back to the bottom re-follows, as in a terminal. */
+  const [following, setFollowing] = useState(true);
 
   const logRef = useRef<HTMLDivElement>(null);
   const lastVersionRef = useRef(-1);
@@ -166,14 +177,27 @@ export default function SerialMonitor({
 
   const trimmed = filter.trim();
   const snap = store.snapshot(trimmed || undefined);
-  const range = visibleRange(scrollTop, viewport, snap.rows.length);
+  const autoFollow = prefs.autoscroll && following;
+  // While following, the window is derived from the row count rather than
+  // from the last scroll event. At >80 lines/s the rows are added and the
+  // element is scrolled in the same commit, but `scrollTop` state only
+  // catches up a frame later via the rAF in `onScroll` — so the window was
+  // computed from a position several hundred rows stale and the viewport
+  // painted a blank band on every tick. The bottom of the list is arithmetic
+  // we already have; there is no need to ask the DOM where it went.
+  const anchored = autoFollow
+    ? Math.max(0, snap.rows.length * ROW_HEIGHT - viewport)
+    : scrollTop;
+  const range = visibleRange(anchored, viewport, snap.rows.length);
   const window_ = snap.rows.slice(range.start, range.end);
 
-  // Autoscroll after the commit that added the rows, so scrollHeight is
-  // already the new one.
-  useEffect(() => {
+  // Layout, not passive: this runs after the commit that added the rows (so
+  // scrollHeight is already the new one) but *before* the browser paints, so
+  // the frame that shows the new rows is already scrolled to them. As a plain
+  // effect it painted the pre-scroll position first and a fast feed flickered.
+  useLayoutEffect(() => {
     const el = logRef.current;
-    if (!el || !prefs.autoscroll) return;
+    if (!el || !autoFollow) return;
     el.scrollTop = el.scrollHeight;
   });
 
@@ -184,11 +208,10 @@ export default function SerialMonitor({
     if (!el) return;
     scrollTopRef.current = el.scrollTop;
     const near = isNearBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
-    // The user scrolling away is the only thing that turns autoscroll off,
-    // and scrolling back to the bottom is the only thing that turns it on —
-    // the same gesture a terminal uses. Guarded so our own autoscroll write
-    // (which fires this handler) does not rewrite storage every frame.
-    if (near !== prefs.autoscroll) updatePrefs({ autoscroll: near });
+    // Scrolling away un-follows and scrolling back to the bottom re-follows —
+    // the gesture a terminal uses. It moves the session flag only: the stored
+    // pref belongs to the Autoscroll button, and nothing else may write it.
+    if (near !== following) setFollowing(near);
     // One frame, one state write: a fast wheel fires scroll far more often
     // than the browser paints.
     if (rafRef.current !== null) return;
@@ -254,7 +277,7 @@ export default function SerialMonitor({
     ? [...BAUD_RATES]
     : [...BAUD_RATES, baud].sort((a, b) => a - b);
 
-  const startTitle = busy
+  const startTitle = flashing
     ? "Flashing — the monitor restarts when the flash finishes"
     : portLabel === null
       ? "Select a port first"
@@ -281,7 +304,7 @@ export default function SerialMonitor({
         <button
           className={monitorOn ? "btn small" : "btn small primary"}
           onClick={onToggleMonitor}
-          disabled={busy || portLabel === null}
+          disabled={flashing || portLabel === null}
           title={startTitle}
         >
           {monitorOn ? "Stop" : "Start"}
@@ -334,13 +357,23 @@ export default function SerialMonitor({
         <button
           className={prefs.timestamps ? "btn small toggled" : "btn small"}
           onClick={() => updatePrefs({ timestamps: !prefs.timestamps })}
+          aria-pressed={prefs.timestamps}
           title="Stamp each line with the time it arrived"
         >
           Timestamps
         </button>
         <button
           className={prefs.autoscroll ? "btn small toggled" : "btn small"}
-          onClick={() => updatePrefs({ autoscroll: !prefs.autoscroll })}
+          onClick={() => {
+            const on = !prefs.autoscroll;
+            updatePrefs({ autoscroll: on });
+            // Switching it back on catches up with the tail, whatever the
+            // scroll position had un-followed to. Off leaves the flag alone:
+            // it means nothing while the pref is off, and clobbering it would
+            // strand the view mid-log when the pref comes back on.
+            if (on) setFollowing(true);
+          }}
+          aria-pressed={prefs.autoscroll}
           title="Keep the newest line in view"
         >
           Autoscroll
@@ -348,6 +381,7 @@ export default function SerialMonitor({
         <button
           className="btn small"
           onClick={() => store.setPaused(!snap.paused)}
+          aria-pressed={snap.paused}
           title={
             snap.paused
               ? "Resume the log (nothing was lost)"

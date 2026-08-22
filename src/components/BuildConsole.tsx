@@ -30,9 +30,9 @@ function diagText(d: Diagnostic, displayPath: string): string {
 }
 
 /**
- * The build tab's console: the same lines `Console` shows, but parsed — a
- * summary strip, colour by severity, and a click on a sketch-local diagnostic
- * that puts the cursor on the offending line.
+ * The build tab's console: the raw compiler stream, parsed — a summary strip,
+ * colour by severity, and a click on a sketch-local diagnostic that puts the
+ * cursor on the offending line.
  *
  * All the judgement lives in `../diagnostics`; this file only decides what a
  * row looks like.
@@ -45,9 +45,12 @@ export default function BuildConsole({
   onClear,
 }: BuildConsoleProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Deliberately duplicated from Console.tsx:13-28 rather than extracted: the
-  // codebase has no custom hooks, and one shared hook for two consoles that
-  // are diverging (this one filters rows) would be the wrong abstraction.
+  // Stick to the tail unless the user has scrolled away. `SerialMonitor` does
+  // the same thing and is the live precedent — but it is deliberately not
+  // shared: the codebase has no custom hooks, and the two have already
+  // diverged (the serial one virtualises, and separates the stored pref from
+  // a session "following" flag). Build output is human-paced and needs
+  // neither.
   const stickToBottom = useRef(true);
   const [errorsOnly, setErrorsOnly] = useState(false);
 

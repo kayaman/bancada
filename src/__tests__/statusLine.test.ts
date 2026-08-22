@@ -70,6 +70,50 @@ describe("statusLineText — active", () => {
     }
   });
 
+  it("appends the uploader's note, after the 'usually' hint", () => {
+    expect(
+      statusLineText({
+        ...idle,
+        activity: { key: "upload", label: "Flashing to ttyUSB0…", startedAt: T0 },
+        now: T0 + 7_000,
+        note: "Verifying",
+      }),
+    ).toEqual({ text: "Flashing to ttyUSB0… 0:07 · Verifying", isError: false });
+
+    expect(
+      statusLineText({
+        ...idle,
+        activity: compiling,
+        now: T0 + 7_000,
+        estimateMs: 65_000,
+        note: "Writing",
+      }).text,
+    ).toBe("Compiling… 0:07 (usually ~1:05) · Writing");
+  });
+
+  it("leaves no dangling separator when there is no note", () => {
+    for (const note of [null, undefined, ""]) {
+      expect(
+        statusLineText({ ...idle, activity: compiling, now: T0 + 1_000, note })
+          .text,
+      ).toBe("Compiling… 0:01");
+    }
+  });
+
+  it("never shows a note on a finished or idle bar", () => {
+    // The note describes something *running*; leaving it on the verdict would
+    // read as "✓ Upload in 0:12 · Verifying" — still going, apparently.
+    expect(
+      statusLineText({
+        ...idle,
+        lastResult: { ok: true, label: "Upload", durationMs: 12_000, at: T0 },
+        note: "Done",
+      }).text,
+    ).toBe("✓ Upload in 0:12");
+    expect(statusLineText({ ...idle, project: "blink", note: "Writing" }).text)
+      .toBe("blink · no port");
+  });
+
   it("outranks a remembered result and a project", () => {
     expect(
       statusLineText({

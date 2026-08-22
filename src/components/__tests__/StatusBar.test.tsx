@@ -24,6 +24,7 @@ const base = {
   busy: false,
   measuredFraction: null,
   estimateMs: null,
+  note: null,
 };
 
 const compiling: Activity = {
@@ -95,6 +96,25 @@ describe("StatusBar — the running clock", () => {
       vi.advanceTimersByTime(2000);
     });
     expect(text()).toBe("Compiling… 0:10");
+  });
+
+  it("appends what the uploader says it is doing", () => {
+    // `BuildProgress.note` was computed and thrown away before this: avrdude
+    // through a pipe reports no percentage at all, so the note is the only
+    // sign the flash is still moving.
+    const flashing: Activity = {
+      key: "upload",
+      label: "Flashing to ttyUSB0…",
+      startedAt: T0 - 7_000,
+    };
+    const { rerender } = render(
+      <StatusBar {...base} activity={flashing} busy note="Verifying" />,
+    );
+    expect(text()).toBe("Flashing to ttyUSB0… 0:07 · Verifying");
+
+    // Nothing to say yet: no separator left dangling.
+    rerender(<StatusBar {...base} activity={flashing} busy />);
+    expect(text()).toBe("Flashing to ttyUSB0… 0:07");
   });
 
   it("shows the remembered duration alongside the clock", () => {

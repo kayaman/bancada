@@ -31,6 +31,9 @@ interface Props {
   /** How long this op took last time. Drives both the "usually ~" hint and
    *  the dashed estimate bar, whose fraction is computed below. */
   estimateMs: number | null;
+  /** What the uploader last said it was doing ("Writing", "Verifying"), from
+   *  `BuildProgress.note`. Appended to the running line; null at rest. */
+  note: string | null;
 }
 
 export default function StatusBar({
@@ -41,6 +44,7 @@ export default function StatusBar({
   busy,
   measuredFraction,
   estimateMs,
+  note,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -64,6 +68,7 @@ export default function StatusBar({
     project,
     portName,
     estimateMs,
+    note,
   });
   const { mode, fraction } = progressMode(
     busy,

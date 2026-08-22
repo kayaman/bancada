@@ -137,7 +137,12 @@ Suites green after every task:
 cargo test -p bancada-core --lib
 cargo check -p bancada
 npx tsc --noEmit && npx vitest run
+npm run build
 ```
+
+`npm run build` (`tsc --noEmit && vite build`) is the fourth gate for one
+reason: **vitest never parses `styles.css`**. An unclosed CSS block passed
+every test gate on this branch and only the bundler noticed.
 
 ---
 

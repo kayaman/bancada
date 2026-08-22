@@ -5863,7 +5863,7 @@ mod tests {
 
     /// The Monitor tab's send box owns the line ending, so the write path
     /// underneath it must add nothing of its own — two sends of "AT\r" and
-    /// "X" must reach the board as exactly those five bytes.
+    /// "X" must reach the board as exactly those four bytes, `"AT\rX"`.
     #[cfg(unix)]
     #[test]
     fn monitor_write_sends_data_verbatim() {
