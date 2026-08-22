@@ -46,10 +46,18 @@ export const MAX_VISIBLE = 4;
 export const emptyToasts = (): ToastState => ({ toasts: [], nextId: 1 });
 
 /** Trim to MAX_VISIBLE: oldest non-error first, and only then the oldest
- *  error. Mutates the array it is handed — callers pass a fresh copy. */
+ *  error. Mutates the array it is handed — callers pass a fresh copy.
+ *
+ *  The toast being pushed — the last element — is never a drop candidate.
+ *  It looks like a detail and is not: errors never expire, so four of them
+ *  fill the stack permanently, and a rule that hunts for "the oldest
+ *  non-error" would find only the new arrival and splice it straight back
+ *  out. The surface would go silently and permanently deaf after the fourth
+ *  failure. The cap exists to protect errors from chatter, never to mute
+ *  what just happened. */
 function capped(toasts: Toast[]): Toast[] {
   while (toasts.length > MAX_VISIBLE) {
-    const i = toasts.findIndex((t) => t.kind !== "error");
+    const i = toasts.slice(0, -1).findIndex((t) => t.kind !== "error");
     toasts.splice(i === -1 ? 0 : i, 1);
   }
   return toasts;

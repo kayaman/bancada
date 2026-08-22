@@ -183,17 +183,79 @@ describe("reduceBuildLine — esptool", () => {
     ).toBe("Resetting");
   });
 
-  it("falls back to the per-segment percent when no erase lines arrived", () => {
+  it("claims no fraction at all when the regions were never announced", () => {
     const states = run("upload", ESPTOOL_NO_ERASE);
     const at = (line: string) => states[ESPTOOL_NO_ERASE.indexOf(line)];
-    expect(at("Writing at 0x00000000... (20 %)").fraction).toBeCloseTo(0.2, 6);
-    expect(at("Writing at 0x00004800... (100 %)").fraction).toBe(1);
-    // documented cost of the fallback: the bar restarts at each segment
-    expect(at("Writing at 0x00010000... (12 %)").fraction).toBeCloseTo(
-      0.12,
-      6,
-    );
+
+    // The per-region percent is still reported — a caller can render it as
+    // text — but it is not a fraction of the upload, so it never becomes one.
+    expect(at("Writing at 0x00000000... (20 %)").segPercent).toBe(20);
+    expect(at("Writing at 0x00000000... (20 %)").note).toBe("Writing");
     expect(at("Writing at 0x00000000... (20 %)").segIndex).toBe(-1);
+    expect(at("Writing at 0x00000000... (20 %)").fraction).toBe(null);
+    expect(at("Writing at 0x00004800... (100 %)").fraction).toBe(null);
+
+    // The first region finishing is not the flash finishing: neither the
+    // region's own 100% nor the `Wrote` after it may read as a full bar.
+    expect(
+      at("Wrote 20480 bytes (13000 compressed) at 0x00000000 in 0.6 seconds...")
+        .fraction,
+    ).toBe(null);
+    expect(at("Writing at 0x00010000... (12 %)").fraction).toBe(null);
+
+    // Only the terminal lines commit to a number.
+    expect(at("Leaving...").fraction).toBe(1);
+  });
+
+  it("holds the fraction forward when a region is retried", () => {
+    const states = run("upload", ESPTOOL);
+    const deep = states[ESPTOOL.indexOf("Writing at 0x0005a000... (68 %)")];
+    expect(deep.fraction).toBeGreaterThan(0.5);
+
+    // esptool re-writing the bootloader after a failed verify computes a
+    // weighted value near zero; the bar must not fall back to it.
+    const retry = reduceBuildLine(deep, "Writing at 0x00000000... (10 %)");
+    expect(retry.segIndex).toBe(0);
+    expect(retry.segPercent).toBe(10);
+    expect(retry.fraction).toBe(deep.fraction);
+  });
+
+  it("is not dragged backwards by a write seen before the erase lines", () => {
+    let p = startProgress("upload");
+    // A stray `Writing at` with nothing announced yet claims no fraction, so
+    // it cannot leave an 0.8 floor for the honest weighted values to trip on.
+    p = reduceBuildLine(p, "Writing at 0x00000000... (80 %)");
+    expect(p.segPercent).toBe(80);
+    expect(p.fraction).toBe(null);
+
+    for (const l of ESPTOOL.filter((l) => l.startsWith("Flash will be erased")))
+      p = reduceBuildLine(p, l);
+    p = reduceBuildLine(p, "Writing at 0x00000000... (20 %)");
+    expect(p.fraction).toBeCloseTo((0.2 * 0x5000) / TOTAL, 6);
+
+    // …and from there the rest of the flash still only goes forwards.
+    let last = p.fraction!;
+    for (const l of ESPTOOL) {
+      p = reduceBuildLine(p, l);
+      if (p.fraction === null) continue;
+      expect(p.fraction).toBeGreaterThanOrEqual(last);
+      last = p.fraction;
+    }
+    expect(last).toBe(1);
+  });
+
+  it("ignores an erase line esptool announced twice", () => {
+    const states = run("upload", ESPTOOL);
+    const deep = states[ESPTOOL.indexOf("Writing at 0x0005a000... (68 %)")];
+    const again = reduceBuildLine(
+      deep,
+      "Flash will be erased from 0x00008000 to 0x00008fff...",
+    );
+    // Same reference: a repeat is not news, and counting it would inflate the
+    // total and drag every later fraction down.
+    expect(again).toBe(deep);
+    expect(again.segments.length).toBe(4);
+    expect(again.fraction).toBe(deep.fraction);
   });
 
   it("reads esptool 5's tighter spacing and a fractional percent", () => {
@@ -223,6 +285,20 @@ describe("reduceBuildLine — avrdude", () => {
     // nothing before the last line ever claimed a fraction
     const upToDone = states.slice(0, states.length - 1);
     expect(upToDone.every((s) => s.fraction === null)).toBe(true);
+  });
+
+  it("clears a stale fraction the moment it starts writing", () => {
+    // The only place a fraction is allowed to go backwards: whatever was on
+    // the bar belongs to a phase that is over.
+    const stale: BuildProgress = {
+      ...startProgress("upload"),
+      phase: "uploading",
+      fraction: 0.4,
+      note: "Connecting…",
+    };
+    expect(reduceBuildLine(stale, "avrdude: writing flash (924 bytes):")).toEqual(
+      { ...stale, fraction: null, note: "Writing flash" },
+    );
   });
 });
 

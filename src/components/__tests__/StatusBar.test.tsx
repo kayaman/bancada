@@ -29,7 +29,7 @@ const base = {
 
 const compiling: Activity = {
   key: "compile",
-  label: "Compiling",
+  label: "Compiling…",
   startedAt: T0 - 7_000,
 };
 
@@ -85,24 +85,24 @@ describe("StatusBar — text", () => {
 describe("StatusBar — the running clock", () => {
   it("ticks while an activity is live", () => {
     render(<StatusBar {...base} activity={compiling} busy />);
-    expect(text()).toBe("Compiling 0:07");
+    expect(text()).toBe("Compiling… 0:07");
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(text()).toBe("Compiling 0:08");
+    expect(text()).toBe("Compiling… 0:08");
 
     act(() => {
       vi.advanceTimersByTime(2000);
     });
-    expect(text()).toBe("Compiling 0:10");
+    expect(text()).toBe("Compiling… 0:10");
   });
 
   it("shows the remembered duration alongside the clock", () => {
     render(
       <StatusBar {...base} activity={compiling} busy estimateMs={65_000} />,
     );
-    expect(text()).toBe("Compiling 0:07 (usually ~1:05)");
+    expect(text()).toBe("Compiling… 0:07 (usually ~1:05)");
   });
 
   it("arms no interval at rest, and clears it on unmount", () => {
@@ -126,10 +126,10 @@ describe("StatusBar — the running clock", () => {
       <StatusBar
         {...base}
         busy
-        activity={{ key: "upload", label: "Uploading", startedAt: Date.now() }}
+        activity={{ key: "upload", label: "Uploading…", startedAt: Date.now() }}
       />,
     );
-    expect(text()).toBe("Uploading 0:00");
+    expect(text()).toBe("Uploading… 0:00");
   });
 });
 

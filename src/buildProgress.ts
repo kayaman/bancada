@@ -73,23 +73,39 @@ const NEW_PORT = /^New upload port:/;
 
 const size = (s: Segment) => s.to - s.from + 1;
 
-/** Size-weighted position across every known region, or the bare per-region
- *  percent when no region was ever announced. The fallback restarts at each
- *  region — visibly wrong, but wrong in a way that is still moving, which
- *  beats a frozen bar. */
+/** Size-weighted position across every announced region, or **null** when no
+ *  region was ever announced.
+ *
+ *  Null and not the bare per-region percent: that percent restarts at 0 for
+ *  every region, so it is not a fraction of the upload at all. Once the
+ *  fraction is held monotonic (see `forward`) a restarting percent is worse
+ *  than useless — the bar would reach 100% partway through the first region
+ *  and sit there for the rest of the flash. The honest answer when the
+ *  regions were never announced is the same one avrdude gets: no number, an
+ *  indeterminate bar, and `segPercent` still on the state for a caller that
+ *  wants to render "Writing 62%" as text. */
 function fractionAt(
   segments: Segment[],
   segIndex: number,
   percent: number,
-): number {
-  if (segIndex < 0 || segIndex >= segments.length) return percent / 100;
+): number | null {
+  if (segIndex < 0 || segIndex >= segments.length) return null;
   const total = segments.reduce((n, s) => n + size(s), 0);
-  if (total <= 0) return percent / 100;
+  if (total <= 0) return null;
   let done = 0;
   for (let i = 0; i < segIndex; i++) done += size(segments[i]);
   done += (size(segments[segIndex]) * percent) / 100;
   return Math.min(done / total, 1);
 }
+
+/** Hold the fraction monotonic. A progress bar that goes backwards reads as a
+ *  fault in the flash, not as a correction to our arithmetic — and esptool
+ *  gives us several ways to compute a smaller number than last time: a
+ *  retried region, a `Writing at` that arrives before the erase
+ *  announcements, a late region widening the total. `null` means "nothing new
+ *  to say", which leaves the previous value alone. */
+const forward = (p: BuildProgress, computed: number | null): number | null =>
+  computed === null ? p.fraction : Math.max(p.fraction ?? 0, computed);
 
 /** Fold one line of uploader output into the progress state. Returns the
  *  **same reference** for anything it does not understand — which is the vast
@@ -107,13 +123,15 @@ export function reduceBuildLine(
 
   const erase = ERASE.exec(line);
   if (erase) {
-    return {
-      ...p,
-      segments: [
-        ...p.segments,
-        { from: parseInt(erase[1], 16), to: parseInt(erase[2], 16) },
-      ],
+    const seg: Segment = {
+      from: parseInt(erase[1], 16),
+      to: parseInt(erase[2], 16),
     };
+    // esptool re-announces a region when it retries one after a failed
+    // verify. Counting it twice inflates the total, which drags every
+    // fraction computed after it downwards.
+    if (p.segments.some((s) => s.from === seg.from && s.to === seg.to)) return p;
+    return { ...p, segments: [...p.segments, seg] };
   }
 
   const writing = WRITING.exec(line);
@@ -126,17 +144,19 @@ export function reduceBuildLine(
       ...p,
       segIndex,
       segPercent: percent,
-      fraction: fractionAt(p.segments, segIndex, percent),
+      fraction: forward(p, fractionAt(p.segments, segIndex, percent)),
       note: "Writing",
     };
   }
 
   if (WROTE.test(line)) {
+    // With no region announced there is nothing to finish 100% *of*: leave
+    // the fraction where it was rather than reading a mid-upload region
+    // boundary as a completed flash.
     return {
       ...p,
       segPercent: 100,
-      fraction: fractionAt(p.segments, p.segIndex, 100),
-      note: p.note,
+      fraction: forward(p, fractionAt(p.segments, p.segIndex, 100)),
     };
   }
 
@@ -144,7 +164,11 @@ export function reduceBuildLine(
   if (DONE.test(line)) return { ...p, fraction: 1, note: "Resetting" };
 
   // avrdude, through a pipe: notes only, and a number only once it is over.
-  if (AVR_WRITING.test(line)) return { ...p, note: "Writing flash" };
+  // The explicit `null` is the one place a fraction is allowed to go
+  // backwards — a fresh write has begun and whatever the compile phase left
+  // on the bar is now a lie.
+  if (AVR_WRITING.test(line))
+    return { ...p, fraction: null, note: "Writing flash" };
   if (AVR_VERIFYING.test(line)) return { ...p, note: "Verifying" };
   if (AVR_DONE.test(line)) return { ...p, fraction: 1, note: "Done" };
 

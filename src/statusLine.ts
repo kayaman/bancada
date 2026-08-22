@@ -22,7 +22,7 @@ export type ActivityKey =
 
 export interface Activity {
   key: ActivityKey;
-  /** Present participle, shown verbatim: "Compiling", "Uploading". */
+  /** Present participle, shown verbatim: "Compiling…", "Uploading…". */
   label: string;
   startedAt: number;
 }

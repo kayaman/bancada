@@ -88,6 +88,46 @@ describe("pushToast", () => {
       s = pushToast(s, "error", m, T0);
     expect(s.toasts.map((t) => t.message)).toEqual(["e2", "e3", "e4", "e5"]);
   });
+
+  // Errors never expire, so four of them fill the stack forever. If the cap
+  // could evict the toast being pushed — the only non-error on screen — the
+  // app would go permanently deaf after the fourth failure.
+  it("never drops the toast it was just handed", () => {
+    const fourErrors = () => {
+      let s = emptyToasts();
+      for (const m of ["e1", "e2", "e3", "e4"]) s = pushToast(s, "error", m, T0);
+      return s;
+    };
+
+    const withInfo = pushToast(fourErrors(), "info", "board detached", T0);
+    expect(withInfo.toasts.map((t) => t.message)).toEqual([
+      "e2",
+      "e3",
+      "e4",
+      "board detached",
+    ]);
+
+    const withSuccess = pushToast(fourErrors(), "success", "✓ Compiled", T0);
+    expect(withSuccess.toasts.map((t) => t.message)).toEqual([
+      "e2",
+      "e3",
+      "e4",
+      "✓ Compiled",
+    ]);
+  });
+
+  it("still prefers evicting older chatter over any error", () => {
+    let s = emptyToasts();
+    for (const m of ["e1", "e2", "e3"]) s = pushToast(s, "error", m, T0);
+    s = pushToast(s, "info", "old chatter", T0);
+    s = pushToast(s, "info", "new chatter", T0);
+    expect(s.toasts.map((t) => t.message)).toEqual([
+      "e1",
+      "e2",
+      "e3",
+      "new chatter",
+    ]);
+  });
 });
 
 describe("expireToasts", () => {

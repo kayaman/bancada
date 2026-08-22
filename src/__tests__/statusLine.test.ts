@@ -36,14 +36,14 @@ describe("formatElapsed", () => {
 describe("statusLineText — active", () => {
   const compiling: Activity = {
     key: "compile",
-    label: "Compiling",
+    label: "Compiling…",
     startedAt: T0,
   };
 
   it("shows the label and the running clock", () => {
     expect(
       statusLineText({ ...idle, activity: compiling, now: T0 + 7_000 }),
-    ).toEqual({ text: "Compiling 0:07", isError: false });
+    ).toEqual({ text: "Compiling… 0:07", isError: false });
   });
 
   it("adds an honest 'usually' hint when a past run is remembered", () => {
@@ -54,7 +54,7 @@ describe("statusLineText — active", () => {
         now: T0 + 7_000,
         estimateMs: 65_000,
       }),
-    ).toEqual({ text: "Compiling 0:07 (usually ~1:05)", isError: false });
+    ).toEqual({ text: "Compiling… 0:07 (usually ~1:05)", isError: false });
   });
 
   it("omits the hint when there is no estimate", () => {
@@ -66,7 +66,7 @@ describe("statusLineText — active", () => {
           now: T0 + 1_000,
           estimateMs,
         }).text,
-      ).toBe("Compiling 0:01");
+      ).toBe("Compiling… 0:01");
     }
   });
 
@@ -79,7 +79,7 @@ describe("statusLineText — active", () => {
         project: "blink",
         portName: "Uno · /dev/ttyACM0",
       }),
-    ).toEqual({ text: "Compiling 0:02", isError: false });
+    ).toEqual({ text: "Compiling… 0:02", isError: false });
   });
 });
 
