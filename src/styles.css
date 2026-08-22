@@ -642,15 +642,6 @@ body {
   white-space: nowrap;
 }
 
-/* Baud + Start/Stop, above the serial Console. */
-.serial-toolbar {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  padding: 4px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
 /* ---------- file tree ---------- */
 
 .file-tree {
@@ -2142,6 +2133,118 @@ body {
 .console-row.clickable:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+
+/* ---------- serial monitor ---------- */
+
+/* The panel is a column that fills the bottom dock: toolbar, log, send box.
+   `min-height: 0` is what lets the log scroll instead of stretching the
+   section past its parent — a flex child's default `min-height: auto` wins
+   over `overflow: auto` otherwise. */
+.serial-monitor {
+  --serial-row-h: 18px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* One row, never two: the toolbar is dense enough that a wrap would shove
+   the log out of the dock. `nowrap` + `min-width: 0` lets the filter box
+   give up width instead. */
+.serial-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  min-width: 0;
+}
+
+.serial-toolbar .select.small {
+  min-width: 0;
+}
+
+.serial-status[data-state="on"] {
+  color: var(--success);
+}
+
+.serial-status[data-state="off"] {
+  color: var(--text-dim);
+}
+
+.serial-status[data-state="retrying"] {
+  color: var(--warn);
+}
+
+.serial-filter {
+  flex: 1;
+  min-width: 80px;
+  max-width: 240px;
+}
+
+/* Pushed right by the filter's `flex: 1` plus this — no spacer element. */
+.serial-count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* `white-space: pre` keeps a board's own column alignment intact. */
+.serial-log {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre;
+}
+
+/* The spacer is the full height of every row, shown or not, so the
+   scrollbar tells the truth; the window holds only what is rendered and is
+   translated into place. Rows are a fixed height for the same reason —
+   `virtualize.ts` computes the range from it, not from measurement. */
+.serial-log-spacer {
+  position: relative;
+}
+
+.serial-log-window {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+.serial-row {
+  height: var(--serial-row-h);
+  line-height: var(--serial-row-h);
+  padding: 0 10px;
+}
+
+.serial-row.stderr {
+  color: var(--warn);
+}
+
+.serial-row.tx {
+  color: var(--text-dim);
+}
+
+.serial-row.info {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.serial-ts {
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+
+.serial-tx {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
 }
 
 /* ---------- status bar ---------- */

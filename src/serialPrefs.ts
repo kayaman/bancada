@@ -103,8 +103,9 @@ export function detectBaud(sources: string[]): number | null {
   const consts = collectConstants(clean);
   const found = new Set<number>();
   for (const src of clean) {
-    // `\bSerial\.begin(` — the `(?!\d)` after `Serial` keeps `Serial1` out
-    // while `\b` alone would not, since `\b` sits between `l` and `1`.
+    // The literal `.` right after `Serial` is what keeps `Serial1.begin`
+    // and `Serial2.begin` out: they are other UARTs, and matching them would
+    // make a two-UART sketch look like it disagreed with itself.
     for (const m of src.matchAll(/\bSerial\.begin\(\s*([^,)]+)/g)) {
       const arg = m[1].trim();
       const lit = parseIntLiteral(arg);
