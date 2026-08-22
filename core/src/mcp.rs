@@ -137,16 +137,17 @@ pub fn serial_read_tool_def() -> ToolDef {
 
 /// The `serial_send` tool definition: transmit one line to the board.
 ///
-/// Same path as the Monitor tab's send box (a newline is appended). Requires
-/// the monitor to be running — `serial_read` starts it.
+/// A newline is always appended, regardless of the Monitor tab's line-ending
+/// setting — this is its own write path, not the tab's. Requires the monitor
+/// to be running — `serial_read` starts it.
 pub fn serial_send_tool_def() -> ToolDef {
     ToolDef {
         name: "serial_send".to_string(),
         description: "Send one line to the board over the running serial \
-            monitor (a newline is appended), exactly like typing in the \
-            Monitor tab. Errors if the monitor is not running — call \
-            serial_read first to start it. To see the board's response, \
-            call serial_read after sending."
+            monitor. A newline is always appended, regardless of the Monitor \
+            tab's line-ending setting. Errors if the monitor is not running \
+            — call serial_read first to start it. To see the board's \
+            response, call serial_read after sending."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",

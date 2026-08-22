@@ -793,6 +793,28 @@ describe("port events", () => {
     await api.onPortsChanged(() => {});
     expect(listenMock.mock.calls.at(-1)?.[0]).toBe("ports://changed");
   });
+
+  // The session stamp only earns its keep if the wrapper actually unwraps
+  // `event.payload`; a missed `.payload` would hand callers `undefined` and
+  // every close would look like it belonged to no session at all.
+  it("onSerialClosed and onSerialStarted hand the callback the payload", async () => {
+    const closed = vi.fn();
+    await api.onSerialClosed(closed);
+    const onClosed = listenMock.mock.calls.at(-1)?.[1] as (e: unknown) => void;
+    onClosed({ payload: { session: 3 } });
+    expect(closed).toHaveBeenCalledWith({ session: 3 });
+
+    const started = vi.fn();
+    await api.onSerialStarted(started);
+    expect(listenMock.mock.calls.at(-1)?.[0]).toBe("serial://started");
+    const onStarted = listenMock.mock.calls.at(-1)?.[1] as (e: unknown) => void;
+    onStarted({ payload: { port: "/dev/ttyACM0", baud: 115200, session: 4 } });
+    expect(started).toHaveBeenCalledWith({
+      port: "/dev/ttyACM0",
+      baud: 115200,
+      session: 4,
+    });
+  });
 });
 
 describe("device browser", () => {

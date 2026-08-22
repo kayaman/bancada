@@ -640,9 +640,15 @@ export const uploadSketch = (
     fqbn: fqbn ?? null,
   });
 
+/** Starts the monitor and resolves to **its session id**. Every
+ *  `serial://closed` names the session it belongs to, so a close from a
+ *  monitor the UI has already replaced can be ignored instead of taken as
+ *  the live one dying. */
 export const startMonitor = (port: string, baudrate: number) =>
-  invoke<void>("start_monitor", { port, baudrate });
+  invoke<number>("start_monitor", { port, baudrate });
 export const stopMonitor = () => invoke<void>("stop_monitor");
+/** Writes `data` to the board **verbatim** — the backend appends nothing, so
+ *  the caller owns the line ending (see `withLineEnding` in `serialPrefs`). */
 export const monitorSend = (data: string) =>
   invoke<void>("monitor_send", { data });
 
@@ -958,14 +964,24 @@ export const onSerialLine = (
   cb: (l: OutputLine) => void,
 ): Promise<UnlistenFn> =>
   listen<OutputLine>("serial://line", (e) => cb(e.payload));
-export const onSerialClosed = (cb: () => void): Promise<UnlistenFn> =>
-  listen("serial://closed", () => cb());
-/** Fires when the backend starts the monitor itself (the agent's
- *  `serial_read` auto-start) so the frontend's monitor state stays honest. */
-export const onSerialStarted = (
-  cb: (p: { port: string; baud: number }) => void,
+/** Fires when a monitor child's stdout hits EOF. `session` is the id
+ *  `startMonitor`/`onSerialStarted` handed out for *that* child: a reader
+ *  thread outliving its own monitor reports an older session, which the
+ *  caller must not mistake for the live one closing. */
+export const onSerialClosed = (
+  cb: (p: { session: number }) => void,
 ): Promise<UnlistenFn> =>
-  listen<{ port: string; baud: number }>("serial://started", (e) => cb(e.payload));
+  listen<{ session: number }>("serial://closed", (e) => cb(e.payload));
+/** Fires when the backend starts the monitor itself (the agent's
+ *  `serial_read` auto-start) so the frontend's monitor state stays honest.
+ *  `session` comes from the same counter as `startMonitor`'s return. */
+export const onSerialStarted = (
+  cb: (p: { port: string; baud: number; session: number }) => void,
+): Promise<UnlistenFn> =>
+  listen<{ port: string; baud: number; session: number }>(
+    "serial://started",
+    (e) => cb(e.payload),
+  );
 /** Fires when the set of serial ports on the machine changes (hotplug). */
 export const onPortsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen("ports://changed", () => cb());

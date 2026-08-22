@@ -215,6 +215,10 @@ struct AppState {
     /// (nothing joins a thread while holding it); never taken together with
     /// `serial`.
     serial_ring: Arc<Mutex<SerialRing>>,
+    /// Monitor-session counter — see [`next_monitor_session`]. `Arc` because
+    /// the MCP listener's auto-start must draw from the *same* counter as
+    /// `start_monitor`, or the two paths would hand out colliding ids.
+    monitor_session: Arc<AtomicU64>,
     /// UI-selected port/baud, kept fresh by the frontend on every selection
     /// change. `None` until a port is selected.
     selected_target: Arc<Mutex<Option<SelectedTarget>>>,
@@ -1831,12 +1835,26 @@ fn read_lines_lossy(src: impl std::io::Read, mut on_line: impl FnMut(&str)) {
     }
 }
 
+/// Hand out the next monitor-session id (1, 2, 3, …).
+///
+/// Every monitor child — started from the Monitor tab or auto-started by the
+/// agent's `serial_read` — takes one from the *same* counter, and both
+/// `serial://started` and `serial://closed` carry it. Without the stamp a
+/// reader thread that outlived its own child reports `serial://closed` while
+/// a *newer* monitor is happily running, and the frontend believes it: the
+/// port-handoff bug in `docs/RELEASE-NOTES-0.17.1.md` / `0.18.0.md`. With it
+/// the frontend can drop a close that names a session it has already left.
+fn next_monitor_session(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 fn spawn_monitor(
     cli: &ArduinoCli,
     port: &str,
     baudrate: u32,
     emit: Arc<EmitFn>,
     ring: Arc<Mutex<SerialRing>>,
+    session: u64,
 ) -> Result<Child, String> {
     let mut child = cli.monitor(port, baudrate).map_err(err_str)?;
     let stdout = child.stdout.take().ok_or("monitor stdout unavailable")?;
@@ -1855,7 +1873,9 @@ fn spawn_monitor(
                 serde_json::json!({ "stream": "stdout", "line": line }),
             );
         });
-        emit_out("serial://closed", serde_json::json!({}));
+        // Stamped with *this* monitor's session so a thread that outlived
+        // its child cannot be mistaken for the live monitor closing.
+        emit_out("serial://closed", serde_json::json!({ "session": session }));
     });
     std::thread::spawn(move || {
         read_lines_lossy(stderr, |line| {
@@ -1880,25 +1900,29 @@ fn app_emitter(app: AppHandle) -> Arc<EmitFn> {
 }
 
 #[tauri::command]
+/// Start the monitor and return **its session id**, so the frontend can
+/// ignore a `serial://closed` that names an older one.
 fn start_monitor(
     app: AppHandle,
     state: State<'_, AppState>,
     port: String,
     baudrate: u32,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
     evict_owner(&mut guard);
 
+    let session = next_monitor_session(&state.monitor_session);
     let child = spawn_monitor(
         &state.cli,
         &port,
         baudrate,
         app_emitter(app),
         state.serial_ring.clone(),
+        session,
     )?;
 
     *guard = Some(SerialOwner::Monitor(child));
-    Ok(())
+    Ok(session)
 }
 
 /// Mirror the UI's selected flash/monitor target into Rust state so the
@@ -1929,16 +1953,28 @@ fn stop_monitor(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Transmit a line to the board through the monitor's stdin.
-#[tauri::command]
-fn monitor_send(state: State<'_, AppState>, data: String) -> Result<(), String> {
-    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(SerialOwner::Monitor(child)) = guard.as_mut() else {
+/// Write `data` to the monitor child's stdin **verbatim** — nothing is
+/// appended. The Serial Monitor's line-ending selector (None/NL/CR/NL+CR)
+/// decides what, if anything, terminates a line, so a user who picked "No
+/// line ending" gets exactly the bytes they typed. The agent's `serial_send`
+/// (`run_serial_send`) still appends `\n` on its own; it is a separate path.
+///
+/// Split out of `monitor_send` purely so it is testable: the command itself
+/// takes a Tauri `State` and cannot be called from a unit test.
+fn monitor_write(slot: &mut Option<SerialOwner>, data: &str) -> Result<(), String> {
+    let Some(SerialOwner::Monitor(child)) = slot.as_mut() else {
         return Err("serial monitor is not running".to_string());
     };
     let stdin = child.stdin.as_mut().ok_or("monitor stdin unavailable")?;
-    writeln!(stdin, "{data}").map_err(err_str)?;
+    stdin.write_all(data.as_bytes()).map_err(err_str)?;
     stdin.flush().map_err(err_str)
+}
+
+/// Transmit bytes to the board through the monitor's stdin, verbatim.
+#[tauri::command]
+fn monitor_send(state: State<'_, AppState>, data: String) -> Result<(), String> {
+    let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
+    monitor_write(&mut guard, &data)
 }
 
 // ---------- scope (ADC streaming firmware) ----------
@@ -3272,6 +3308,10 @@ struct McpToolCtx {
     serial: Arc<Mutex<Option<SerialOwner>>>,
     /// The monitor scrollback `serial_read` reads from.
     serial_ring: Arc<Mutex<SerialRing>>,
+    /// Shared with `AppState::monitor_session`: the monitor auto-start below
+    /// must stamp `serial://started` with an id from the same counter the
+    /// UI's `start_monitor` uses.
+    monitor_session: Arc<AtomicU64>,
     /// Live UI port/baud selection, for `upload` and the monitor auto-start.
     selected_target: Arc<Mutex<Option<SelectedTarget>>>,
     /// The panel's "Allow uploads" switch. Shared with
@@ -4000,21 +4040,28 @@ fn run_serial_read(
                 let Some(target) = target else {
                     return (NO_SELECTED_TARGET.to_string(), true);
                 };
+                let session = next_monitor_session(&ctx.monitor_session);
                 match spawn_monitor(
                     &ctx.cli,
                     &target.port,
                     target.baud,
                     emit.clone(),
                     ctx.serial_ring.clone(),
+                    session,
                 ) {
                     Ok(child) => {
                         *guard = Some(SerialOwner::Monitor(child));
                         // Tell the frontend its monitor state changed, so the
                         // Monitor tab lights up and the auto-start effect
-                        // doesn't race a second start.
+                        // doesn't race a second start. The session id is the
+                        // same one this child's `serial://closed` will carry.
                         emit(
                             "serial://started",
-                            serde_json::json!({ "port": target.port, "baud": target.baud }),
+                            serde_json::json!({
+                                "port": target.port,
+                                "baud": target.baud,
+                                "session": session,
+                            }),
                         );
                     }
                     Err(e) => return (format!("could not start the serial monitor: {e}"), true),
@@ -4051,7 +4098,8 @@ fn run_serial_read(
 }
 
 /// The `serial_send` tool: one line to the monitor child's stdin, newline
-/// appended — the exact `monitor_send` path the Monitor tab's send box uses.
+/// appended — unlike `monitor_send`, which writes verbatim and leaves the
+/// line ending to the Monitor tab's selector.
 fn run_serial_send(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {
     let Some(data) = args.get("data").and_then(|v| v.as_str()) else {
         return (
@@ -4495,6 +4543,7 @@ fn agent_start(
         build_gate: state.build_gate.clone(),
         serial: state.serial.clone(),
         serial_ring: state.serial_ring.clone(),
+        monitor_session: state.monitor_session.clone(),
         selected_target: state.selected_target.clone(),
         uploads_armed: armed_flag.clone(),
         // Start at the ring's head: this session reads only output that
@@ -4707,6 +4756,7 @@ pub fn run() {
                 cli: ArduinoCli::default(),
                 serial: Arc::new(Mutex::new(None)),
                 serial_ring: Arc::new(Mutex::new(SerialRing::default())),
+                monitor_session: Arc::new(AtomicU64::new(0)),
                 selected_target: Arc::new(Mutex::new(None)),
                 mqtt: Mutex::new(None),
                 device_browse: Mutex::new(None),
@@ -5185,6 +5235,7 @@ mod tests {
             build_gate: gate,
             serial: hw.serial,
             serial_ring: hw.ring,
+            monitor_session: hw.monitor_session,
             selected_target: hw.target,
             uploads_armed: hw.uploads_armed,
             serial_cursor: AtomicU64::new(cursor_start),
@@ -5315,6 +5366,7 @@ mod tests {
     struct HwParts {
         serial: Arc<Mutex<Option<SerialOwner>>>,
         ring: Arc<Mutex<SerialRing>>,
+        monitor_session: Arc<AtomicU64>,
         target: Arc<Mutex<Option<SelectedTarget>>>,
         uploads_armed: Arc<AtomicBool>,
     }
@@ -5324,6 +5376,7 @@ mod tests {
             HwParts {
                 serial: Arc::new(Mutex::new(None)),
                 ring: Arc::new(Mutex::new(SerialRing::default())),
+                monitor_session: Arc::new(AtomicU64::new(0)),
                 target: Arc::new(Mutex::new(None)),
                 uploads_armed: Arc::new(AtomicBool::new(false)),
             }
@@ -5786,6 +5839,107 @@ mod tests {
             seen.push(l.to_string())
         });
         assert_eq!(seen, ["a", "b"]);
+    }
+
+    /// Poll `path` for up to a second, waiting for the sink child to flush.
+    #[cfg(unix)]
+    fn read_when_written(path: &std::path::Path, want_len: usize) -> String {
+        for _ in 0..50 {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                if s.len() >= want_len {
+                    return s;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    /// The Monitor tab's send box owns the line ending, so the write path
+    /// underneath it must add nothing of its own — two sends of "AT\r" and
+    /// "X" must reach the board as exactly those five bytes.
+    #[cfg(unix)]
+    #[test]
+    fn monitor_write_sends_data_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("sent.txt");
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat > {}", out_file.display()))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sink");
+        let mut slot = Some(SerialOwner::Monitor(child));
+        monitor_write(&mut slot, "AT\r").unwrap();
+        monitor_write(&mut slot, "X").unwrap();
+        // `cat` copies each read straight through, so the four bytes land
+        // without EOF — read them *before* evicting, because `evict_owner`
+        // SIGTERMs the sink and anything still in flight dies with it. Four
+        // bytes is also the tell: an implicit "\n" per write would make the
+        // first four `"AT\r\n"`, not `"AT\rX"`.
+        let written = read_when_written(&out_file, 4);
+        evict_owner(&mut slot);
+        assert_eq!(written, "AT\rX");
+    }
+
+    #[test]
+    fn monitor_write_without_a_monitor_says_not_running() {
+        let mut slot: Option<SerialOwner> = None;
+        let err = monitor_write(&mut slot, "AT").unwrap_err();
+        assert!(err.contains("not running"), "{err}");
+    }
+
+    /// The stale-reader guard: a monitor's stdout thread stamps its own
+    /// session onto `serial://closed`, so a thread outliving its child can
+    /// be told apart from the monitor that replaced it.
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_monitor_stamps_its_session_on_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let collector = events.clone();
+        let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
+            collector.lock().unwrap().push((name.to_string(), payload));
+        });
+        let counter = Arc::new(AtomicU64::new(0));
+        let session = next_monitor_session(&counter);
+        assert_eq!(session, 1);
+        // `exit 0` — the child is gone at once, so its stdout hits EOF and
+        // the reader thread emits the close.
+        let child = spawn_monitor(
+            &stub_cli(&dir, "exit 0"),
+            "/dev/ttyTEST0",
+            115200,
+            emit,
+            Arc::new(Mutex::new(SerialRing::default())),
+            session,
+        )
+        .expect("spawn monitor");
+        let mut closed = None;
+        for _ in 0..100 {
+            closed = events
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == "serial://closed")
+                .map(|(_, payload)| payload.clone());
+            if closed.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let closed = closed.expect("serial://closed was never emitted");
+        assert_eq!(closed, serde_json::json!({ "session": 1 }));
+        kill_child(child);
+    }
+
+    #[test]
+    fn monitor_sessions_are_handed_out_in_order() {
+        let counter = Arc::new(AtomicU64::new(0));
+        assert_eq!(next_monitor_session(&counter), 1);
+        assert_eq!(next_monitor_session(&counter), 2);
     }
 
     #[test]
@@ -7163,6 +7317,7 @@ mod tests {
             build_gate: gate(),
             serial: hw.serial,
             serial_ring: hw.ring,
+            monitor_session: hw.monitor_session,
             selected_target: hw.target,
             uploads_armed: hw.uploads_armed,
             serial_cursor: AtomicU64::new(0),
