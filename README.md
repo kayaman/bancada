@@ -31,6 +31,11 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 **Full architecture documentation: [docs/architecture/](docs/architecture/README.md)** —
 layer map, the IPC contract, the runtime model, and seven end-to-end data flows.
 
+Bancada is a **bench tool** and stays one. The wider system these boards belong
+to — fleet identity, firmware lifecycle, telemetry governance — is documented
+separately in [`bancada-platform`](https://github.com/kayaman/bancada-platform),
+which deliberately puts factory and fleet operations in a CLI rather than here.
+
 ## Prerequisites (openSUSE Tumbleweed)
 
 ```bash
