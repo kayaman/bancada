@@ -36,8 +36,9 @@ Five composition rules are encoded there and are easy to break by accident:
 project and holds every action on it — Open, Recent, New, Duplicate, Rename.
 It exists because the bar had drifted into six project controls and three
 glyphs each meaning two things. What it offers, and what is disabled and why,
-lives in `src/toolbarModel.ts`: `vitest`'s include glob does not match `.tsx`,
-so a decision left in the component is verified by eye alone.
+lives in `src/toolbarModel.ts`. `ProjectMenu` is a leaf component now within
+reach of the `.tsx` harness (conventions.md §2), so what it renders disabled,
+and why, can be asserted directly rather than verified by eye.
 
 `ProjectMenu` is also the codebase's only **nested** `Menu`. `Menu` needed no
 change — a child rendered inside the parent's `children` is inside the parent's
@@ -120,9 +121,11 @@ There are **no custom hooks** in the codebase. `useExplorerStore` is the only
 
 ## 3. The pure-logic tier
 
-`vitest` runs in the **node** environment with no jsdom, and no component is
-rendered in any test ([conventions §2](conventions.md#typescript-node-environment-no-dom)).
-So anything worth testing has been extracted into a plain `.ts` module:
+`vitest` runs in the **node** environment by default; a `.tsx` test can opt
+into jsdom per file to render a **leaf component**, but `.ts` stays where the
+logic lives ([conventions §2](conventions.md#typescript-node-by-default-jsdom-per-file)).
+So anything worth testing has been extracted into a plain `.ts` module — a
+`.tsx` test proves a component's wiring and accessibility, not its logic:
 
 | Module | Owns |
 |---|---|

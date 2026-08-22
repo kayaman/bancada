@@ -79,17 +79,27 @@ These are the **only** tests that prove a scaffolded library, a fetched library
 or a new project actually *compile*, rather than merely producing the expected
 text. Run them before a release.
 
-### TypeScript: node environment, no DOM
+### TypeScript: node by default, jsdom per file
 
-`vitest.config.ts` sets `environment: "node"` and only collects
-`src/**/__tests__/**/*.test.ts`. There is no jsdom, no Testing Library, and
-**no component renders in any test**.
+`vitest.config.ts` sets `environment: "node"` and collects
+`src/**/__tests__/**/*.test.{ts,tsx}`. Node stays the default because most
+logic lives in plain `.ts` modules and doesn't need a DOM. A `.tsx` test opts
+into jsdom itself: `// @vitest-environment jsdom` as the file's first line,
+plus `afterEach(cleanup)` from `@testing-library/react` (there's no
+`environmentMatchGlobs` — it was removed in vitest 3, so the opt-in is
+per-file, not per-glob).
 
-This is the constraint that shapes the entire frontend. Because a `.tsx` file
-cannot be tested, anything worth testing is extracted into a plain `.ts` module
-first — which is why `src/` has ~14 root-level logic modules and why two
-components export pure helpers (`fallbackFqbnLabel`, `exchangeRow`) that exist
-only to be testable.
+A `.tsx` test renders a **leaf component only** — props in, DOM out.
+`App.tsx` is still never rendered; the `App.tsx?raw` source-text tests remain
+the harness for its wiring (see the tensions section in the
+[index](README.md)). Assert on roles, labels and text, not class names —
+except where the class *is* the contract (e.g. `.active`).
+
+This is the constraint that shapes the entire frontend. Because a component
+still can't carry untested logic of its own, anything worth testing is
+extracted into a plain `.ts` module first — which is why `src/` has ~14
+root-level logic modules and why two components export pure helpers
+(`fallbackFqbnLabel`, `exchangeRow`) that exist only to be testable.
 
 So: **if you are about to put logic in a component, put it in a module and call
 it from the component instead.** See [frontend](frontend.md).
@@ -206,6 +216,13 @@ The frontend is deliberately thin: React, zustand, CodeMirror 6, react-markdown.
 **No charting library, no icon package, no date library, no lodash.** The scope
 renderer, the spectrum display, the FFT and the unified diff are all
 hand-written, because each was smaller than the dependency would have been.
+
+Dev dependencies for the component harness (see above):
+
+- `jsdom` — the DOM implementation a `.tsx` test's jsdom environment runs against
+- `@testing-library/react` — renders components and unmounts them via `cleanup`
+- `@testing-library/dom` — RTL 16's `screen`/`getByRole` queries; a peer dep of `@testing-library/react`
+- `@testing-library/user-event` — realistic click/type/keyboard interactions, not raw DOM events
 
 ---
 

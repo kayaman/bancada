@@ -129,8 +129,9 @@ file.
 
 It owns nearly all cross-panel state and every subscription, and passes ~30
 props to `Toolbar` alone. The mitigation is real — 17 pure-logic modules have
-been extracted, and that is where the tested behaviour lives — but the
-orchestration itself has no harness.
+been extracted, and that is where the tested behaviour lives — and leaf
+components now have a render harness too (jsdom, per `.tsx` file). But the
+orchestrator itself still has no harness.
 
 The clearest signal: `src/__tests__/conflicts.test.ts` reads `App.tsx` **as a
 string** to assert that `refuseOnConflict(` appears before `api.compileSketch(`.
