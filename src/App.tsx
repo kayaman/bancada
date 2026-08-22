@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { cpp } from "@codemirror/lang-cpp";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { ask, open } from "@tauri-apps/plugin-dialog";
@@ -18,6 +18,8 @@ import {
   withPath,
 } from "./ports";
 import { checkNewEntry } from "./newFile";
+import { badgeCount, parseBuildOutput, type JumpTarget } from "./diagnostics";
+import { gotoLine } from "./editorGoto";
 import { useExplorerStore } from "./explorerStore";
 import {
   affectedByDelete,
@@ -63,6 +65,7 @@ import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
 import BoardsManager from "./components/BoardsManager";
 import FleetManager from "./components/FleetManager";
+import BuildConsole from "./components/BuildConsole";
 import Console from "./components/Console";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
@@ -112,6 +115,22 @@ const appendCapped = (prev: OutputLine[], l: OutputLine): OutputLine[] =>
   prev.length >= MAX_CONSOLE_LINES
     ? [...prev.slice(-TRIM_CONSOLE_LINES), l]
     : [...prev, l];
+
+/** `appendCapped` for a whole frame's worth of lines at once — same cap and
+ *  same trim policy, one new array instead of one per line. A compile emits
+ *  thousands of lines in a burst, and the build console now re-parses the
+ *  whole buffer on every change, so appending per event costs a parse per
+ *  line; this coalesces a frame into a single state write. Pure. */
+const appendManyCapped = (
+  prev: OutputLine[],
+  batch: readonly OutputLine[],
+): OutputLine[] => {
+  if (batch.length === 0) return prev;
+  const next = [...prev, ...batch];
+  return next.length > MAX_CONSOLE_LINES
+    ? next.slice(-TRIM_CONSOLE_LINES)
+    : next;
+};
 
 /** One frame of grace on the toast-expiry timer — see the effect that uses
  *  it for why firing early is the dangerous direction. */
@@ -190,6 +209,18 @@ export default function App() {
     setShowingUsage(pane === "usage");
     setProfileForm(profileMode);
   };
+  /** True when the editor itself is what the editor area shows. Every form
+   *  above *replaces* CodeMirror (see the ternary in the render), so while
+   *  one is up `editorRef.current` is null and a parked diagnostic jump has
+   *  to wait for this to flip back — hence its place in that effect's deps.
+   *  (`renamingProject` with no `sketchDir` renders the editor regardless,
+   *  but a jump needs a sketchDir to be requested at all, so that corner
+   *  cannot strand one.) */
+  const editorShowing =
+    !creatingProject &&
+    !duplicatingProject &&
+    !renamingProject &&
+    !showingUsage;
   // Live mirror of sketchDir for the App-level agent event listeners, which
   // are registered once (empty-dep effect) and would otherwise close over a
   // stale `null`.
@@ -238,6 +269,12 @@ export default function App() {
   const [content, setContent] = useState("");
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set());
   const buffersRef = useRef(new Map<string, string>());
+  /** The live CodeMirror handle, so a compiler diagnostic can move the
+   *  cursor. `.view` is null until the editor has mounted. */
+  const editorRef = useRef<ReactCodeMirrorRef>(null);
+  /** A jump asked for while the target file was still being opened; the
+   *  effect below applies it once the editor is showing that document. */
+  const pendingGotoRef = useRef<JumpTarget | null>(null);
   // Editor tab strip — the explicit open set (superset-of-one containing
   // `openFile`), and the tab armed for "close again to discard" (a dirty
   // close request arms once; any other action disarms it).
@@ -260,6 +297,11 @@ export default function App() {
 
   // consoles
   const [buildLines, setBuildLines] = useState<OutputLine[]>([]);
+  /** Build lines that arrived this frame, waiting for the scheduled flush.
+   *  Written from the `[]`-deps `onBuildLine` subscription, so a ref. */
+  const pendingBuildRef = useRef<OutputLine[]>([]);
+  /** Handle of the scheduled flush, or null when none is pending. */
+  const buildFlushRef = useRef<number | null>(null);
   const [serialLines, setSerialLines] = useState<OutputLine[]>([]);
   const [monitorOn, setMonitorOn] = useState(false);
   const [baudrate, setBaudrate] = useState(115200);
@@ -279,6 +321,16 @@ export default function App() {
   // tab, cleared when that tab is opened.
   const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
   const bottomTabRef = useRef<BottomTab>("build");
+  /** The build console's parsed view of `buildLines` — diagnostics, memory
+   *  report and summary. Memoised because the badge, the tab bar and the
+   *  console all read it, and the parse walks the whole buffer. */
+  const buildModel = useMemo(() => parseBuildOutput(buildLines), [buildLines]);
+  /** Sketch-relative paths the editor can actually open. Diagnostics naming
+   *  anything else (a core header, a library) stay unclickable. */
+  const knownFiles = useMemo(
+    () => new Set(files.map((f) => f.rel_path)),
+    [files],
+  );
 
   // ui — sidebar hierarchy: a Software/Hardware group switcher over per-group
   // sub-tabs; each group remembers its last-used tab.
@@ -602,9 +654,28 @@ export default function App() {
   useEffect(() => {
     const subs = [
       api.onBuildLine((l) => {
-        setBuildLines((prev) => appendCapped(prev, l));
+        // Coalesced, unlike the serial feed: a compile arrives in bursts of
+        // thousands of lines, and every `buildLines` change re-parses the
+        // whole buffer for the console and the badge. One state write per
+        // frame keeps that parse off the critical path.
+        pendingBuildRef.current.push(l);
+        if (buildFlushRef.current === null) {
+          const flush = () => {
+            const batch = pendingBuildRef.current;
+            pendingBuildRef.current = [];
+            buildFlushRef.current = null;
+            setBuildLines((prev) => appendManyCapped(prev, batch));
+          };
+          // rAF is there in the webview (and in jsdom); the timer is a
+          // defensive fallback only, so an environment without it drains
+          // the queue instead of swallowing the console entirely.
+          buildFlushRef.current =
+            typeof requestAnimationFrame === "function"
+              ? requestAnimationFrame(flush)
+              : window.setTimeout(flush, 16);
+        }
         if (bottomTabRef.current !== "build")
-          setUnseen((u) => ({ ...u, build: true }));
+          setUnseen((u) => (u.build ? u : { ...u, build: true }));
         // The progress bar is fed from the same stream the console shows.
         // Via the ref, never state: this subscription is registered once.
         // `reduceBuildLine` returns the same reference for a line it has
@@ -953,6 +1024,65 @@ export default function App() {
       notify(String(e), true);
     }
   };
+
+  /** A click on a compiler diagnostic: show the file, put the cursor on the
+   *  offending line. The file is often not the one on screen, and opening it
+   *  is async, so the request is parked in `pendingGotoRef` and applied by
+   *  the effect below once the editor is showing that document. */
+  const jumpToDiagnostic = async (t: JumpTarget) => {
+    if (!sketchDir) return;
+    // The user asked to see code, so retire whatever form owns the editor
+    // area (New/Duplicate/Rename project, the usage dashboard, the profile
+    // row) — otherwise the jump lands behind it, invisibly.
+    showPane(null);
+    pendingGotoRef.current = t;
+    const view = editorRef.current?.view;
+    if (t.rel === openFileRef.current && view) {
+      // Already the open document: nothing will re-render, so no effect
+      // would fire. Jump now.
+      gotoLine(view, t.line, t.col);
+      pendingGotoRef.current = null;
+      return;
+    }
+    await openFileInEditor(sketchDir, t.rel);
+  };
+
+  /** Applies a parked jump once the editor is actually showing the file.
+   *
+   *  Child effects run before parent effects, so by the time this runs
+   *  CodeMirror has usually already applied the new `value` — but "usually"
+   *  is not "always", so the document is checked against `content` before
+   *  the cursor moves. A mismatch retries on the next frame; if that still
+   *  disagrees the jump is dropped. Turning "wrong document" into "no jump"
+   *  is the safe direction: a wrong jump would silently point the user at an
+   *  unrelated line.
+   *
+   *  `editorShowing` is a dependency because of the one case where neither
+   *  of the other two changes: a form was covering the editor and the
+   *  diagnostic names the file that was already open, so re-opening it sets
+   *  `openFile`/`content` to what they already were. Only the editor coming
+   *  back tells us to look again. */
+  useEffect(() => {
+    const p = pendingGotoRef.current;
+    const v = editorRef.current?.view;
+    if (!p || !v || p.rel !== openFile) return;
+    if (v.state.doc.length === content.length) {
+      gotoLine(v, p.line, p.col);
+      pendingGotoRef.current = null;
+      return;
+    }
+    requestAnimationFrame(() => {
+      const v2 = editorRef.current?.view;
+      if (
+        v2 &&
+        pendingGotoRef.current === p &&
+        v2.state.doc.length === content.length
+      ) {
+        gotoLine(v2, p.line, p.col);
+        pendingGotoRef.current = null;
+      }
+    });
+  }, [openFile, content, editorShowing]);
 
   /** Create a validated entry via the backend (which refuses collisions and
    *  returns the fresh listing), then reveal it — files also open. */
@@ -1812,14 +1942,20 @@ export default function App() {
       setAgentBuilding(ev.type === "verify_started");
       // Same bar as a user-driven build: whose build it is changes the
       // wording, not whether the machine looks busy.
-      if (ev.type === "verify_started")
+      if (ev.type === "verify_started") {
+        // Same reset `verify()` does, so the console and the Build badge
+        // describe this compile and not the last one. No tab switch: the
+        // agent's build is not what the user is looking at, and the unseen
+        // dot plus the error badge already say it happened.
+        setBuildLines([]);
         beginActivity("agent_compile", "Assistant compiling…");
-      else
+      } else {
         endActivity(
           ["agent_compile"],
           ev.success === true,
           "Assistant compile",
         );
+      }
       return;
     }
     // An agent flash: disable the toolbar's build buttons like a verify,
@@ -1834,10 +1970,12 @@ export default function App() {
       setAgentBuilding(flashing);
       // The agent's flash streams through the same build console, so the
       // same parser reads its progress — hence the `"upload"` op.
-      if (ev.type === "upload_started")
+      if (ev.type === "upload_started") {
+        setBuildLines([]);
         beginActivity("agent_upload", "Assistant flashing…", "upload");
-      else
+      } else {
         endActivity(["agent_upload"], ev.success === true, "Assistant flash");
+      }
       if (!flashing) openBottomTab("serial");
       return;
     }
@@ -2551,6 +2689,7 @@ export default function App() {
             onCloseAll={handleCloseAll}
           />
           <CodeMirror
+            ref={editorRef}
             className="editor"
             value={content}
             height="100%"
@@ -2590,12 +2729,19 @@ export default function App() {
         <BottomTabBar
           active={bottomTab}
           unseen={unseen}
+          badges={{ build: badgeCount(buildModel.summary) }}
           onOpen={openBottomTab}
           maximized={bottomMax}
           onToggleMaximize={() => setBottomMax((m) => !m)}
         />
         {bottomTab === "build" && (
-          <Console lines={buildLines} onClear={() => setBuildLines([])} />
+          <BuildConsole
+            model={buildModel}
+            sketchDir={sketchDir}
+            knownFiles={knownFiles}
+            onJump={jumpToDiagnostic}
+            onClear={() => setBuildLines([])}
+          />
         )}
         {bottomTab === "serial" && (
           <>
