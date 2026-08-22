@@ -16,8 +16,7 @@ providers, no context, and no global store.
 │ │ Boards│Fleet     │ │                                         │   │
 │ └──────────────────┘ └─────────────────────────────────────────┘   │
 ├─ bottom ───────────────────────────────────────────────────────────┤
-│ Console │ Debugging │ Observability │ Assistant     ← groups       │
-│ Build│Serial   Scope    MQTT│WS│Web    Chat          ← sub-tabs    │
+│ Build · Serial │ Scope │ MQTT · WS · Web │ Assistant               │
 ├─ statusbar ────────────────────────────────────────────────────────┤
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -53,11 +52,14 @@ profileMode?)` — call it rather than setting the booleans. The reset list used
 to be repeated at all seven call sites; adding a pane meant editing every one
 of them, and missing one would have shown two forms stacked.
 
-**Two-level tab hierarchy.** Both the sidebar and the bottom panel have a group
-switcher over per-group sub-tabs, and **each group remembers its last-used
-tab**. The bottom panel's mapping is data-driven from `src/bottomTabs.ts`
-(`GROUP_OF`, `GROUP_TABS`, `GROUP_LABEL`, `TAB_LABEL`, `groupHasUnseen`) — add a
-tab there, not in JSX.
+**Tabs: two levels in the sidebar, one flat row at the bottom.** The sidebar
+has a Software/Hardware group switcher over per-group sub-tabs, and **each
+group remembers its last-used tab**. The bottom panel does not: it is a single
+row of seven tabs, `Build · Serial │ Scope │ MQTT · WS · Web │ Assistant`,
+with thin separators where the old group boundaries were. Order, labels,
+separators and the per-tab dot/badge view model are data-driven from
+`src/bottomTabs.ts` (`BOTTOM_TABS`, `TAB_LABEL`, `SEPARATOR_AFTER`, `tabRow`)
+and rendered by `BottomTabBar.tsx` — add a tab there, not in JSX.
 
 **Hide, don't unmount.** Panels holding a live connection — scope, MQTT, WS,
 device browser, agent — latch mounted on first open (`scopeMounted`,
@@ -130,7 +132,7 @@ So anything worth testing has been extracted into a plain `.ts` module — a
 | Module | Owns |
 |---|---|
 | `api.ts` | the entire IPC surface (§4) |
-| `bottomTabs.ts` | bottom panel group/tab taxonomy |
+| `bottomTabs.ts` | bottom panel tab order, labels, separators, and the per-tab dot/badge view model |
 | `editorTabs.ts` | open/close/rename/delete tab transitions; dirty tabs are never bulk-closed |
 | `explorerOps.ts` | rename/delete path math, protected paths (mirrors core's `is_protected`) |
 | `fileTreeModel.ts` | tree building, visible nodes, expansion pruning |

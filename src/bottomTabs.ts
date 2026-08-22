@@ -1,51 +1,76 @@
-// Bottom-panel two-level navigation: tabs grouped into Console / Debugging /
-// Observability / Assistant. Pure data + one predicate; no React.
+// Bottom-panel navigation: one flat row of seven tabs. Pure data + one view
+// model; no React.
+//
+// This replaced a two-level hierarchy (Console / Debugging / Observability /
+// Assistant groups over per-group sub-tabs). It cost more than it bought:
+// two of the four groups held a single tab, so their sub-row had to render
+// empty — a sub-tab there would have read as a duplicate of the group button
+// right above it — and the empty row needed a min-height hack to stop the
+// content edge jumping between groups. The taxonomy also misfiled the tab
+// people use most: Serial Monitor lived under "Debugging", two clicks deep,
+// next to the oscilloscope. Flat, the whole bench is one click away and the
+// old group boundaries survive as thin separators.
 
 export type BottomTab = "build" | "serial" | "scope" | "mqtt" | "ws" | "web" | "agent";
-export type BottomGroup = "console" | "debug" | "obs" | "assistant";
 
-export const GROUP_OF: Record<BottomTab, BottomGroup> = {
-  build: "console",
-  serial: "debug",
-  scope: "debug",
-  mqtt: "obs",
-  ws: "obs",
-  web: "obs",
-  agent: "assistant",
-};
-
-export const GROUP_TABS: Record<BottomGroup, BottomTab[]> = {
-  console: ["build"],
-  debug: ["serial", "scope"],
-  obs: ["mqtt", "ws", "web"],
-  assistant: ["agent"],
-};
-
-export const GROUP_LABEL: Record<BottomGroup, string> = {
-  console: "⚙ Console",
-  debug: "🐞 Debugging",
-  obs: "📡 Observability",
-  assistant: "🤖 Assistant",
-};
+export const BOTTOM_TABS: readonly BottomTab[] = [
+  "build",
+  "serial",
+  "scope",
+  "mqtt",
+  "ws",
+  "web",
+  "agent",
+];
 
 export const TAB_LABEL: Record<BottomTab, string> = {
-  build: "⚙ Console",
-  serial: "❯ Serial Monitor",
-  scope: "∿ Oscilloscope",
+  build: "Build",
+  serial: "Serial",
+  scope: "Scope",
   mqtt: "MQTT",
-  ws: "WebSocket",
+  ws: "WS",
   web: "Web",
-  agent: "Agent",
+  agent: "Assistant",
 };
 
+/** Thin separators after these tabs — the former group boundaries:
+ *  Build · Serial │ Scope │ MQTT · WS · Web │ Assistant */
+export const SEPARATOR_AFTER: ReadonlySet<BottomTab> = new Set([
+  "serial",
+  "scope",
+  "web",
+]);
+
+/** One rendered tab: everything the bar needs, decided here rather than in JSX. */
+export interface TabRowItem {
+  tab: BottomTab;
+  label: string;
+  active: boolean;
+  /** Unseen-content dot. Never on the active tab — you are looking at it. */
+  dot: boolean;
+  /** Count pill (e.g. build errors); null when absent or zero. */
+  badge: number | null;
+  separatorAfter: boolean;
+}
+
 /**
- * A group button shows an unseen dot iff it is NOT the active group and any
- * of its tabs is flagged unseen (D2: the active group never rolls up).
+ * The tab bar's whole view model, in render order. Unknown keys in `unseen`
+ * or `badges` are ignored — only BOTTOM_TABS members are rendered.
  */
-export function groupHasUnseen(
-  g: BottomGroup,
-  active: BottomGroup,
+export function tabRow(
+  active: BottomTab,
   unseen: Partial<Record<BottomTab, boolean>>,
-): boolean {
-  return g !== active && GROUP_TABS[g].some((t) => unseen[t]);
+  badges?: Partial<Record<BottomTab, number>>,
+): TabRowItem[] {
+  return BOTTOM_TABS.map((tab) => {
+    const n = badges?.[tab];
+    return {
+      tab,
+      label: TAB_LABEL[tab],
+      active: tab === active,
+      dot: !!unseen[tab] && tab !== active,
+      badge: n !== undefined && n > 0 ? n : null,
+      separatorAfter: SEPARATOR_AFTER.has(tab),
+    };
+  });
 }

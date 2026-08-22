@@ -1,94 +1,109 @@
 import { describe, expect, it } from "vitest";
 import {
-  BottomGroup,
-  BottomTab,
-  GROUP_LABEL,
-  GROUP_OF,
-  GROUP_TABS,
+  BOTTOM_TABS,
+  SEPARATOR_AFTER,
   TAB_LABEL,
-  groupHasUnseen,
+  tabRow,
+  type BottomTab,
 } from "../bottomTabs";
 
-const ALL_TABS = Object.keys(GROUP_OF) as BottomTab[];
-const ALL_GROUPS = Object.keys(GROUP_TABS) as BottomGroup[];
+const item = (row: ReturnType<typeof tabRow>, tab: BottomTab) => {
+  const found = row.find((i) => i.tab === tab);
+  if (!found) throw new Error(`no row item for ${tab}`);
+  return found;
+};
 
-describe("bottomTabs mapping consistency", () => {
-  it("every GROUP_TABS member maps back to its group via GROUP_OF", () => {
-    for (const g of ALL_GROUPS) {
-      for (const t of GROUP_TABS[g]) {
-        expect(GROUP_OF[t]).toBe(g);
-      }
+describe("BOTTOM_TABS / TAB_LABEL / SEPARATOR_AFTER", () => {
+  it("is exactly the seven tabs, in bench order", () => {
+    expect([...BOTTOM_TABS]).toEqual([
+      "build",
+      "serial",
+      "scope",
+      "mqtt",
+      "ws",
+      "web",
+      "agent",
+    ]);
+  });
+
+  it("labels cover every tab", () => {
+    for (const t of BOTTOM_TABS) expect(TAB_LABEL[t]).toBeTruthy();
+    expect(Object.keys(TAB_LABEL).sort()).toEqual([...BOTTOM_TABS].sort());
+  });
+
+  it("separators sit only after serial, scope and web", () => {
+    expect([...SEPARATOR_AFTER].sort()).toEqual(["scope", "serial", "web"]);
+    for (const t of BOTTOM_TABS) {
+      expect(SEPARATOR_AFTER.has(t)).toBe(
+        t === "serial" || t === "scope" || t === "web",
+      );
     }
-  });
-
-  it("every BottomTab appears exactly once across GROUP_TABS", () => {
-    const flat = ALL_GROUPS.flatMap((g) => GROUP_TABS[g]);
-    expect(flat.length).toBe(ALL_TABS.length);
-    expect(new Set(flat).size).toBe(flat.length);
-    expect([...flat].sort()).toEqual([...ALL_TABS].sort());
-  });
-
-  it("labels cover every group and every tab", () => {
-    for (const g of ALL_GROUPS) expect(GROUP_LABEL[g]).toBeTruthy();
-    for (const t of ALL_TABS) expect(TAB_LABEL[t]).toBeTruthy();
-  });
-
-  it("expected grouping (D1)", () => {
-    expect(GROUP_TABS.console).toEqual(["build"]);
-    expect(GROUP_TABS.debug).toEqual(["serial", "scope"]);
-    expect(GROUP_TABS.obs).toEqual(["mqtt", "ws", "web"]);
-    expect(GROUP_TABS.assistant).toEqual(["agent"]);
-  });
-
-  it("web tab label is 'Web'", () => {
-    expect(TAB_LABEL.web).toBe("Web");
   });
 });
 
-describe("groupHasUnseen (D2)", () => {
-  it("no unseen flags → no dots anywhere", () => {
-    for (const g of ALL_GROUPS) {
-      for (const active of ALL_GROUPS) {
-        expect(groupHasUnseen(g, active, {})).toBe(false);
-      }
+describe("tabRow", () => {
+  it("yields every tab in BOTTOM_TABS order with its label", () => {
+    const row = tabRow("build", {});
+    expect(row.map((i) => i.tab)).toEqual([...BOTTOM_TABS]);
+    expect(row.map((i) => i.label)).toEqual(
+      BOTTOM_TABS.map((t) => TAB_LABEL[t]),
+    );
+  });
+
+  it("marks exactly one item active — the one asked for", () => {
+    for (const active of BOTTOM_TABS) {
+      const row = tabRow(active, {});
+      expect(row.filter((i) => i.active).map((i) => i.tab)).toEqual([active]);
     }
   });
 
-  it("dot shows when any tab in an inactive group is unseen", () => {
-    expect(groupHasUnseen("debug", "console", { serial: true })).toBe(true);
-    expect(groupHasUnseen("debug", "console", { scope: true })).toBe(true);
-    expect(groupHasUnseen("debug", "obs", { serial: true, scope: true })).toBe(
-      true,
-    );
-    expect(groupHasUnseen("obs", "console", { ws: true })).toBe(true);
-    expect(groupHasUnseen("obs", "debug", { mqtt: true })).toBe(true);
-    expect(groupHasUnseen("console", "debug", { build: true })).toBe(true);
+  it("carries separatorAfter from SEPARATOR_AFTER", () => {
+    const row = tabRow("build", {});
+    expect(row.filter((i) => i.separatorAfter).map((i) => i.tab)).toEqual([
+      "serial",
+      "scope",
+      "web",
+    ]);
   });
 
-  it("the active group never rolls up, even with every tab unseen", () => {
-    const all: Partial<Record<BottomTab, boolean>> = {
-      build: true,
-      serial: true,
-      scope: true,
-      mqtt: true,
-      ws: true,
-    };
-    for (const g of ALL_GROUPS) {
-      expect(groupHasUnseen(g, g, all)).toBe(false);
-    }
+  it("dots flagged inactive tabs", () => {
+    const row = tabRow("build", { serial: true, mqtt: true });
+    expect(item(row, "serial").dot).toBe(true);
+    expect(item(row, "mqtt").dot).toBe(true);
+    expect(item(row, "scope").dot).toBe(false);
   });
 
-  it("unseen flags in other groups don't light this group", () => {
-    expect(groupHasUnseen("debug", "console", { mqtt: true, build: true })).toBe(
-      false,
-    );
-    expect(groupHasUnseen("obs", "console", { serial: true, scope: true })).toBe(
-      false,
-    );
+  it("never dots the active tab, even when flagged", () => {
+    const row = tabRow("serial", { serial: true, scope: true });
+    expect(item(row, "serial").dot).toBe(false);
+    expect(item(row, "scope").dot).toBe(true);
   });
 
-  it("false/undefined flags don't count", () => {
-    expect(groupHasUnseen("debug", "console", { serial: false })).toBe(false);
-    expect(groupHasUnseen("obs", "console", { mqtt: undefined })).toBe(false);
+  it("false/undefined unseen flags do not dot", () => {
+    const row = tabRow("build", { serial: false, scope: undefined });
+    expect(item(row, "serial").dot).toBe(false);
+    expect(item(row, "scope").dot).toBe(false);
+  });
+
+  it("badge is null without badges, null at 0, the number above 0", () => {
+    expect(item(tabRow("serial", {}), "build").badge).toBe(null);
+    expect(item(tabRow("serial", {}, {}), "build").badge).toBe(null);
+    expect(item(tabRow("serial", {}, { build: 0 }), "build").badge).toBe(null);
+    expect(item(tabRow("serial", {}, { build: 3 }), "build").badge).toBe(3);
+  });
+
+  it("badges the active tab too", () => {
+    expect(item(tabRow("build", {}, { build: 2 }), "build").badge).toBe(2);
+  });
+
+  it("ignores unknown keys in unseen and badges", () => {
+    const row = tabRow(
+      "build",
+      { nope: true } as Partial<Record<BottomTab, boolean>>,
+      { nope: 9 } as Partial<Record<BottomTab, number>>,
+    );
+    expect(row.map((i) => i.tab)).toEqual([...BOTTOM_TABS]);
+    expect(row.some((i) => i.dot)).toBe(false);
+    expect(row.every((i) => i.badge === null)).toBe(true);
   });
 });

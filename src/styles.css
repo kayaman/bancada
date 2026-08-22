@@ -606,53 +606,42 @@ body {
   vertical-align: 1px;
 }
 
-/* bottom-panel group row: panel-level tier (groups + maximize) over the
-   per-group sub-tab row — the sidebar's .side-groups/.panel-tabs pattern */
-.bottom-groups {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 6px 2px;
-  background: var(--bg-panel);
-}
-
-/* Emoji tab labels and the serial baud <select> nudge the sub-tab row's
-   natural height between 30 and 34px; pin it so switching groups never
-   moves the content edge. */
-.bottom .panel-tabs {
-  min-height: 34px;
-}
-
-.bottom-group-btn {
+/* The bottom panel's group row (.bottom-groups/.bottom-group-btn) and the
+   sub-tab row it sat above are gone: the panel is now one flat row of seven
+   tabs, with the old group boundaries drawn as .tab-sep hairlines. */
+.tab-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-strong);
+  margin: 0 4px;
   flex: none;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: var(--text-dim);
+}
+
+/* Count pill on a tab (build errors today) — sits before the unseen dot. */
+.tab-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 600;
+  background: var(--error);
+  color: var(--bg);
+}
+
+/* The row's content varies (dots, badges) but its height must not: pin it
+   here so the content edge never moves. No placeholder markup does this job. */
+.bottom-tabs {
+  min-height: 30px;
+}
+
+/* Baud + Start/Stop, above the serial Console. */
+.serial-toolbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
   padding: 4px 10px;
-  cursor: pointer;
-  font-size: 11px;
-  letter-spacing: 0.03em;
-  transition:
-    background var(--transition),
-    color var(--transition),
-    border-color var(--transition);
-}
-
-.bottom-group-btn:hover:not(.active) {
-  color: var(--text);
-  background: var(--bg-hover);
-}
-
-.bottom-group-btn.active {
-  color: var(--accent);
-  background: var(--bg-raised);
-  border-color: var(--border);
-}
-
-.bottom-group-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  border-bottom: 1px solid var(--border);
 }
 
 /* ---------- file tree ---------- */

@@ -58,15 +58,8 @@ import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
 import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
-import {
-  GROUP_LABEL,
-  GROUP_OF,
-  GROUP_TABS,
-  TAB_LABEL,
-  groupHasUnseen,
-  type BottomGroup,
-  type BottomTab,
-} from "./bottomTabs";
+import BottomTabBar from "./components/BottomTabBar";
+import { type BottomTab } from "./bottomTabs";
 
 type SideGroup = "software" | "hardware";
 type SoftwareTab = "files" | "libraries";
@@ -255,8 +248,7 @@ export default function App() {
   const recaptureAttemptRef = useRef(0);
   const recaptureTimerRef = useRef<number | undefined>(undefined);
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
-  // tab, cleared when that tab is opened; a group button carries the dot for
-  // its hidden tabs.
+  // tab, cleared when that tab is opened.
   const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
   const bottomTabRef = useRef<BottomTab>("build");
 
@@ -266,19 +258,9 @@ export default function App() {
   const [softwareTab, setSoftwareTab] = useState<SoftwareTab>("files");
   const [hardwareTab, setHardwareTab] = useState<HardwareTab>("fleet");
   const sideTab = sideGroup === "software" ? softwareTab : hardwareTab;
-  // Bottom panel hierarchy: Console | Debugging | Observability groups over
-  // per-group sub-tabs, same memory pattern as the sidebar.
-  const [bottomGroup, setBottomGroup] = useState<BottomGroup>("console");
-  const [debugTab, setDebugTab] = useState<"serial" | "scope">("serial");
-  const [obsTab, setObsTab] = useState<"mqtt" | "ws" | "web">("mqtt");
-  const bottomTab: BottomTab =
-    bottomGroup === "console"
-      ? "build"
-      : bottomGroup === "debug"
-        ? debugTab
-        : bottomGroup === "obs"
-          ? obsTab
-          : "agent";
+  // Bottom panel: one flat row of seven tabs (no groups, nothing to
+  // remember) — order and labels live in `./bottomTabs`.
+  const [bottomTab, setBottomTab] = useState<BottomTab>("build");
   // Bottom panel expanded over the whole main area (editor stays mounted).
   const [bottomMax, setBottomMax] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(() => {
@@ -391,13 +373,10 @@ export default function App() {
     api.ghAvailable().then(setGhOk).catch(() => setGhOk(false));
   }, []);
 
-  /** Open a bottom tab: routes to its group, remembers it there, mounts
-   *  live panels on first open. Every former setBottomTab caller uses this. */
+  /** Open a bottom tab, mounting its live panel on first open. Call this
+   *  rather than setBottomTab — the mount latches are the whole point. */
   const openBottomTab = useCallback((tab: BottomTab) => {
-    const g = GROUP_OF[tab];
-    setBottomGroup(g);
-    if (g === "debug") setDebugTab(tab as "serial" | "scope");
-    if (g === "obs") setObsTab(tab as "mqtt" | "ws" | "web");
+    setBottomTab(tab);
     if (tab === "scope") setScopeMounted(true);
     if (tab === "mqtt") setMqttMounted(true);
     if (tab === "ws") setWsMounted(true);
@@ -2339,60 +2318,21 @@ export default function App() {
             }}
           />
         )}
-        <div className="bottom-groups">
-          {(Object.keys(GROUP_TABS) as BottomGroup[]).map((g) => (
-            <button
-              key={g}
-              className={
-                bottomGroup === g
-                  ? "bottom-group-btn active"
-                  : "bottom-group-btn"
-              }
-              onClick={() =>
-                openBottomTab(
-                  g === "console"
-                    ? "build"
-                    : g === "debug"
-                      ? debugTab
-                      : g === "obs"
-                        ? obsTab
-                        : "agent",
-                )
-              }
-            >
-              {GROUP_LABEL[g]}
-              {groupHasUnseen(g, bottomGroup, unseen) && (
-                <span className="tab-dot">●</span>
-              )}
-            </button>
-          ))}
-          <div className="spacer" />
-          <button
-            className="btn small icon"
-            onClick={() => setBottomMax((m) => !m)}
-            title={bottomMax ? "Restore panel" : "Maximize panel"}
-          >
-            {bottomMax ? "❐" : "⛶"}
-          </button>
-        </div>
-        <div className="panel-tabs">
-          {/* Single-tab groups render an empty row: their one tab would
-              duplicate the group button directly above it. The row's
-              min-height keeps the header from jumping between groups. */}
-          {GROUP_TABS[bottomGroup].length > 1 &&
-            GROUP_TABS[bottomGroup].map((t) => (
-              <button
-                key={t}
-                className={bottomTab === t ? "tab active" : "tab"}
-                onClick={() => openBottomTab(t)}
-              >
-                {TAB_LABEL[t]}
-                {unseen[t] && <span className="tab-dot">●</span>}
-              </button>
-            ))}
-          <div className="spacer" />
-          {bottomTab === "serial" && (
-            <>
+        <BottomTabBar
+          active={bottomTab}
+          unseen={unseen}
+          onOpen={openBottomTab}
+          maximized={bottomMax}
+          onToggleMaximize={() => setBottomMax((m) => !m)}
+        />
+        {bottomTab === "build" && (
+          <Console lines={buildLines} onClear={() => setBuildLines([])} />
+        )}
+        {bottomTab === "serial" && (
+          <>
+            {/* Parked here until a SerialMonitor component (later task)
+                absorbs this toolbar together with the Console below it. */}
+            <div className="serial-toolbar">
               <select
                 className="select small"
                 value={baudrate}
@@ -2408,18 +2348,13 @@ export default function App() {
               <button className="btn small" onClick={toggleMonitor}>
                 {monitorOn ? "Stop" : "Start"}
               </button>
-            </>
-          )}
-        </div>
-        {bottomTab === "build" && (
-          <Console lines={buildLines} onClear={() => setBuildLines([])} />
-        )}
-        {bottomTab === "serial" && (
-          <Console
-            lines={serialLines}
-            onClear={() => setSerialLines([])}
-            onSend={(d) => api.monitorSend(d).catch((e) => notify(String(e), true))}
-          />
+            </div>
+            <Console
+              lines={serialLines}
+              onClear={() => setSerialLines([])}
+              onSend={(d) => api.monitorSend(d).catch((e) => notify(String(e), true))}
+            />
+          </>
         )}
         {mqttMounted && (
           <MqttPanel active={bottomTab === "mqtt"} notify={notify} />
