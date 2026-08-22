@@ -5,6 +5,11 @@
 // The ticker runs **only while something is running**. A 500 ms interval that
 // never stops would re-render the whole footer twice a second for the entire
 // life of the app, and at rest there is nothing on the line that changes.
+//
+// Because this is the only moving clock, the *estimate* fraction is derived
+// here too rather than handed down: a parent-computed fraction would be
+// frozen at whatever it was when the activity started, since nothing above
+// re-renders on a timer. One clock, one place, no second interval upstairs.
 
 import { useEffect, useState } from "react";
 import {
@@ -13,6 +18,7 @@ import {
   progressMode,
   statusLineText,
 } from "../statusLine";
+import { estimateFraction } from "../buildHistory";
 
 interface Props {
   activity: Activity | null;
@@ -22,10 +28,9 @@ interface Props {
   busy: boolean;
   /** Parsed out of the uploader's own output; null when it says nothing. */
   measuredFraction: number | null;
-  /** How long this op took last time, for the "usually ~" hint. */
+  /** How long this op took last time. Drives both the "usually ~" hint and
+   *  the dashed estimate bar, whose fraction is computed below. */
   estimateMs: number | null;
-  /** Elapsed against that remembered duration; the dashed fallback. */
-  estimateFraction: number | null;
 }
 
 export default function StatusBar({
@@ -36,7 +41,6 @@ export default function StatusBar({
   busy,
   measuredFraction,
   estimateMs,
-  estimateFraction,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -64,7 +68,7 @@ export default function StatusBar({
   const { mode, fraction } = progressMode(
     busy,
     measuredFraction,
-    estimateFraction,
+    activity ? estimateFraction(now - activity.startedAt, estimateMs) : null,
   );
   const pct = Math.round(fraction * 100);
 

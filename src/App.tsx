@@ -50,7 +50,7 @@ import {
   reduceBuildLine,
   startProgress,
 } from "./buildProgress";
-import { estimateFraction, loadDurations, recordDuration } from "./buildHistory";
+import { loadDurations, recordDuration } from "./buildHistory";
 import { projectButtonLabel } from "./toolbarModel";
 import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
 import { AgentStore } from "./agent/agentStore";
@@ -112,6 +112,15 @@ const appendCapped = (prev: OutputLine[], l: OutputLine): OutputLine[] =>
   prev.length >= MAX_CONSOLE_LINES
     ? [...prev.slice(-TRIM_CONSOLE_LINES), l]
     : [...prev, l];
+
+/** One frame of grace on the toast-expiry timer — see the effect that uses
+ *  it for why firing early is the dangerous direction. */
+const EXPIRY_SLACK_MS = 16;
+
+/** Whether a status-bar activity belongs to the Assistant rather than the
+ *  user. The two must never close or clobber each other's work — see
+ *  `beginActivity`/`endActivity`. */
+const isAgentKey = (k: ActivityKey): boolean => k.startsWith("agent_");
 
 // One store for the whole app lifetime (not panel-owned): App-level
 // `agent://event` listeners feed it even before the Assistant panel has ever
@@ -393,12 +402,20 @@ export default function App() {
   // every push and every sweep. `nextExpiry` returning null (an empty stack,
   // or nothing but errors, which never expire) means arm nothing at all —
   // this must not become a poll that runs for the life of the app.
+  //
+  // The re-arm is what the slack protects. `expireToasts` keeps anything with
+  // `expiresAt > now` and returns the **same reference** when it dropped
+  // nothing, so React bails out of the render, this effect never re-runs, and
+  // the timer is never armed again — one tick landing a millisecond early
+  // would strand a live toast on screen for good. A frame of slack puts the
+  // callback safely past the deadline, so the sweep always removes something
+  // and always produces a new reference to re-arm from.
   useEffect(() => {
     const next = nextExpiry(toasts);
     if (next === null) return;
     const id = window.setTimeout(
       () => setToasts((s) => expireToasts(s, Date.now())),
-      Math.max(0, next - Date.now()),
+      Math.max(0, next - Date.now()) + EXPIRY_SLACK_MS,
     );
     return () => window.clearTimeout(id);
   }, [toasts]);
@@ -407,9 +424,17 @@ export default function App() {
    *  the build-progress parser, which then feeds off `onBuildLine`.
    *
    *  Callers must set `busy` (`setUserBusy`/`setAgentBuilding`) from the same
-   *  place: the bar draws no progress at all while `busy` is false. */
+   *  place: the bar draws no progress at all while `busy` is false.
+   *
+   *  Asymmetric by design. A user action taking the bar over is the user
+   *  asking for it, so it wins. An *agent event* arriving while the user's
+   *  own build is running is not — it would relabel a live bar "Assistant
+   *  compiling…" and reset a progress parser mid-flash — so it is dropped,
+   *  and `busy` keeps the bar honest either way. */
   const beginActivity = useCallback(
     (key: ActivityKey, label: string, op?: "compile" | "upload") => {
+      const cur = activityRef.current;
+      if (isAgentKey(key) && cur && !isAgentKey(cur.key)) return;
       const a: Activity = { key, label, startedAt: Date.now() };
       activityRef.current = a;
       setActivity(a);
@@ -422,34 +447,47 @@ export default function App() {
     [],
   );
 
-  /** Close out whatever `beginActivity` opened: bank the duration for the
-   *  next run's "usually ~" hint, leave the verdict on the bar, and clear the
-   *  clock and the bar.
+  /** Close out an activity `beginActivity` opened: bank the duration for the
+   *  next run's "usually ~" hint, leave the verdict on the bar, and stop the
+   *  clock.
    *
-   *  Call this from a `finally`. An IPC call that throws must not leave
-   *  "Compiling…" counting up forever. */
-  const endActivity = useCallback((ok: boolean, label: string) => {
-    const a = activityRef.current;
-    // Closing nothing reports nothing. A `done` event can arrive with no
-    // matching `started` — a straggler from a session that was already torn
-    // down clears the store's pid, so the pid guard upstream waves it
-    // through — and "✓ Assistant compile in 0:00" for a build nobody ran is
-    // worse than silence.
-    if (!a) return;
-    const now = Date.now();
-    const durationMs = now - a.startedAt;
-    const dir = sketchDirRef.current;
-    // The estimate is read back under `compile`/`upload` only, so those are
-    // the only keys worth banking. The agent's builds are deliberately left
-    // out: the "usually ~" hint should describe a run the user watched.
-    if (dir && (a.key === "compile" || a.key === "upload"))
-      recordDuration(window.localStorage, dir, a.key, durationMs, now);
-    setLastResult({ ok, label, durationMs, at: now });
-    setActivity(null);
-    activityRef.current = null;
-    progressRef.current = null;
-    setProgress(null);
-  }, []);
+   *  `expected` names the key (or keys) the caller is entitled to close, and
+   *  a mismatch is a silent no-op. Call this from a `finally`: an IPC call
+   *  that throws must not leave "Compiling…" counting up forever. */
+  const endActivity = useCallback(
+    (
+      expected: ActivityKey | readonly ActivityKey[],
+      ok: boolean,
+      label: string,
+    ) => {
+      const a = activityRef.current;
+      // Only the owner may close it. Two things go wrong without this check.
+      // Closing *nothing*: a straggler `verify_done` from a torn-down
+      // session finds the store's pid already cleared, so the guard upstream
+      // waves it through, and "✓ Assistant compile in 0:00" appears for a
+      // build nobody ran. Worse, closing *somebody else's*: that same
+      // straggler would end the USER's live compile — blanking the bar and
+      // banking its 300 ms as this project's remembered compile time, which
+      // then poisons every later "usually ~" estimate.
+      const owners = typeof expected === "string" ? [expected] : expected;
+      if (!a || !owners.includes(a.key)) return;
+      const now = Date.now();
+      const durationMs = now - a.startedAt;
+      const dir = sketchDirRef.current;
+      // The estimate is read back under `compile`/`upload` only, so those
+      // are the only keys worth banking. The agent's builds are deliberately
+      // left out: the "usually ~" hint should describe a run the user
+      // watched.
+      if (dir && (a.key === "compile" || a.key === "upload"))
+        recordDuration(window.localStorage, dir, a.key, durationMs, now);
+      setLastResult({ ok, label, durationMs, at: now });
+      setActivity(null);
+      activityRef.current = null;
+      progressRef.current = null;
+      setProgress(null);
+    },
+    [],
+  );
 
   /** Drop the clock and the bar without a verdict, for the paths that end an
    *  agent op without knowing how it went: a security kill, a torn-down
@@ -457,7 +495,8 @@ export default function App() {
    *  session" while the *user* has a compile running must not blank a bar
    *  that has nothing to do with the agent. */
   const clearAgentActivity = useCallback(() => {
-    if (!activityRef.current?.key.startsWith("agent_")) return;
+    const a = activityRef.current;
+    if (!a || !isAgentKey(a.key)) return;
     setActivity(null);
     activityRef.current = null;
     progressRef.current = null;
@@ -636,6 +675,20 @@ export default function App() {
         // the NEW session's file and stop its recording for good. If the
         // store still says "running", the close wasn't ours.
         if (agentStore.snapshot().status === "ended") {
+          // The child died. Any verify or flash it had in flight will never
+          // report back, so release the build gate and stop the clock here
+          // or the toolbar stays disabled and the bar reads "Assistant
+          // compiling… 14:07" for as long as the window is open. Both are
+          // scoped: `clearAgentActivity` leaves a user build alone, and the
+          // store's pid guard has already established this close was ours.
+          //
+          // `agentFlashingRef` is deliberately NOT cleared: an agent flash
+          // runs in the backend and can outlive the child that asked for
+          // it, and lifting the monitor-suppression while esptool still
+          // holds the port is the one failure this whole ladder exists to
+          // prevent. A new session clears it (`teardownAgentSession`).
+          setAgentBuilding(false);
+          clearAgentActivity();
           chatRecorder.record({ op: "closed", reason: p.reason, pid: p.pid });
           chatRecorder.stop();
         }
@@ -1271,7 +1324,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
-      endActivity(ok, ok ? "Compiled" : "Compile failed");
+      endActivity("compile", ok, ok ? "Compiled" : "Compile failed");
     }
   };
 
@@ -1371,7 +1424,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
-      endActivity(ok, ok ? "Flashed" : "Flash failed");
+      endActivity("upload", ok, ok ? "Flashed" : "Flash failed");
     }
   };
 
@@ -1416,7 +1469,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
-      endActivity(ok, ok ? "Synced" : "Sync failed");
+      endActivity("sync", ok, ok ? "Synced" : "Sync failed");
       refreshGitState(sketchDir);
     }
   };
@@ -1468,7 +1521,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
-      endActivity(ok, ok ? "Repo created" : "Repo creation failed");
+      endActivity("remote", ok, ok ? "Repo created" : "Repo creation failed");
       refreshGitState(sketchDir);
     }
   };
@@ -1488,7 +1541,7 @@ export default function App() {
       notify(String(e), true);
     } finally {
       setUserBusy(false);
-      endActivity(ok, ok ? "Remote set" : "Remote setup failed");
+      endActivity("remote", ok, ok ? "Remote set" : "Remote setup failed");
       refreshGitState(sketchDir);
     }
   };
@@ -1694,6 +1747,7 @@ export default function App() {
       } finally {
         setUserBusy(false);
         endActivity(
+          "firmware",
           ok,
           ok ? "Companion firmware flashed" : "Companion firmware failed",
         );
@@ -1760,7 +1814,12 @@ export default function App() {
       // wording, not whether the machine looks busy.
       if (ev.type === "verify_started")
         beginActivity("agent_compile", "Assistant compiling…");
-      else endActivity(ev.success, "Assistant compile");
+      else
+        endActivity(
+          ["agent_compile"],
+          ev.success === true,
+          "Assistant compile",
+        );
       return;
     }
     // An agent flash: disable the toolbar's build buttons like a verify,
@@ -1777,7 +1836,8 @@ export default function App() {
       // same parser reads its progress — hence the `"upload"` op.
       if (ev.type === "upload_started")
         beginActivity("agent_upload", "Assistant flashing…", "upload");
-      else endActivity(ev.success, "Assistant flash");
+      else
+        endActivity(["agent_upload"], ev.success === true, "Assistant flash");
       if (!flashing) openBottomTab("serial");
       return;
     }
@@ -2197,27 +2257,9 @@ export default function App() {
     [activity, sketchDir],
   );
 
-  /** `StatusBar` owns the clock behind its own text, but `estimateFraction`
-   *  is a prop it is handed, so the elapsed time behind *that* has to move
-   *  out here. Armed only while something is running and keyed on the
-   *  activity's identity rather than the object — the same rules the bar's
-   *  ticker follows, so the dashes and the clock advance together. At rest
-   *  no timer exists at all. */
-  const [statusNow, setStatusNow] = useState(() => Date.now());
-  const activityId = activity ? `${activity.key}:${activity.startedAt}` : null;
-  useEffect(() => {
-    if (activityId === null) return;
-    // Read the clock before arming: `statusNow` has been frozen since the
-    // last activity ended, so without this the first half-second of a build
-    // is measured from whenever the ticker last stopped.
-    setStatusNow(Date.now());
-    const id = window.setInterval(() => setStatusNow(Date.now()), 500);
-    return () => window.clearInterval(id);
-  }, [activityId]);
-
-  const estimateWidth = activity
-    ? estimateFraction(statusNow - activity.startedAt, estimate)
-    : null;
+  // No clock here: `StatusBar` owns the only ticking `now` in the app and
+  // derives the estimate fraction from it. A second interval up here would
+  // re-render the whole tree twice a second to move one dashed bar.
 
   // ---------- render ----------
 
@@ -2638,7 +2680,6 @@ export default function App() {
         busy={busy}
         measuredFraction={progress?.fraction ?? null}
         estimateMs={estimate}
-        estimateFraction={estimateWidth}
       />
     </div>
   );

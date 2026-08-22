@@ -24,7 +24,6 @@ const base = {
   busy: false,
   measuredFraction: null,
   estimateMs: null,
-  estimateFraction: null,
 };
 
 const compiling: Activity = {
@@ -152,14 +151,17 @@ describe("StatusBar — progress", () => {
     ).toBe("42%");
     m.unmount();
 
+    // No measured fraction, but a remembered duration: 7 s into a build that
+    // took 20 s last time. The component derives this itself now — the only
+    // inputs are the activity's `startedAt` and `estimateMs`.
     const e = render(
-      <StatusBar {...base} busy activity={compiling} estimateFraction={0.3} />,
+      <StatusBar {...base} busy activity={compiling} estimateMs={20_000} />,
     );
     expect(bar().getAttribute("aria-valuenow")).toBe(null);
     expect(bar().getAttribute("aria-valuetext")).toBe("estimated");
     expect(
       (bar().querySelector(".fill.estimate") as HTMLElement).style.width,
-    ).toBe("30%");
+    ).toBe("35%");
     e.unmount();
 
     render(<StatusBar {...base} busy activity={compiling} />);
@@ -171,9 +173,64 @@ describe("StatusBar — progress", () => {
     ).toBe("");
   });
 
+  it("widens the estimate bar on its own as the clock runs", () => {
+    // The point of deriving the fraction here rather than taking it as a
+    // prop: nothing above this component re-renders on a timer, so a
+    // parent-computed fraction would sit frozen at 35% for the whole build.
+    render(
+      <StatusBar {...base} busy activity={compiling} estimateMs={20_000} />,
+    );
+    const fill = () => bar().querySelector(".fill.estimate") as HTMLElement;
+    expect(fill().style.width).toBe("35%");
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(fill().style.width).toBe("60%");
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(fill().style.width).toBe("85%");
+  });
+
+  it("never lets the estimate bar claim the build has finished", () => {
+    // `estimateFraction` caps at 0.95: a build running long must not sit at
+    // 100% for minutes, which reads as a hang rather than as an overrun.
+    render(
+      <StatusBar {...base} busy activity={compiling} estimateMs={20_000} />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(
+      (bar().querySelector(".fill.estimate") as HTMLElement).style.width,
+    ).toBe("95%");
+  });
+
+  it("draws no estimate bar without a remembered duration", () => {
+    render(<StatusBar {...base} busy activity={compiling} />);
+    expect(bar().querySelector(".fill.indeterminate")).not.toBe(null);
+    expect(bar().getAttribute("aria-valuetext")).toBe(null);
+  });
+
   it("draws nothing while not busy, whatever fraction it is handed", () => {
     render(<StatusBar {...base} measuredFraction={0.9} />);
     expect(bar().querySelector(".fill.none")).not.toBe(null);
     expect(bar().getAttribute("aria-valuenow")).toBe(null);
+  });
+
+  it("prefers the measured fraction over the estimate when both exist", () => {
+    render(
+      <StatusBar
+        {...base}
+        busy
+        activity={compiling}
+        measuredFraction={0.42}
+        estimateMs={20_000}
+      />,
+    );
+    expect(bar().getAttribute("aria-valuenow")).toBe("42");
+    expect(bar().querySelector(".fill.estimate")).toBe(null);
   });
 });
