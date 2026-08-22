@@ -83,7 +83,8 @@ export default function ObsLog({
         m.topic === expanded.topic &&
         m.payload === expanded.payload));
 
-  // Autoscroll on new rows (Console.tsx precedent, opt-in via the toggle).
+  // Autoscroll on new rows (SerialMonitor.tsx precedent, opt-in via the
+  // toggle).
   const lastTs = rows.length > 0 ? rows[rows.length - 1].ts : 0;
   useEffect(() => {
     if (autoscroll) endRef.current?.scrollIntoView({ block: "end" });

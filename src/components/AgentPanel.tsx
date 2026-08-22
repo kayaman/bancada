@@ -183,8 +183,8 @@ export default function AgentPanel({
     onContinueChat(file);
   };
 
-  // ---------- autoscroll (Console.tsx pattern: stick to bottom unless the
-  // user has scrolled up to read something earlier) ----------
+  // ---------- autoscroll (SerialMonitor.tsx pattern: stick to bottom unless
+  // the user has scrolled up to read something earlier) ----------
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);

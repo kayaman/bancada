@@ -2038,17 +2038,6 @@ body {
   line-height: 1.5;
 }
 
-.console-line.stderr {
-  color: var(--warn);
-}
-
-.console-controls {
-  display: flex;
-  gap: 6px;
-  padding: 6px 10px;
-  border-top: 1px solid var(--border);
-}
-
 /* Build console. The summary strip keeps a fixed min-height whether or not it
    has a label, so the console does not jump when the first diagnostic lands. */
 .build-summary {

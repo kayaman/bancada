@@ -60,26 +60,81 @@ describe("serial port handoff", () => {
     expect(body).toMatch(/if \(!selectedPort\) \{[\s\S]*?scheduleRecapture\(\)/);
   });
 
+  /** `restartMonitorAt`, the one place that hands the port from one child of
+   *  our own making to the next — the baud picker and the drift effect both
+   *  go through it. */
+  const restartBody = (() => {
+    const start = appSource.indexOf("const restartMonitorAt");
+    expect(start, "restartMonitorAt not found in App.tsx").toBeGreaterThan(-1);
+    return appSource.slice(start, appSource.indexOf("\n  );", start));
+  })();
+
   it("a baud restart stops before it starts, and disarms the recapture ladder first", () => {
     // Two ways to get this wrong, both of which look like "the monitor is
     // just broken at the new rate": start before stop and the two children
     // fight over one port, or leave the ladder armed and the recapture takes
     // the port back at the *old* baud before the deliberate restart lands.
-    const start = appSource.indexOf("const changeBaud");
-    expect(start, "changeBaud not found in App.tsx").toBeGreaterThan(-1);
-    const body = appSource.slice(start, appSource.indexOf("\n  };", start));
-
-    const cleared = body.indexOf("monitorWantedRef.current = false");
-    const stopped = body.indexOf("api.stopMonitor()");
-    const opened = body.indexOf("api.startMonitor(");
-    expect(cleared, "changeBaud must disarm the ladder").toBeGreaterThan(-1);
-    expect(stopped, "changeBaud must stop the monitor").toBeGreaterThan(-1);
-    expect(opened, "changeBaud must re-open the port").toBeGreaterThan(-1);
+    const cleared = restartBody.indexOf("monitorWantedRef.current = false");
+    const stopped = restartBody.indexOf("api.stopMonitor()");
+    const opened = restartBody.indexOf("api.startMonitor(");
+    expect(cleared, "the restart must disarm the ladder").toBeGreaterThan(-1);
+    expect(stopped, "the restart must stop the monitor").toBeGreaterThan(-1);
+    expect(opened, "the restart must re-open the port").toBeGreaterThan(-1);
     expect(cleared, "the ladder must be disarmed before the stop").toBeLessThan(
       stopped,
     );
     expect(stopped, "the restart must stop before it starts").toBeLessThan(
       opened,
+    );
+    // And the picker goes through it rather than rolling its own pair.
+    const change = appSource.indexOf("const changeBaud");
+    expect(change, "changeBaud not found in App.tsx").toBeGreaterThan(-1);
+    const changeBody = appSource.slice(
+      change,
+      appSource.indexOf("\n  };", change),
+    );
+    expect(changeBody).toContain("restartMonitorAt(next)");
+    expect(changeBody).not.toContain("api.stopMonitor()");
+  });
+
+  it("re-arms after a restart whose re-open failed", () => {
+    // The stop landed, the start threw. The intent was cleared to let the
+    // port go and the ladder was disarmed with it, so nothing at all would
+    // bring the monitor back — the port comes home and no one is listening.
+    const caught = restartBody.indexOf("} catch (e) {");
+    expect(caught, "the restart must catch a failed re-open").toBeGreaterThan(
+      -1,
+    );
+    const tail = restartBody.slice(caught);
+    expect(tail, "a failed re-open must re-arm the standing request").toContain(
+      "monitorWantedRef.current = true",
+    );
+    expect(tail, "a failed re-open must re-arm the ladder").toContain(
+      "scheduleRecapture()",
+    );
+  });
+
+  it("admits it has given up instead of freezing the chip at 5/5", () => {
+    // The status chip is driven by the attempt counter and the standing
+    // request. Exhausting the ladder without clearing either leaves "retrying
+    // 5/5" on screen forever for a board that was unplugged and carried off.
+    const start = appSource.indexOf("const scheduleRecapture");
+    expect(start, "scheduleRecapture not found in App.tsx").toBeGreaterThan(-1);
+    const body = appSource.slice(start, appSource.indexOf("\n  }, [", start));
+
+    const give = body.indexOf("gave up re-opening the port");
+    expect(give, "giving up must say so in the log").toBeGreaterThan(-1);
+    const head = body.slice(0, give);
+    expect(head, "give-up is gated on the ladder being exhausted").toContain(
+      "MAX_RECAPTURE_ATTEMPTS",
+    );
+    expect(head, "give-up must clear the standing request").toContain(
+      "monitorWantedRef.current = false",
+    );
+    // A flash owning the port also stops the ladder, and that case must keep
+    // its intent: `requestCapture()` after the flash resumes from it.
+    expect(head, "a flash-deferred retry is not a give-up").toContain(
+      "!busyNow",
     );
   });
 

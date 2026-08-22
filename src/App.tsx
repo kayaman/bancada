@@ -355,7 +355,11 @@ export default function App() {
   /** The standing request for capture, as opposed to whether a child is
    *  currently alive. Cleared only by an *explicit* stop — the Stop
    *  button, the scope taking the port, the pre-flash handoff — so an
-   *  unexpected close can be told apart from one we asked for. */
+   *  unexpected close can be told apart from one we asked for.
+   *
+   *  Read during render by `serialConnection` (the Monitor's status chip), so
+   *  every transition that clears or re-arms it must also write state — the
+   *  chip will not re-render for a ref on its own. */
   const monitorWantedRef = useRef(false);
   /** Recapture attempts since the last successful start. */
   const recaptureAttemptRef = useRef(0);
@@ -368,6 +372,14 @@ export default function App() {
    *  already replaced — a baud restart, a recapture — and must be ignored,
    *  or it flips the toggle off underneath a live monitor. */
   const monitorSessionRef = useRef<number | null>(null);
+  /** The rate the live monitor child was actually opened at.
+   *
+   *  `baudrate` is *derived* — switching project, or saving a sketch whose
+   *  `Serial.begin` changed, moves it under a child that is still reading at
+   *  the old rate. This ref, not the picker, is the truth about the port: it
+   *  drives the toolbar while a monitor is up and the effect that re-opens
+   *  when the two drift apart. */
+  const openBaudRef = useRef<number | null>(null);
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
   // tab, cleared when that tab is opened.
   const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
@@ -771,9 +783,10 @@ export default function App() {
         // Adopt its session, or the very next close would look stale and be
         // dropped — leaving the toggle stuck on over a dead child.
         monitorSessionRef.current = p.session;
+        openBaudRef.current = p.baud;
         serialStore.push(
           "info",
-          `— monitor started by the assistant at ${p.baud} baud —`,
+          `— monitor started by the assistant at ${openBaudRef.current} baud —`,
           Date.now(),
         );
         setMonitorOn(true);
@@ -1027,6 +1040,9 @@ export default function App() {
     // A dir with no main `.ino` (or one that will not read) simply votes
     // with nothing; the picker falls back to the default.
     const disk = await api.readSketchFile(dir, rel).catch(() => "");
+    // The project can change while that read is in flight — a late answer for
+    // the sketch we just left must not set the picker for the one we opened.
+    if (sketchDirRef.current !== dir) return;
     const others = [...buffersRef.current.entries()]
       .filter(([path]) => path !== rel)
       .map(([, text]) => text);
@@ -1814,12 +1830,31 @@ export default function App() {
    * monitor dead after every flash.
    */
   const scheduleRecapture = useCallback(() => {
+    const busyNow = busyRef.current || agentFlashingRef.current;
     const plan = recapturePlan({
       wanted: monitorWantedRef.current,
-      busy: busyRef.current || agentFlashingRef.current,
+      busy: busyNow,
       attempt: recaptureAttemptRef.current,
     });
-    if (!plan.retry) return;
+    if (!plan.retry) {
+      // Exhausted, as opposed to *deferred*: a flash owning the port also
+      // stops the ladder, and that case must keep its standing request —
+      // the post-flash `requestCapture()` is what resumes from it. Only a
+      // genuine give-up clears the intent, and it has to say so: a chip
+      // frozen at "↻ 5/5" forever reads as "still trying" when the board has
+      // in fact been unplugged and carried off.
+      if (
+        monitorWantedRef.current &&
+        !busyNow &&
+        recaptureAttemptRef.current >= MAX_RECAPTURE_ATTEMPTS
+      ) {
+        monitorWantedRef.current = false;
+        recaptureAttemptRef.current = 0;
+        setRecaptureAttempt(0);
+        serialStore.push("info", "— gave up re-opening the port —", Date.now());
+      }
+      return;
+    }
     recaptureAttemptRef.current += 1;
     // Mirrored for the status chip. Once per rung of the ladder, so the cost
     // is a render per retry rather than one per serial line.
@@ -1852,13 +1887,14 @@ export default function App() {
         selectedPort,
         baudrate,
       );
+      openBaudRef.current = baudrate;
       setMonitorOn(true);
       // A marker rather than a wipe: the scrollback from before a reset is
       // usually the half you wanted to read (the stack trace, the last
       // print), so the log is never cleared on start.
       serialStore.push(
         "info",
-        `— monitor started at ${baudrate} baud —`,
+        `— monitor started at ${openBaudRef.current} baud —`,
         Date.now(),
       );
       // Capture is wanted from here until something explicitly stops it, and
@@ -1941,10 +1977,11 @@ export default function App() {
           selectedPort,
           baudrate,
         );
+        openBaudRef.current = baudrate;
         setMonitorOn(true);
         serialStore.push(
           "info",
-          `— monitor started at ${baudrate} baud —`,
+          `— monitor started at ${openBaudRef.current} baud —`,
           Date.now(),
         );
         openBottomTab("serial");
@@ -1953,6 +1990,64 @@ export default function App() {
       notify(String(e), true);
     }
   };
+
+  /** In-flight latch for the restart below. Two quick baud changes — or one
+   *  racing the drift effect — must not interleave their stop/start pairs
+   *  into two children fighting over one port. */
+  const restartingRef = useRef(false);
+
+  /**
+   * Re-open the live monitor at `next`.
+   *
+   * Shared by the baud picker and the drift effect, and the only place that
+   * hands the port over to a new child of our own making. Stop strictly
+   * before start, and disarm the recapture ladder before either — left armed
+   * it chases the port we are deliberately letting go and re-opens it at the
+   * *old* rate.
+   */
+  const restartMonitorAt = useCallback(
+    async (next: number) => {
+      // The busy guard lives here as well as in the two callers: they decide
+      // a beat before the port actually changes hands, and esptool must win
+      // every race. A restart skipped this way is not lost — the new rate
+      // applies at the post-flash start.
+      if (busyRef.current || agentFlashingRef.current) return;
+      if (!selectedPort || restartingRef.current) return;
+      restartingRef.current = true;
+      try {
+        monitorWantedRef.current = false;
+        window.clearTimeout(recaptureTimerRef.current);
+        await api.stopMonitor();
+        setMonitorOn(false);
+        // Between here and the start below `monitorSessionRef` still names
+        // the child we just killed, so its `serial://closed` is *accepted* —
+        // harmlessly: it writes the "closed" marker and finds the ladder
+        // already disarmed, so nothing chases the port out from under us.
+        monitorSessionRef.current = await api.startMonitor(selectedPort, next);
+        openBaudRef.current = next;
+        setMonitorOn(true);
+        monitorWantedRef.current = true;
+        recaptureAttemptRef.current = 0;
+        setRecaptureAttempt(0);
+        serialStore.push(
+          "info",
+          `— monitor restarted at ${openBaudRef.current} baud —`,
+          Date.now(),
+        );
+      } catch (e) {
+        // The stop landed and the re-open did not. Without re-arming here the
+        // standing request is gone *and* the ladder is disarmed, so nothing
+        // ever brings the monitor back — the user is left staring at a dead
+        // panel wondering why Start is the only thing that works.
+        monitorWantedRef.current = true;
+        scheduleRecapture();
+        notify(String(e), true);
+      } finally {
+        restartingRef.current = false;
+      }
+    },
+    [selectedPort, notify, scheduleRecapture],
+  );
 
   /**
    * Set (or, with `null`, clear) this sketch's baud override — and re-open
@@ -1968,38 +2063,30 @@ export default function App() {
     if (!sketchDir) return;
     setBaudOverrides(saveBaudOverride(localStorage, sketchDir, baud));
     const next = effectiveBaud(baud ?? undefined, sketchBaud).baud;
+    // `monitorOnRef`, not the render value: this handler is called from the
+    // panel's own event closure, which may predate the last close.
     if (
-      !monitorOn ||
+      !monitorOnRef.current ||
       !selectedPort ||
       busyRef.current ||
       agentFlashingRef.current
     )
       return;
-    try {
-      // The close this provokes is ours, not a dropout. Disarm the ladder
-      // first or it chases the port we are deliberately letting go — and
-      // re-opens it at the old rate.
-      monitorWantedRef.current = false;
-      window.clearTimeout(recaptureTimerRef.current);
-      await api.stopMonitor();
-      setMonitorOn(false);
-      // The old reader's `serial://closed` may still be in flight; it names
-      // the session we are leaving, so `onSerialClosed` drops it.
-      const session = await api.startMonitor(selectedPort, next);
-      monitorSessionRef.current = session;
-      setMonitorOn(true);
-      monitorWantedRef.current = true;
-      recaptureAttemptRef.current = 0;
-      setRecaptureAttempt(0);
-      serialStore.push(
-        "info",
-        `— monitor restarted at ${next} baud —`,
-        Date.now(),
-      );
-    } catch (e) {
-      notify(String(e), true);
-    }
+    await restartMonitorAt(next);
   };
+
+  // Baud drift. The picker's rate is *derived* — opening another project, or
+  // saving a sketch whose `Serial.begin` changed, moves it under a child that
+  // is still reading at the old rate. A monitor quietly decoding at the wrong
+  // rate is the most confusing failure this panel has (it looks like a broken
+  // board), so re-open rather than let the two disagree. `openBaudRef` is
+  // null only before the first start, which nothing has drifted from yet.
+  useEffect(() => {
+    if (!monitorOn || busyRef.current || agentFlashingRef.current) return;
+    if (openBaudRef.current === null || openBaudRef.current === baudrate)
+      return;
+    void restartMonitorAt(baudrate);
+  }, [monitorOn, baudrate, restartMonitorAt]);
 
   // ---------- scope ----------
 
@@ -2011,10 +2098,11 @@ export default function App() {
       return;
     }
     monitorSessionRef.current = await api.startMonitor(selectedPort, baudrate);
+    openBaudRef.current = baudrate;
     setMonitorOn(true);
     serialStore.push(
       "info",
-      `— monitor started at ${baudrate} baud —`,
+      `— monitor started at ${openBaudRef.current} baud —`,
       Date.now(),
     );
     openBottomTab("serial");
@@ -2969,7 +3057,7 @@ export default function App() {
           monitorOn={monitorOn}
           busy={busy}
           portLabel={selectedPort ? selectedPortName() : null}
-          baud={baudrate}
+          baud={monitorOn ? (openBaudRef.current ?? baudrate) : baudrate}
           baudSource={baudSource}
           sketchBaud={sketchBaud}
           onBaudChange={(b) => void changeBaud(b)}
