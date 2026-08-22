@@ -57,6 +57,7 @@ describe("parseDiagnosticLine", () => {
     ).toEqual({
       loc: { path: "/home/x/Blink/Blink.ino", line: 13, col: 3 },
       severity: "error",
+      fatal: false,
       message: "'foo' was not declared",
     });
   });
@@ -82,6 +83,7 @@ describe("parseDiagnosticLine", () => {
     ).toEqual({
       loc: { path: "/home/x/Broken/Broken.ino", line: 1, col: 10 },
       severity: "error",
+      fatal: true,
       message: "Nope.h: No such file or directory",
     });
   });
@@ -100,6 +102,7 @@ describe("parseDiagnosticLine", () => {
     ).toEqual({
       loc: { path: "/home/x/a.ino", line: 4, col: 2 },
       severity: "error",
+      fatal: false,
       message: "boom",
     });
   });
@@ -222,6 +225,7 @@ describe("parseBuildOutput — AVR_FATAL_INCLUDE", () => {
       message: "Nope.h: No such file or directory",
       loc: { path: `${AVR_FATAL_SKETCH_DIR}/Broken.ino`, line: 1, col: 10 },
     });
+    expect(m.diagnostics[0].fatal).toBe(true);
     expect(m.diagnostics[0].detail).toContain("compilation terminated.");
   });
 
@@ -439,6 +443,24 @@ describe("summaryLabel", () => {
     });
   });
 
+  it("lets the failure outrank warnings", () => {
+    expect(summaryLabel(emptySummary({ buildFailed: true, warnings: 1 }))).toEqual({
+      text: "✗ Build failed · 1 warning",
+      tone: "error",
+    });
+  });
+
+  it("lets the failure outrank a memory report it got far enough to print", () => {
+    const label = summaryLabel(
+      emptySummary({ buildFailed: true, warnings: 1, memory }),
+    );
+    expect(label?.text.startsWith("✗ Build failed")).toBe(true);
+    expect(label).toEqual({
+      text: "✗ Build failed · 1 warning · 234,512 bytes (17%) flash · 21,456 bytes (6%) RAM",
+      tone: "error",
+    });
+  });
+
   it("reports memory on success", () => {
     expect(summaryLabel(emptySummary({ memory }))).toEqual({
       text: "✓ Compile OK · 234,512 bytes (17%) flash · 21,456 bytes (6%) RAM",
@@ -530,6 +552,7 @@ describe("jumpTarget", () => {
   const local: Diagnostic = {
     id: 0,
     severity: "error",
+    fatal: false,
     loc: { path: "/home/x/Blink/Blink.ino", line: 3, col: 1 },
     message: "boom",
     context: [],

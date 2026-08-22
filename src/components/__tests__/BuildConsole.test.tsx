@@ -164,9 +164,34 @@ describe("BuildConsole", () => {
         onClear={noop}
       />,
     );
-    expect(screen.queryByRole("status")).toBeNull();
+    // The live region is mounted from the start (so a later summary is
+    // announced rather than silently appearing) but carries no text.
+    const strip = screen.getByRole("status");
+    expect(strip.className).toBe("build-summary");
+    expect(strip.querySelector(".build-summary-text")).toBeNull();
     expect(container.querySelector(".build-summary")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Clear" })).toBeTruthy();
+  });
+
+  it("still says `fatal error` on a diagnostic that stopped the compile", () => {
+    const { container } = render(
+      <BuildConsole
+        model={parseBuildOutput([
+          {
+            stream: "stderr",
+            line: "/home/x/Blink/Blink.ino:1:10: fatal error: Nope.h: No such file or directory",
+          },
+        ])}
+        sketchDir="/home/x/Blink"
+        onJump={noop}
+        onClear={noop}
+      />,
+    );
+    expect(rows(container)[0].textContent).toBe(
+      "Blink.ino:1:10: fatal error: Nope.h: No such file or directory",
+    );
+    // …while still counting and colouring as an error.
+    expect(rows(container)[0].className).toContain("error");
   });
 
   it("puts the rows in a log region", () => {

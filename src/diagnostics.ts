@@ -25,6 +25,9 @@ export interface SourceLoc {
 export interface Diagnostic {
   id: number;
   severity: Severity;
+  /** True when gcc said `fatal error` — folded into `severity: "error"` for
+   *  counting, but kept so the row can still say so. */
+  fatal: boolean;
   loc: SourceLoc | null;
   message: string;
   /** `In file included from …` / `…: In function 'f()':` lines above it. */
@@ -121,7 +124,12 @@ const num = (s: string): number => Number(s.replace(/,/g, ""));
 
 export function parseDiagnosticLine(
   text: string,
-): { loc: SourceLoc; severity: Severity; message: string } | null {
+): {
+  loc: SourceLoc;
+  severity: Severity;
+  fatal: boolean;
+  message: string;
+} | null {
   const m = DIAG.exec(stripAnsi(text));
   if (!m) return null;
   const raw = m[4];
@@ -131,8 +139,10 @@ export function parseDiagnosticLine(
       line: Number(m[2]),
       col: m[3] === undefined ? null : Number(m[3]),
     },
-    // A fatal error is still an error; nothing downstream distinguishes them.
+    // A fatal error is still an error as far as counting goes, but the word
+    // is the reason the rest of the file went unparsed — worth keeping.
     severity: raw === "fatal error" ? "error" : (raw as Severity),
+    fatal: raw === "fatal error",
     message: m[5],
   };
 }
@@ -176,18 +186,19 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
   };
 
   let openDiag: number | null = null;
-  // Indices into `rows` of context rows provisionally emitted with `of: -1`.
-  let pending: number[] = [];
+  // Context rows provisionally emitted with `of: -1`, with the stream they
+  // arrived on so demoting them back to `raw` does not invent one.
+  let pending: { at: number; stream: "stdout" | "stderr" }[] = [];
 
   /** Nothing claimed the context we buffered — it was just output. */
   const flushPending = () => {
-    for (const i of pending) {
-      const r = rows[i];
-      rows[i] = {
+    for (const p of pending) {
+      const r = rows[p.at];
+      rows[p.at] = {
         kind: "raw",
         index: r.index,
         text: r.text,
-        stream: "stderr",
+        stream: p.stream,
         tone: null,
       };
     }
@@ -198,20 +209,22 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
     index: number,
     text: string,
     severity: Severity,
+    fatal: boolean,
     loc: SourceLoc | null,
     message: string,
   ) => {
     const diag: Diagnostic = {
       id: diagnostics.length,
       severity,
+      fatal,
       loc,
       message,
-      context: pending.map((i) => rows[i].text),
+      context: pending.map((p) => rows[p.at].text),
       detail: [],
     };
-    for (const i of pending) {
-      const r = rows[i];
-      rows[i] = {
+    for (const p of pending) {
+      const r = rows[p.at];
+      rows[p.at] = {
         kind: "detail",
         index: r.index,
         text: r.text,
@@ -246,7 +259,7 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
 
     const diag = parseDiagnosticLine(text);
     if (diag) {
-      openNewDiag(index, text, diag.severity, diag.loc, diag.message);
+      openNewDiag(index, text, diag.severity, diag.fatal, diag.loc, diag.message);
       return;
     }
 
@@ -279,7 +292,7 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
     openDiag = null;
 
     if (isContext) {
-      pending.push(rows.length);
+      pending.push({ at: rows.length, stream: l.stream });
       rows.push({ kind: "detail", index, text, of: -1, tone: "note" });
       return;
     }
@@ -287,7 +300,7 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
     // ld speaks no severity keyword; treat its complaint as an error with no
     // usable location (the file it names is the object file, not the sketch).
     if (LINKER_ERROR.test(text)) {
-      openNewDiag(index, text, "error", null, text);
+      openNewDiag(index, text, "error", false, null, text);
       return;
     }
 
@@ -422,8 +435,13 @@ export function summaryLabel(
     const ok = s.memory ? ` · Compile OK · ${memoryPhrase(s.memory)}` : "";
     return { text: `✗ Upload failed${ok}`, tone: "error" };
   }
-  if (s.buildFailed && s.warnings === 0 && s.notes === 0)
-    return { text: "✗ Build failed", tone: "error" };
+  // A build that failed says so even when it also produced warnings or got
+  // far enough to report memory — the failure is the headline.
+  if (s.buildFailed) {
+    const warn = s.warnings > 0 ? ` · ${plural(s.warnings, "warning")}` : "";
+    const mem = s.memory ? ` · ${memoryPhrase(s.memory)}` : "";
+    return { text: `✗ Build failed${warn}${mem}`, tone: "error" };
+  }
   if (s.memory) {
     const warn = s.warnings > 0 ? ` · ${plural(s.warnings, "warning")}` : "";
     return {

@@ -2220,6 +2220,7 @@ body {
 
 /* ---------- scope ---------- */
 
+/* Also the build console's "errors only" toggle. */
 .btn.toggled {
   border-color: var(--accent);
   color: var(--accent);

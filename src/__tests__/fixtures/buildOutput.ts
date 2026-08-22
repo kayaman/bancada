@@ -32,7 +32,10 @@
 //
 // Sketch sources live in the capture scratch dir (not checked in); the
 // absolute paths below are the ones gcc reported, because arduino-cli injects
-// `#line N "<abs>/Sketch.ino"` into the merged .ino.cpp.
+// `#line N "<abs>/Sketch.ino"` into the merged .ino.cpp. That
+// `/tmp/claude-…/<uuid>/scratchpad` prefix is a dead scratch directory — it is
+// kept verbatim precisely because gcc printed it; do not "fix" it to a real
+// path or the capture stops being a capture.
 
 import type { OutputLine } from "../../api";
 
@@ -134,4 +137,3 @@ const SCRATCH =
 export const AVR_ERRORS_SKETCH_DIR = `${SCRATCH}/BrokenNoInc`;
 export const AVR_FATAL_SKETCH_DIR = `${SCRATCH}/Broken`;
 export const ESP32_SKETCH_DIR = `${SCRATCH}/Chain`;
-export const LINKER_SKETCH_DIR = `${SCRATCH}/Linker`;

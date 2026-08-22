@@ -24,7 +24,9 @@ interface BuildConsoleProps {
 function diagText(d: Diagnostic, displayPath: string): string {
   if (!d.loc) return d.message;
   const col = d.loc.col === null ? "" : `:${d.loc.col}`;
-  return `${displayPath}:${d.loc.line}${col}: ${d.severity}: ${d.message}`;
+  // `fatal error` is why nothing after it was compiled; do not flatten it.
+  const sev = d.fatal ? "fatal error" : d.severity;
+  return `${displayPath}:${d.loc.line}${col}: ${sev}: ${d.message}`;
 }
 
 /**
@@ -54,12 +56,10 @@ export default function BuildConsole({
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [model.rows]);
 
-  // Release the filter once the errors are gone, or fixing the code would
-  // leave an almost-empty console behind a toggle that is now disabled and so
-  // cannot be un-pressed.
-  useEffect(() => {
-    if (model.summary.errors === 0) setErrorsOnly(false);
-  }, [model.summary.errors]);
+  // Derived, not stored: with nothing to filter to the toggle goes inert, so
+  // fixing the code cannot strand an almost-empty console behind a control
+  // that is now disabled and can no longer be un-pressed.
+  const showErrorsOnly = errorsOnly && model.summary.errors > 0;
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -123,24 +123,27 @@ export default function BuildConsole({
   return (
     <div className="console">
       {/* Always rendered, with or without a label, so the bar does not jump
-          when the first diagnostic arrives (height is pinned in CSS). */}
+          when the first diagnostic arrives (height is pinned in CSS) — and so
+          the live region exists BEFORE the first summary, which is what makes
+          a screen reader announce it rather than silently gain a landmark. */}
       <div
         className={label ? `build-summary ${label.tone}` : "build-summary"}
-        role={label ? "status" : undefined}
-        aria-live={label ? "polite" : undefined}
+        role="status"
+        aria-live="polite"
       >
-        {label && <span>{label.text}</span>}
+        {label && <span className="build-summary-text">{label.text}</span>}
         <div className="spacer" />
         <button
-          className={errorsOnly ? "btn small toggled" : "btn small"}
-          aria-pressed={errorsOnly}
+          type="button"
+          className={showErrorsOnly ? "btn small toggled" : "btn small"}
+          aria-pressed={showErrorsOnly}
           disabled={model.summary.errors === 0}
           title="Show only errors"
           onClick={() => setErrorsOnly((v) => !v)}
         >
           errors only
         </button>
-        <button className="btn small" onClick={onClear}>
+        <button type="button" className="btn small" onClick={onClear}>
           Clear
         </button>
       </div>
@@ -151,7 +154,7 @@ export default function BuildConsole({
         ref={scrollRef}
         onScroll={onScroll}
       >
-        {filterRows(model.rows, errorsOnly).map(renderRow)}
+        {filterRows(model.rows, showErrorsOnly).map(renderRow)}
       </div>
     </div>
   );
