@@ -132,6 +132,12 @@ const appendManyCapped = (
     : next;
 };
 
+/** CodeMirror 6 splits incoming text on `/\r\n?|\n/` and joins it back with
+ *  `\n`, so a CRLF file's document is *shorter* than the string handed to it.
+ *  Comparing the editor against a normalised copy is what lets a diagnostic
+ *  jump into a CRLF sketch at all. */
+const normalizeEol = (s: string) => s.replace(/\r\n?/g, "\n");
+
 /** One frame of grace on the toast-expiry timer — see the effect that uses
  *  it for why firing early is the dangerous direction. */
 const EXPIRY_SLACK_MS = 16;
@@ -209,10 +215,17 @@ export default function App() {
     setShowingUsage(pane === "usage");
     setProfileForm(profileMode);
   };
-  /** True when the editor itself is what the editor area shows. Every form
-   *  above *replaces* CodeMirror (see the ternary in the render), so while
-   *  one is up `editorRef.current` is null and a parked diagnostic jump has
-   *  to wait for this to flip back — hence its place in that effect's deps.
+  /** Uncover the editor without touching the profile strip. `ProfileInit`
+   *  renders under the toolbar, not in the editor area, so it is not in the
+   *  way of anything — and dropping a half-filled profile form to show a
+   *  file would be a surprising thing to do to the user. Expressed through
+   *  `showPane` so the pane list stays in exactly one place. */
+  const showEditor = () => showPane(null, profileForm);
+  /** True when the editor itself is what the editor area shows. Each of the
+   *  four panes `showPane` opens *replaces* CodeMirror (see the ternary in
+   *  the render), so while one is up `editorRef.current` is null and a
+   *  parked diagnostic jump has to wait for this to flip back — hence its
+   *  place in that effect's deps.
    *  (`renamingProject` with no `sketchDir` renders the editor regardless,
    *  but a jump needs a sketchDir to be requested at all, so that corner
    *  cannot strand one.) */
@@ -300,8 +313,9 @@ export default function App() {
   /** Build lines that arrived this frame, waiting for the scheduled flush.
    *  Written from the `[]`-deps `onBuildLine` subscription, so a ref. */
   const pendingBuildRef = useRef<OutputLine[]>([]);
-  /** Handle of the scheduled flush, or null when none is pending. */
-  const buildFlushRef = useRef<number | null>(null);
+  /** Whether a flush is already booked for this frame. A plain sentinel: the
+   *  flush is never cancelled, so the rAF handle would be dead weight. */
+  const buildFlushScheduledRef = useRef(false);
   const [serialLines, setSerialLines] = useState<OutputLine[]>([]);
   const [monitorOn, setMonitorOn] = useState(false);
   const [baudrate, setBaudrate] = useState(115200);
@@ -325,10 +339,12 @@ export default function App() {
    *  report and summary. Memoised because the badge, the tab bar and the
    *  console all read it, and the parse walks the whole buffer. */
   const buildModel = useMemo(() => parseBuildOutput(buildLines), [buildLines]);
-  /** Sketch-relative paths the editor can actually open. Diagnostics naming
-   *  anything else (a core header, a library) stay unclickable. */
+  /** Sketch-relative paths the editor can actually open — files only, since
+   *  `files` lists directories too and the editor cannot open one.
+   *  Diagnostics naming anything else (a core header, a library) stay
+   *  unclickable. */
   const knownFiles = useMemo(
-    () => new Set(files.map((f) => f.rel_path)),
+    () => new Set(files.filter((f) => !f.is_dir).map((f) => f.rel_path)),
     [files],
   );
 
@@ -659,20 +675,17 @@ export default function App() {
         // whole buffer for the console and the badge. One state write per
         // frame keeps that parse off the critical path.
         pendingBuildRef.current.push(l);
-        if (buildFlushRef.current === null) {
-          const flush = () => {
+        if (!buildFlushScheduledRef.current) {
+          buildFlushScheduledRef.current = true;
+          // Bare rAF, here and in the pending-goto effect: this code only
+          // ever runs in the webview, which has it. No fallback to keep in
+          // step with it.
+          requestAnimationFrame(() => {
             const batch = pendingBuildRef.current;
             pendingBuildRef.current = [];
-            buildFlushRef.current = null;
+            buildFlushScheduledRef.current = false;
             setBuildLines((prev) => appendManyCapped(prev, batch));
-          };
-          // rAF is there in the webview (and in jsdom); the timer is a
-          // defensive fallback only, so an environment without it drains
-          // the queue instead of swallowing the console entirely.
-          buildFlushRef.current =
-            typeof requestAnimationFrame === "function"
-              ? requestAnimationFrame(flush)
-              : window.setTimeout(flush, 16);
+          });
         }
         if (bottomTabRef.current !== "build")
           setUnseen((u) => (u.build ? u : { ...u, build: true }));
@@ -973,6 +986,11 @@ export default function App() {
       const profPort = prof ? yaml.profiles?.[prof]?.port : undefined;
       if (profPort) setSelectedPort(profPort);
       buffersRef.current = new Map();
+      // Placed with the editor reset, after the awaits: a project that fails
+      // to open leaves the current one — and any jump parked against it —
+      // alone. Past this point the old file is gone, and a target kept here
+      // would fire at the first same-named file the new project opens.
+      pendingGotoRef.current = null;
       setDirtyFiles(new Set());
       setOpenFile(null);
       setContent("");
@@ -1006,8 +1024,17 @@ export default function App() {
   /** Central file-open routine — every path that puts a file in the editor
    *  (tree click, create, delete's main.ino fallback, tab select, initial
    *  sketch load) funnels through here, so this is also the one place that
-   *  opens its tab and disarms any pending close-confirmation. */
-  const openFileInEditor = async (dir: string, relPath: string) => {
+   *  opens its tab and disarms any pending close-confirmation.
+   *
+   *  Returns whether the file actually reached the editor. Every caller but
+   *  `jumpToDiagnostic` ignores it — the failure is already a toast — but a
+   *  parked jump has to know, and it cannot ask `openFileRef`: React has not
+   *  re-rendered by the time this promise resolves, so that mirror still
+   *  holds the previous file. */
+  const openFileInEditor = async (
+    dir: string,
+    relPath: string,
+  ): Promise<boolean> => {
     try {
       const text =
         buffersRef.current.get(relPath) ??
@@ -1020,42 +1047,61 @@ export default function App() {
       useExplorerStore.getState().expandTo(relPath);
       useExplorerStore.getState().select(relPath);
       api.setLastSketch(dir, relPath).catch(() => {});
+      return true;
     } catch (e) {
       notify(String(e), true);
+      return false;
     }
   };
 
   /** A click on a compiler diagnostic: show the file, put the cursor on the
    *  offending line. The file is often not the one on screen, and opening it
    *  is async, so the request is parked in `pendingGotoRef` and applied by
-   *  the effect below once the editor is showing that document. */
+   *  the effect below once the editor is showing that document.
+   *
+   *  The parked target is the *token* for that request: every site that acts
+   *  on it checks identity first and clears the ref before moving the
+   *  cursor, so a second click always supersedes the first and no target is
+   *  ever consumed twice. */
   const jumpToDiagnostic = async (t: JumpTarget) => {
     if (!sketchDir) return;
-    // The user asked to see code, so retire whatever form owns the editor
-    // area (New/Duplicate/Rename project, the usage dashboard, the profile
-    // row) — otherwise the jump lands behind it, invisibly.
-    showPane(null);
+    // The user asked to see code, so retire whatever form is covering the
+    // editor area (New/Duplicate/Rename project, the usage dashboard) —
+    // otherwise the jump lands behind it, invisibly. The profile strip is
+    // left alone; it covers nothing.
+    showEditor();
     pendingGotoRef.current = t;
     const view = editorRef.current?.view;
     if (t.rel === openFileRef.current && view) {
       // Already the open document: nothing will re-render, so no effect
       // would fire. Jump now.
-      gotoLine(view, t.line, t.col);
       pendingGotoRef.current = null;
+      gotoLine(view, t.line, t.col);
       return;
     }
-    await openFileInEditor(sketchDir, t.rel);
+    const opened = await openFileInEditor(sketchDir, t.rel);
+    // A diagnostic can name a file that has since been renamed or deleted.
+    // Left parked, that target would fire at whatever file next happens to
+    // open under that name. Only unpark our own: an overlapping second click
+    // has already replaced it, and its open is still in flight.
+    if (!opened && pendingGotoRef.current === t) pendingGotoRef.current = null;
   };
 
   /** Applies a parked jump once the editor is actually showing the file.
    *
    *  Child effects run before parent effects, so by the time this runs
    *  CodeMirror has usually already applied the new `value` — but "usually"
-   *  is not "always", so the document is checked against `content` before
-   *  the cursor moves. A mismatch retries on the next frame; if that still
-   *  disagrees the jump is dropped. Turning "wrong document" into "no jump"
-   *  is the safe direction: a wrong jump would silently point the user at an
-   *  unrelated line.
+   *  is not "always". The guard is therefore an equality test on the whole
+   *  document (cheap at sketch sizes; the length compare in front of it is
+   *  the fast reject) against an EOL-normalised copy of `content`, so a
+   *  same-length *different* document cannot pass. A mismatch retries on the
+   *  next frame; if that still disagrees the jump is dropped. Turning "wrong
+   *  document" into "no jump" is the safe direction: a wrong jump would
+   *  silently point the user at an unrelated line.
+   *
+   *  Both paths claim the target — identity-check, then clear — before
+   *  moving the cursor, so a jump requested in between supersedes rather
+   *  than duplicates this one.
    *
    *  `editorShowing` is a dependency because of the one case where neither
    *  of the other two changes: a form was covering the editor and the
@@ -1066,20 +1112,19 @@ export default function App() {
     const p = pendingGotoRef.current;
     const v = editorRef.current?.view;
     if (!p || !v || p.rel !== openFile) return;
-    if (v.state.doc.length === content.length) {
-      gotoLine(v, p.line, p.col);
+    const want = normalizeEol(content);
+    const shows = (d: { length: number; toString(): string }) =>
+      d.length === want.length && d.toString() === want;
+    if (shows(v.state.doc)) {
       pendingGotoRef.current = null;
+      gotoLine(v, p.line, p.col);
       return;
     }
     requestAnimationFrame(() => {
       const v2 = editorRef.current?.view;
-      if (
-        v2 &&
-        pendingGotoRef.current === p &&
-        v2.state.doc.length === content.length
-      ) {
-        gotoLine(v2, p.line, p.col);
+      if (v2 && pendingGotoRef.current === p && shows(v2.state.doc)) {
         pendingGotoRef.current = null;
+        gotoLine(v2, p.line, p.col);
       }
     });
   }, [openFile, content, editorShowing]);

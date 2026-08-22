@@ -50,6 +50,30 @@ describe("App.tsx wiring: the build console, the badge and the editor jump", () 
     expect(el).toContain("badges={{ build: badgeCount(buildModel.summary) }}");
   });
 
+  it("never lets a parked jump outlive its file or its project", () => {
+    // Three ways a target could fire at the wrong file, all pinned here
+    // because the effect that consumes it cannot be reached from a unit test.
+    const jump = between("const jumpToDiagnostic", "/** Applies a parked jump");
+    // (a) the open failed — the file was renamed or deleted since the build.
+    expect(jump).toContain(
+      "if (!opened && pendingGotoRef.current === t) pendingGotoRef.current = null;",
+    );
+    // (b) a second click supersedes the first rather than being clobbered.
+    expect(jump).toContain("pendingGotoRef.current === t");
+    // (c) a project switch drops it — otherwise it fires at the first
+    //     same-named file the next project opens.
+    const load = between("const loadSketch = async", "notify(`Opened ${dir}`)");
+    expect(load).toContain("pendingGotoRef.current = null;");
+  });
+
+  it("shows the editor without discarding a half-filled profile form", () => {
+    // ProfileInit is a strip under the toolbar, not an editor-area pane, so
+    // uncovering the editor must not reset it.
+    const jump = between("const jumpToDiagnostic", "/** Applies a parked jump");
+    expect(jump).toContain("showEditor();");
+    expect(jump).not.toContain("showPane(null)");
+  });
+
   it("clears the console when the assistant starts a build of its own", () => {
     // Agent parity: `verify()`/`upload()` reset `buildLines`, so the agent's
     // equivalents must too — otherwise the badge keeps reporting the errors
