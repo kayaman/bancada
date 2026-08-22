@@ -2060,7 +2060,15 @@ body {
 
 /* ---------- status bar ---------- */
 
+/* The bar is a positioning context and a fixed 26px tall so the progress
+   hairline can hang off its top edge without ever moving the text below it:
+   a bar that only exists during a build would shove the line two pixels on
+   every compile. */
 .statusbar {
+  position: relative;
+  height: 26px;
+  display: flex;
+  align-items: center;
   padding: 4px 12px;
   font-size: 12px;
   background: var(--bg-panel);
@@ -2070,6 +2078,51 @@ body {
 
 .statusbar.error {
   color: var(--error);
+}
+
+/* Always rendered, transparent at rest — see `StatusBar.tsx`. */
+.statusbar-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: transparent;
+}
+
+.statusbar-progress .fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+
+/* Dashed, because the number is a guess from one remembered run: it must not
+   look as authoritative as a fraction parsed out of esptool's own output. */
+.statusbar-progress .fill.estimate {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--accent-dim) 0 6px,
+    transparent 6px 10px
+  );
+}
+
+.statusbar-progress .fill.indeterminate {
+  width: 30%;
+  animation: statusbar-slide 1.2s ease-in-out infinite alternate;
+}
+
+.statusbar-progress .fill.none {
+  width: 0;
+}
+
+@keyframes statusbar-slide {
+  from {
+    margin-left: 0;
+  }
+  to {
+    margin-left: 70%;
+  }
 }
 
 .empty-hint {
@@ -2480,6 +2533,15 @@ body {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+
+  /* The blanket rule above would leave the sliding bar frozen at 30% — an
+     indeterminate bar that reads as a stalled measured one. Fill the track
+     and dim it instead: still visibly "busy", with nothing in motion. */
+  .statusbar-progress .fill.indeterminate {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
 }
 
 /* ---------- assistant: turn dividers, summary view, markdown ---------- */
@@ -2861,4 +2923,51 @@ body {
   display: flex;
   min-width: 0;
   border-top: 1px solid var(--border);
+}
+
+/* ---------- toasts ---------- */
+
+/* The status bar is one slot, so a second message erases the first. The stack
+   sits just above it in the same corner — the eye is already there — and is
+   fixed rather than in flow so nothing it says can resize the bench. */
+.toast-stack {
+  position: fixed;
+  right: 12px;
+  bottom: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 50;
+  max-width: 380px;
+}
+
+/* Kind is carried by the left stripe alone: colouring the whole card would
+   put an error's red under its own text. */
+.toast {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
+}
+
+.toast-success {
+  border-left-color: var(--success);
+}
+
+.toast-error {
+  border-left-color: var(--error);
+}
+
+.toast-count {
+  color: var(--text-dim);
+}
+
+.toast-close {
+  margin-left: auto;
 }
