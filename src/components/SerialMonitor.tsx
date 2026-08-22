@@ -93,8 +93,10 @@ export default function SerialMonitor({
   notify,
   storage,
 }: Props) {
-  const store_ = storage ?? window.localStorage;
-  const [prefs, setPrefs] = useState<SerialUiPrefs>(() => loadUiPrefs(store_));
+  const prefsStorage = storage ?? window.localStorage;
+  const [prefs, setPrefs] = useState<SerialUiPrefs>(() =>
+    loadUiPrefs(prefsStorage),
+  );
   const [filter, setFilter] = useState("");
   const [tx, setTx] = useState("");
   const [history, setHistory] = useState<TxHistory>(emptyHistory);
@@ -107,6 +109,9 @@ export default function SerialMonitor({
   const lastVersionRef = useRef(-1);
   const scrollTopRef = useRef(0);
   const rafRef = useRef<number | null>(null);
+  /** A send is awaiting the backend. A ref, not state: the guard must be
+   *  true for the *next* keydown in the same tick, before any re-render. */
+  const sendingRef = useRef(false);
 
   /** Persist alongside every change — the prefs' whole point is surviving a
    *  relaunch, and a "save" button for three toggles would be absurd. The
@@ -114,7 +119,7 @@ export default function SerialMonitor({
    *  stay pure (React may call it twice). */
   const updatePrefs = (patch: Partial<SerialUiPrefs>) => {
     const next = { ...prefs, ...patch };
-    saveUiPrefs(store_, next);
+    saveUiPrefs(prefsStorage, next);
     setPrefs(next);
   };
 
@@ -122,6 +127,9 @@ export default function SerialMonitor({
 
   useEffect(() => {
     if (!active) return;
+    // A swapped store starts from an unknown version, so force the first
+    // tick to publish it rather than comparing against the old one's.
+    lastVersionRef.current = -1;
     const iv = window.setInterval(() => {
       const el = logRef.current;
       // No ResizeObserver in jsdom (and none needed before first paint):
@@ -135,8 +143,7 @@ export default function SerialMonitor({
       }
     }, 100);
     return () => window.clearInterval(iv);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
+  }, [active, store]);
 
   // Measured height, when the browser will tell us properly.
   useEffect(() => {
@@ -193,7 +200,10 @@ export default function SerialMonitor({
 
   const doSend = async () => {
     const line = tx;
-    if (!monitorOn || !line) return;
+    // Leaning on Enter while a write is slow would queue three copies of the
+    // same command at a board still chewing the first.
+    if (!monitorOn || !line || sendingRef.current) return;
+    sendingRef.current = true;
     try {
       await onSend(withLineEnding(line, prefs.lineEnding));
       // Echo only what was actually accepted, and only the typed text — the
@@ -203,6 +213,8 @@ export default function SerialMonitor({
       setTx("");
     } catch (e) {
       notify(String(e), true);
+    } finally {
+      sendingRef.current = false;
     }
   };
 

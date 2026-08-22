@@ -85,7 +85,10 @@ describe("detectBaud", () => {
 
   it("accepts two files that agree", () => {
     expect(
-      detectBaud(["void setup(){Serial.begin(230400);}", "// Serial.begin(230400)"]),
+      detectBaud([
+        "void setup(){Serial.begin(230400);}",
+        "void reopen(){Serial.begin(230400);}",
+      ]),
     ).toBe(230400);
   });
 
@@ -125,6 +128,18 @@ describe("detectBaud", () => {
         "void setup(){Serial.begin(BAUD);}",
       ]),
     ).toBe(500000);
+  });
+
+  it("resolves a constexpr", () => {
+    expect(
+      detectBaud(["constexpr uint32_t BAUD = 921600;\nSerial.begin(BAUD);"]),
+    ).toBe(921600);
+  });
+
+  it("resolves a parenthesised define", () => {
+    expect(detectBaud(["#define BAUD (115200)\nSerial.begin(BAUD);"])).toBe(
+      115200,
+    );
   });
 
   it("gives up on an identifier it cannot resolve", () => {

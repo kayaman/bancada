@@ -4,7 +4,13 @@
 //! Events emitted to the frontend:
 //!   "build://line"      { stream: "stdout"|"stderr", line: string }
 //!   "serial://line"     { stream, line }
-//!   "serial://closed"   {}
+//!   "serial://closed"   { session }  (the monitor child that closed; ignore
+//!                       one naming a session you have left)
+//!   "serial://started"  { port, baud, session }  (the backend started the
+//!                       monitor itself — the agent's `serial_read`
+//!                       auto-start; `session` comes from the same counter
+//!                       `start_monitor` returns, so the two paths cannot
+//!                       hand out colliding ids)
 //!   "ports://changed"   {}  (the set of serial ports on the machine changed)
 //!   "agent://event"     the claude CLI's own stream-json event object,
 //!                       verbatim, plus these synthetic ones the host adds:

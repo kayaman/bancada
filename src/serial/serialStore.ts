@@ -38,8 +38,14 @@ export class SerialStore {
   private totalCount = 0;
   private droppedCount = 0;
   private pausedFlag = false;
-  /** The newest seq the frozen view may show, or `null` when running. */
-  private pauseSeq: number | null = null;
+  /** The rows the view is pinned to while paused, or `null` when running.
+   *  A *copy*, not a seq watermark: the ring keeps evicting behind a pause,
+   *  and a watermark view would empty out the very screen the user paused to
+   *  read. Bounded by the cap, so the copy costs at most one ring. */
+  private frozen: SerialEntry[] | null = null;
+  /** Pushes since the pause began — counted, not derived, because the rows
+   *  it counts may already be gone from the ring. */
+  private bufferedCount = 0;
   private memo: Memo | null = null;
 
   constructor(
@@ -81,6 +87,7 @@ export class SerialStore {
   push(stream: SerialStream, text: string, ts: number): void {
     this.rows.push({ seq: ++this.seq, ts, stream, text });
     this.totalCount++;
+    if (this.pausedFlag) this.bufferedCount++;
     if (this.rows.length > this.cap) {
       const cut = this.rows.length - this.trimTo;
       this.rows.splice(0, cut);
@@ -94,7 +101,8 @@ export class SerialStore {
   setPaused(p: boolean): void {
     if (p === this.pausedFlag) return;
     this.pausedFlag = p;
-    this.pauseSeq = p ? this.seq : null;
+    this.frozen = p ? this.rows.slice() : null;
+    this.bufferedCount = 0;
     this.ver++;
   }
 
@@ -105,7 +113,11 @@ export class SerialStore {
     this.seq = 0;
     this.totalCount = 0;
     this.droppedCount = 0;
-    if (this.pausedFlag) this.pauseSeq = 0;
+    // Clearing a frozen screen empties the frozen screen too, and restarts
+    // the buffered count — otherwise Resume would advertise lines the user
+    // just threw away.
+    if (this.pausedFlag) this.frozen = [];
+    this.bufferedCount = 0;
     this.memo = null;
     this.ver++;
   }
@@ -130,10 +142,7 @@ export class SerialStore {
     bufferedWhilePaused: number;
   } {
     const f = filter ?? "";
-    const visible =
-      this.pauseSeq === null
-        ? this.rows
-        : this.rows.filter((r) => r.seq <= this.pauseSeq!);
+    const visible = this.frozen ?? this.rows;
 
     let rows: SerialEntry[];
     if (this.memo && this.memo.version === this.ver && this.memo.filter === f) {
@@ -154,8 +163,7 @@ export class SerialStore {
       total: this.totalCount,
       dropped: this.droppedCount,
       paused: this.pausedFlag,
-      bufferedWhilePaused:
-        this.pauseSeq === null ? 0 : this.seq - this.pauseSeq,
+      bufferedWhilePaused: this.pausedFlag ? this.bufferedCount : 0,
     };
   }
 }

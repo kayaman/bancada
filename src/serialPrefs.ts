@@ -66,14 +66,17 @@ function stripComments(src: string): string {
 /** A C integer literal → number. Tolerates `UL`/`L`/`u` suffixes and C++14
  *  `'` digit separators; anything else is not a literal. */
 function parseIntLiteral(raw: string): number | null {
-  const t = raw.trim().replace(/'/g, "");
+  let t = raw.trim().replace(/'/g, "");
+  // `#define BAUD (115200)` — the parens are the usual defensive habit, and
+  // they are not part of the number.
+  while (t.startsWith("(") && t.endsWith(")")) t = t.slice(1, -1).trim();
   const m = /^(\d+)[uUlL]*$/.exec(t);
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-/** `#define NAME 250000` and `const unsigned long NAME = 500000;`, gathered
+/** `#define NAME 250000` and `const`/`constexpr NAME = 500000;`, gathered
  *  across every source. One level only: a name defined as another name is
  *  left unresolved (and therefore votes for nothing). */
 function collectConstants(sources: string[]): Map<string, number> {
@@ -83,7 +86,9 @@ function collectConstants(sources: string[]): Map<string, number> {
       const n = parseIntLiteral(m[2]);
       if (n !== null) out.set(m[1], n);
     }
-    for (const m of src.matchAll(/\bconst\b[\w\s]*?\b(\w+)\s*=\s*([^;]+);/g)) {
+    for (const m of src.matchAll(
+      /\bconst(?:expr)?\b[\w\s]*?\b(\w+)\s*=\s*([^;]+);/g,
+    )) {
       const n = parseIntLiteral(m[2]);
       if (n !== null) out.set(m[1], n);
     }

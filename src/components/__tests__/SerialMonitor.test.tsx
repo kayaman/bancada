@@ -301,6 +301,33 @@ describe("SerialMonitor send box", () => {
     expect(box.value).toBe("AT");
   });
 
+  it("ignores a second Enter while the first send is still in flight", async () => {
+    let release: (() => void) | null = null;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    setup({ onSend });
+    const box = screen.getByLabelText("Send to board") as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "AT" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    // A slow write must not queue three copies of the same command onto a
+    // board that is still chewing the first.
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    release!();
+    await flush();
+    fireEvent.change(box, { target: { value: "AT+GMR" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await flush();
+    expect(onSend).toHaveBeenCalledTimes(2);
+  });
+
   it("refuses to send while the monitor is off", () => {
     setup({ monitorOn: false });
     const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;

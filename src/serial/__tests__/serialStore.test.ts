@@ -60,16 +60,32 @@ describe("SerialStore cap", () => {
     expect(snap.rows.map((r) => r.seq)).toEqual([4, 5, 6]);
   });
 
-  it("survives eviction while paused", () => {
+  it("holds the frozen view even when the cap evicts everything under it", () => {
+    // The reason to pause is to read what is on screen. If the frozen view
+    // were just "rows still in the ring with seq <= pauseSeq", a chatty board
+    // would empty the screen the user paused to read.
     const s = new SerialStore(5, 3);
-    fill(s, 3);
+    s.push("stdout", "a", ts);
+    s.push("stdout", "b", ts + 1);
     s.setPaused(true);
-    fill(s, 10, 4);
+    for (let i = 0; i < 20; i++) s.push("stdout", `flood ${i}`, ts + 2 + i);
+
     const snap = s.snapshot();
-    // The frozen view can only show rows still in the ring.
     expect(snap.paused).toBe(true);
-    expect(snap.rows.every((r) => r.seq <= 3)).toBe(true);
-    expect(snap.bufferedWhilePaused).toBe(10);
+    expect(snap.rows.map((r) => r.text)).toEqual(["a", "b"]);
+    expect(snap.bufferedWhilePaused).toBe(20);
+
+    // Resuming drops back to whatever the live ring actually holds.
+    s.setPaused(false);
+    const live = s.snapshot();
+    // 22 pushes through a cap-5/trim-to-3 ring lands on four rows.
+    expect(live.rows.map((r) => r.text)).toEqual([
+      "flood 16",
+      "flood 17",
+      "flood 18",
+      "flood 19",
+    ]);
+    expect(live.bufferedWhilePaused).toBe(0);
   });
 });
 
