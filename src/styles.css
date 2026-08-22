@@ -635,6 +635,13 @@ body {
   min-height: 30px;
 }
 
+/* Seven tabs plus separators in one row: they must not shrink or wrap when
+   the window narrows (the deleted .bottom-group-btn rule did this before). */
+.bottom-tabs .tab {
+  flex: none;
+  white-space: nowrap;
+}
+
 /* Baud + Start/Stop, above the serial Console. */
 .serial-toolbar {
   display: flex;

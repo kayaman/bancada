@@ -34,7 +34,17 @@ export default function BottomTabBar({
           >
             {item.label}
             {item.badge !== null && (
-              <span className="tab-badge">{item.badge}</span>
+              <>
+                {/* The space and the aria-label are both load-bearing: an
+                    accessible name concatenates inline content with no
+                    separator, so a bare badge announces this as "Build3". */}{" "}
+                <span
+                  className="tab-badge"
+                  aria-label={`${item.badge} ${item.badge === 1 ? "error" : "errors"}`}
+                >
+                  {item.badge}
+                </span>
+              </>
             )}
             {item.dot && <span className="tab-dot">●</span>}
           </button>

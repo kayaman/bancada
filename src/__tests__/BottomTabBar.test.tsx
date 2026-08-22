@@ -7,7 +7,7 @@ afterEach(cleanup);
 
 const noop = () => {};
 
-/** The seven tab buttons, in DOM order (the maximize button is excluded by name). */
+/** The seven tab buttons, in DOM order (the maximize button has no .tab class). */
 const tabButtons = () =>
   screen
     .getAllByRole("button")
@@ -113,7 +113,28 @@ describe("BottomTabBar", () => {
     expect(screen.getAllByRole("separator").length).toBe(3);
   });
 
-  it("shows a badge count, and nothing at zero", () => {
+  it("puts each separator immediately after the tab it closes off", () => {
+    render(
+      <BottomTabBar
+        active="build"
+        unseen={{}}
+        onOpen={noop}
+        maximized={false}
+        onToggleMaximize={noop}
+      />,
+    );
+    const after = (label: string) =>
+      screen.getByRole("button", { name: label }).nextElementSibling;
+    for (const label of ["Serial", "Scope", "Web"]) {
+      expect(after(label)?.getAttribute("role")).toBe("separator");
+    }
+    // ...and nowhere else: Build, MQTT and WS are not group boundaries.
+    for (const label of ["Build", "MQTT", "WS"]) {
+      expect(after(label)?.getAttribute("role")).not.toBe("separator");
+    }
+  });
+
+  it("shows a badge count, named so it does not run into the tab label", () => {
     const { unmount } = render(
       <BottomTabBar
         active="serial"
@@ -124,7 +145,14 @@ describe("BottomTabBar", () => {
         onToggleMaximize={noop}
       />,
     );
-    expect(tabButtons()[0].querySelector(".tab-badge")?.textContent).toBe("3");
+    const badge = screen.getByLabelText("3 errors");
+    expect(badge.classList.contains("tab-badge")).toBe(true);
+    expect(badge.textContent).toBe("3");
+    expect(tabButtons()[0].contains(badge)).toBe(true);
+    // Without the badge's own label the button would announce as "Build3".
+    expect(screen.getByRole("button", { name: "Build 3 errors" })).toBe(
+      tabButtons()[0],
+    );
     unmount();
 
     render(
@@ -152,6 +180,7 @@ describe("BottomTabBar", () => {
       />,
     );
     const max = screen.getByRole("button", { name: "Maximize panel" });
+    expect(max.getAttribute("title")).toBe("Maximize panel");
     max.click();
     expect(onToggleMaximize).toHaveBeenCalledTimes(1);
     unmount();
@@ -165,6 +194,7 @@ describe("BottomTabBar", () => {
         onToggleMaximize={noop}
       />,
     );
-    expect(screen.getByRole("button", { name: "Restore panel" })).toBeTruthy();
+    const restore = screen.getByRole("button", { name: "Restore panel" });
+    expect(restore.getAttribute("title")).toBe("Restore panel");
   });
 });
