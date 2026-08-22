@@ -72,7 +72,7 @@ Everything here needs only a USB cable.
 | 2 | **Compile** | The blink fixture compiles for the configured profile, producing a binary |
 | 3 | **Upload** | Upload completes, exit status clean, and the streamed output reaches the expected "hard resetting" terminus |
 | 4 | **Blink heartbeat** | After upload, the serial stream yields a monotonically increasing `BLINK n on/off` sequence at the expected cadence |
-| 5 | **Serial TX round-trip** | A line sent to the board comes back echoed, proving the write path and `monitor_send` |
+| 5 | **Serial TX round-trip** | A line sent to the board comes back echoed, proving the write path and `monitor_send`. `monitor_send` writes verbatim, so the ending comes from the Monitor tab's selector — none, NL, CR or both — and a `readStringUntil('\n')` sketch will sit silent under CR-only. The agent's `serial_send` is a different path and always appends NL |
 | 6 | **MAC / chip read** | esptool returns a syntactically valid MAC and a chip type consistent with the configured FQBN |
 | 7 | **Monitor ↔ upload contention** | With the monitor running, an upload evicts it, succeeds, and the monitor can be restarted afterwards — the `SerialOwner` eviction path on real hardware |
 

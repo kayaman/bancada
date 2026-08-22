@@ -33,7 +33,9 @@ Toolbar "Verify"
                                               │
                     ┌─────────────────────────┘  event: build://line
                     ▼
-              App's subscription effect ─▶ setBuildLines ─▶ <Console/>
+              App's subscription effect
+                └─ ref + one rAF flush ─▶ setBuildLines
+                     └─ parseBuildOutput ─▶ <BuildConsole/>
 ```
 
 **Why the two reader threads:** stdout and stderr must interleave in real order.
@@ -65,11 +67,16 @@ port selected ─▶ api.setSelectedTarget({ port, baud })   ← mirrored into R
         unlock
                     │
                     ▼
-         App subscription ─▶ setSerialLines ─▶ <Console mode="serial"/>
-                          └▶ ScopeView also subscribes (plotter source)
+         App subscription ─┬▶ serialStore.push(stream, line, ts)
+                           │    └▶ <SerialMonitor/> polls `version` @ 10 Hz
+                           └▶ ScopeView also subscribes (plotter source)
 ```
 
-At EOF the stdout thread emits `serial://closed`.
+`start_monitor` returns the session id; App keeps it in `monitorSessionRef`.
+
+At EOF the stdout thread emits `serial://closed` **stamped with that session**,
+and App drops one naming any other — a reader thread can outlive its own child,
+and unstamped it would report the live monitor as closed.
 
 **The two locks never meet.** Reader threads push into `serial_ring` but must
 never take `serial` — they are killed or joined *under* it, so taking it would

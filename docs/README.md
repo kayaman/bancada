@@ -46,6 +46,8 @@ end to end.
 
 Newest first. One file per release, user-facing.
 
+- [0.19.0](RELEASE-NOTES-0.19.0.md) — the bench loop: flat tab row, toasts and status bar, clickable diagnostics, serial monitor
+- [0.18.0](RELEASE-NOTES-0.18.0.md) — board options in a profile, a scope the board serves, a board's project from the fleet
 - [0.17.1](RELEASE-NOTES-0.17.1.md) — **fixes flashing**, broken by 0.17.0's monitor recovery
 - [0.17.0](RELEASE-NOTES-0.17.0.md) — boards remember their project, new starters, serial monitor fixes
 - [0.16.0](RELEASE-NOTES-0.16.0.md) — project lifecycle, flash provenance, one project menu

@@ -144,7 +144,19 @@ scaffolded library, a fetched library and a newly created project actually
 - Board/port detection with live rescan (`arduino-cli board list`)
 - Build profiles from `sketch.yaml` (default profile pre-selected)
 - Verify / Flash with **live streaming build output** (compile falls back to
-  nothing-selected errors gracefully; upload requires a port)
+  nothing-selected errors gracefully; upload requires a port). The **Build**
+  console parses that output: **click a compiler error to jump to the file and
+  line**, a summary strip counts errors, warnings and the memory report, an
+  errors-only filter hides the rest, and the tab carries an error badge while
+  another tab is open. Diagnostics in a core header, in a library, or against
+  the generated `.ino.cpp` prologue are shown but not clickable — they are not
+  files in your sketch
+- **Status bar and toasts** — the bottom line says what is *running* (one
+  activity, elapsed time, and a progress bar), and outcomes appear as toasts
+  that dismiss themselves. Progress is measured where the uploader gives a real
+  number (esptool announcing its flash regions), a dashed estimate from the
+  last run's duration where it does not, and indeterminate when there is
+  nothing honest to show
 - Library manager:
   - search the Arduino registry, install/remove (global sketchbook)
   - installing while a project is open **also pins** the library into the
@@ -169,7 +181,15 @@ scaffolded library, a fetched library and a newly created project actually
     sketchbook library would otherwise be invisible to the build. The flip
     side is that such an entry names a path on this machine, so a `sketch.yaml`
     carrying one is not portable to a collaborator
-- Serial monitor via `arduino-cli monitor` (start/stop, baudrate, TX input)
+- **Serial monitor** via `arduino-cli monitor`, in the **Serial** tab. The baud
+  is read out of the sketch's own `Serial.begin`, with a per-sketch override
+  when you want to listen at something else; the rate list includes 74880, the
+  ESP8266 boot-ROM rate, so a reset banner is readable rather than mojibake.
+  Line endings are selectable (none / NL / CR / both) and sent verbatim,
+  timestamps and a text filter are toggles, **Pause** freezes the view while
+  lines keep arriving behind it, **Export** writes what you can see to a file,
+  and the send box has ↑/↓ history. Starting the monitor no longer clears the
+  scrollback
 - Utilities: **read board MAC address** via esptool (shows chip type too)
 - **Boards** panel — the platform (core) manager: search every index arduino-cli
   already knows, install/update/remove a platform with live progress in the
@@ -186,7 +206,9 @@ scaffolded library, a fetched library and a newly created project actually
   history included. Each board carries a nickname you set, its chip type, the
   FQBNs it has been built for, and when it was first and last seen
 - Sidebar split into **Software** (files, libraries) and **Hardware** (boards,
-  fleet) groups, drag-resizable and collapsible to a rail
+  fleet) groups, drag-resizable and collapsible to a rail. The bottom panel is
+  one flat row instead — `Build · Serial │ Scope │ MQTT · WS · Web │ Assistant`
+  — so nothing is two clicks deep
 - **Editor tabs** — multiple files open at once, dirty markers, and a
   close-again-to-discard step so unsaved work is never dropped by one click
 - **Git pill** — repository state at a glance in the toolbar, with commit,
@@ -199,7 +221,7 @@ scaffolded library, a fetched library and a newly created project actually
   port, profile/FQBN and board, then pushes it. One tag per distinct code
   state, not per flash. Nothing in that path can fail a flash: it reports to
   the build console and gets out of the way
-- **Scope** — a software oscilloscope in the Debugging tab, with two sources:
+- **Scope** — a software oscilloscope in the **Scope** tab, with two sources:
   a **plotter** that parses numeric values out of the existing serial stream
   (any board), and an **ADC** mode where companion firmware on an ESP32 streams
   raw 12-bit samples over serial. Trigger, timebase, cursors, measurements, FFT
@@ -272,7 +294,8 @@ narrowed to `Read`, `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`
   started), auto-starting the monitor on the UI-selected port/baud when
   the port is free. The Monitor tab stays in sync.
 - **`serial_send`** — types one line to the board through the running
-  monitor, exactly like the Monitor tab's send box.
+  monitor. It always appends a newline; the Serial tab's line-ending
+  selector is the tab's own and does not apply to this path.
 
 It still cannot run shell commands (`Bash` stays out of the tool set —
 capabilities are scoped by what the tools can express, not by prompt
@@ -323,7 +346,6 @@ and everything that is *not* enforced — is documented in
 - `clangd` integration for real C++ completion/diagnostics (CodeMirror LSP client)
 - Profile editor UI (create/edit `sketch.yaml` platforms visually)
 - More esptool utilities: flash erase, flash size, filesystem image upload
-- Board options in the FQBN (`CDCOnBoot=cdc`) chosen from a picker
 - Multi-project workspaces
 
 ## Repo layout

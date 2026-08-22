@@ -6,8 +6,8 @@ Bancada is an Arduino workbench built with **Tauri 2 + Rust + React**. It does
 not reimplement the toolchain — it drives `arduino-cli`, `esptool`, `git`, `gh`
 and `claude` as subprocesses and parses their output.
 
-Roughly 16k lines of Rust in `bancada-core`, a 6.7k-line Tauri layer, and 22k
-lines of TypeScript.
+Roughly 18k lines of Rust in `bancada-core`, a 7.5k-line Tauri layer, and 31k
+lines of TypeScript — a third of that last figure is tests.
 
 ---
 
@@ -17,7 +17,7 @@ lines of TypeScript.
 ┌───────────────────────────────────────────────────────────────────────┐
 │ React UI                                    src/                      │
 │   App.tsx orchestrates · panels · CodeMirror · canvas instruments      │
-│   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/               │
+│   pure-logic modules (src/*.ts) · scope/ · agent/ · obs/ · serial/    │
 └───────────────────────────────┬───────────────────────────────────────┘
                                 │  src/api.ts — the ONLY IPC module
               96 invoke commands · 7 events · 3 Channels
@@ -49,7 +49,7 @@ The question this doc set exists to answer. In order — take the first match.
 |---|---|---|
 | parses, validates, decides, or builds an argv | `core/src/<module>.rs` | it must be unit-testable with no window and no hardware |
 | owns a process, a thread, a mutex, a file path, or the clock | `src-tauri/src/lib.rs` | `core` may not hold long-lived state |
-| is frontend logic you could test without React | a `src/*.ts` module | vitest runs in **node** — no component is ever rendered |
+| is frontend logic you could test without React | a `src/*.ts` module | vitest runs in **node** by default; a `.tsx` test opts into jsdom and proves wiring, not logic |
 | crosses the IPC boundary | `src/api.ts` + a case in `api.test.ts` | a camelCase/snake_case typo fails only at runtime |
 | is a wire format | a `core` module **and** a doc section | protocols are documented as contracts here |
 | is genuinely only rendering | a `.tsx` component | keep it thin |
@@ -95,9 +95,9 @@ Each is deliberate, and each looks like a bug until you know why.
    this.
 2. **Panels are hidden, never unmounted.** Unmounting would drop a live socket,
    channel or agent session on a tab switch.
-3. **Stores are polled, not subscribed.** `AgentStore`, `ObsStore` and
-   `ScopeEngine` expose a monotonic `version`. This decouples ingest rate from
-   render rate. Do not "fix" it into `useState`.
+3. **Stores are polled, not subscribed.** `AgentStore`, `SerialStore`,
+   `ObsStore` and `ScopeEngine` expose a monotonic `version`. This decouples
+   ingest rate from render rate. Do not "fix" it into `useState`.
 4. **The build gate is non-blocking.** Contention is an error
    (`"build already in progress"`), never a queue.
 5. **The agent's `PreToolUse` hook is Bancada's own binary** re-invoked as
@@ -111,27 +111,27 @@ Each is deliberate, and each looks like a bug until you know why.
 Named honestly, so a newcomer does not read them as intentional design and pile
 on. No refactor is proposed here.
 
-### `src-tauri/src/lib.rs` is 7,107 lines
+### `src-tauri/src/lib.rs` is 7,448 lines
 
 All 96 commands live in one module. The seams are already visible — the handler
 list is grouped by domain, and those groups are really seven independent session
 subsystems (scope, agent + MCP, mqtt, device-proxy, git, fleet, chat + usage),
 each with its own slot in `AppState` and its own threads.
 
-The file is a flat namespace over a structure that already exists. Its 142-line
+The file is a flat namespace over a structure that already exists. Its 151-line
 rustdoc header is doing the work a module tree would otherwise do.
 
 **If you are adding a command:** put it with its domain group and keep the
-`EmitFn` seam intact — it is the only reason ~69 unit tests can live in this
+`EmitFn` seam intact — it is the only reason ~82 unit tests can live in this
 file.
 
-### `src/App.tsx` is 2,472 lines
+### `src/App.tsx` is 3,128 lines
 
 It owns nearly all cross-panel state and every subscription, and passes ~30
-props to `Toolbar` alone. The mitigation is real — 17 pure-logic modules have
+props to `Toolbar` alone. The mitigation is real — ~29 pure-logic modules have
 been extracted, and that is where the tested behaviour lives — and leaf
-components now have a render harness too (jsdom, per `.tsx` file). But the
-orchestrator itself still has no harness.
+components now have a render harness too (jsdom, per `.tsx` file; five
+components use it). But the orchestrator itself still has no harness.
 
 The clearest signal: `src/__tests__/conflicts.test.ts` reads `App.tsx` **as a
 string** to assert that `refuseOnConflict(` appears before `api.compileSketch(`.
@@ -144,6 +144,21 @@ The README, the agent-panel spec and the `lib.rs` rustdoc each described the
 agent confinement model with different emphases — a guaranteed drift.
 [agent-safety](agent-safety.md) is now the single source and the others point
 at it. **Keep it that way.**
+
+### An event without an identity — now closed on both paths
+
+The agent's events have always carried the session's child `pid`, so a
+straggler from a session the user stopped cannot render into a newer one. The
+serial events carried nothing, and 0.17.1 and 0.18.0 both shipped with that
+named as the next thing to do: a monitor's reader thread can outlive the child
+it was reading, and its EOF `serial://closed` would report the *live* monitor
+as closed.
+
+`start_monitor` now returns a session id from a counter it shares with the
+agent's auto-start, both serial events carry it, and the frontend drops a close
+naming any other. The general rule is worth keeping in view when the next
+long-lived thread is added: **an event that ends something must say what it is
+ending.**
 
 ### Stale comments outlive the code
 

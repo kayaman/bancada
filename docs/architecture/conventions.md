@@ -40,6 +40,15 @@ Four modules — `settings`, `fleet`, `chatlog`, `usage` — are additionally
 Follow this for any new persistent state. A function that calls
 `SystemTime::now()` internally cannot be tested for date-boundary behaviour.
 
+**The frontend follows the same rule**, with `localStorage` in the place of a
+config directory: `notifications.ts` takes `now` on every call, `buildHistory.ts`
+takes an injected `KVStorage` **and** a `now`, `serialPrefs.ts` takes a
+`StorageLike`, and `serialStore.ts` takes the timestamp with the line. A `Map`
+satisfies the storage shape structurally, so the tests hand in one and never
+touch a browser API. `App.tsx` is where `Date.now()` and `window.localStorage`
+actually appear — with one deliberate exception, `StatusBar`, which owns the
+app's only ticking clock because a module cannot own one.
+
 ---
 
 ## 2. Testing
@@ -47,7 +56,7 @@ Follow this for any new persistent state. A function that calls
 ### Rust: unit tests live beside the code
 
 Every `core` module carries a `#[cfg(test)] mod tests`. The Tauri layer has one
-too (`src-tauri/src/lib.rs`), with ~69 tests — which is possible only because
+too (`src-tauri/src/lib.rs`), with ~82 tests — which is possible only because
 the code is written against an injectable `EmitFn` rather than calling
 `AppHandle::emit` directly. That seam is the single reason the listener and
 reader threads are testable without a Tauri app. **Preserve it.**
@@ -89,15 +98,17 @@ plus `afterEach(cleanup)` from `@testing-library/react` (there's no
 `environmentMatchGlobs` — it was removed in vitest 3, so the opt-in is
 per-file, not per-glob).
 
-A `.tsx` test renders a **leaf component only** — props in, DOM out.
-`App.tsx` is still never rendered; the `App.tsx?raw` source-text tests remain
-the harness for its wiring (see the tensions section in the
-[index](README.md)). Assert on roles, labels and text, not class names —
-except where the class *is* the contract (e.g. `.active`).
+A `.tsx` test renders a **leaf component only** — props in, DOM out. The five
+that exist are `BottomTabBar`, `ToastStack`, `StatusBar`, `BuildConsole` and
+`SerialMonitor`; they are the pattern to copy. `App.tsx` is still never
+rendered; the `App.tsx?raw` source-text tests remain the harness for its wiring
+(see the tensions section in the [index](README.md)). Assert on roles, labels
+and text, not class names — except where the class *is* the contract (e.g.
+`.active`).
 
 This is the constraint that shapes the entire frontend. Because a component
 still can't carry untested logic of its own, anything worth testing is
-extracted into a plain `.ts` module first — which is why `src/` has ~14
+extracted into a plain `.ts` module first — which is why `src/` has ~29
 root-level logic modules and why two components export pure helpers
 (`fallbackFqbnLabel`, `exchangeRow`) that exist only to be testable.
 

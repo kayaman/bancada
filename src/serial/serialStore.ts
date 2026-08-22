@@ -123,8 +123,8 @@ export class SerialStore {
   }
 
   /**
-   * Read-time view. While paused it stops at `pauseSeq`, and
-   * `bufferedWhilePaused` counts what has arrived behind it.
+   * Read-time view. While paused it serves the frozen copy taken at the
+   * pause, and `bufferedWhilePaused` counts what has arrived behind it.
    *
    * `rows` is memoised per (version, filter): the panel polls ten times a
    * second, and an unstable array reference would defeat every downstream

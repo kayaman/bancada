@@ -149,6 +149,16 @@ in the index, and the frontend's identical check is only a courtesy.
 All take the `serial` leaf lock. `set_selected_target` mirrors the UI's port and
 baud into Rust so the agent's MCP tools can use them without a port argument.
 
+`start_monitor` returns the **monitor session id** (`u64`, from one process-wide
+counter shared with the agent's auto-start). Keep it: it is the only way to tell
+a `serial://closed` from the monitor you started apart from one from a reader
+thread that outlived its own child.
+
+`monitor_send` writes `data` **verbatim** — no newline is appended. The Serial
+Monitor's line-ending selector decides what goes on the wire, which is why a
+board expecting bare CR can be talked to at all. The MCP `serial_send` is a
+different write path and does append `\n`; see §5.
+
 ### Scope — 6
 `scope_probe` · `scope_start` · `scope_single` · `scope_send` · `scope_stop` ·
 `scope_install_firmware`
@@ -222,8 +232,8 @@ Rust → frontend broadcast, subscribed via `listen` in `src/api.ts`.
 |---|---|---|
 | `build://line` | `{ stream: "stdout" \| "stderr", line: string }` | compile, upload, core install/uninstall/index, git sync/remote, and the agent's MCP `verify`/`upload` |
 | `serial://line` | `{ stream, line }` | monitor stdout and stderr reader threads |
-| `serial://closed` | `{}` | monitor stdout thread at EOF |
-| `serial://started` | `{ port, baud }` | the agent's `serial_read` when it auto-starts the monitor |
+| `serial://closed` | `{ session }` | monitor stdout thread at EOF |
+| `serial://started` | `{ port, baud, session }` | the agent's `serial_read` when it auto-starts the monitor |
 | `ports://changed` | `()` | the hotplug watcher thread |
 | `agent://event` | the `claude` CLI's stream-json object **verbatim**, plus synthetic host events | agent stdout/stderr readers, verify/upload, alarms |
 | `agent://closed` | `{ reason, pid }` | agent stdout reader at EOF |
@@ -236,7 +246,14 @@ emitter so they are testable. Grep for the event-name string literal instead.
 
 **`serial://started` exists to keep the frontend honest.** When the agent's
 `serial_read` starts the monitor itself, the UI's monitor state would otherwise
-be wrong and its auto-start effect would double-start.
+be wrong and its auto-start effect would double-start. It carries the session id
+the frontend must adopt, drawn from the same counter `start_monitor` returns —
+one `AtomicU64` shared by both paths, so the two can never hand out the same id.
+
+**Both serial events name their session.** A monitor's reader thread can outlive
+the child it was reading; without the stamp its EOF `serial://closed` reports the
+*current* monitor as dead. The frontend keeps the id it started with and drops a
+close naming any other. This is the same trick the agent events play with `pid`.
 
 ### Synthetic `agent://event` variants
 
@@ -289,7 +306,7 @@ Four tools (`core/src/mcp.rs`):
 | `verify` | compile the open sketch, through the same build gate as the button |
 | `upload` | flash it — **no port argument**; uses the UI-selected port and the session-frozen profile, and is refused unless "Allow uploads" is armed |
 | `serial_read` | read from the rolling `SerialRing` since this session's cursor (`wait_s` clamped to 10), auto-starting the monitor if the port is free |
-| `serial_send` | write a line to the monitor |
+| `serial_send` | write a line to the monitor — **always appends `\n`**, unlike `monitor_send`, which writes verbatim. Its own write path, not the Monitor tab's, and the wire `description` says so verbatim: the tab's line-ending setting does not apply |
 
 `serial_read`'s auto-start takes the **build gate** and refuses while a build
 or flash holds it — otherwise it could take the port back in the window

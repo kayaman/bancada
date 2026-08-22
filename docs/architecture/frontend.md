@@ -17,7 +17,7 @@ providers, no context, and no global store.
 │ └──────────────────┘ └─────────────────────────────────────────┘   │
 ├─ bottom ───────────────────────────────────────────────────────────┤
 │ Build · Serial │ Scope │ MQTT · WS · Web │ Assistant               │
-├─ statusbar ────────────────────────────────────────────────────────┤
+├─ statusbar ─ toasts overlay · activity · elapsed · progress ───────┤
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -25,11 +25,11 @@ providers, no context, and no global store.
 
 ## 1. The shell
 
-`src/App.tsx` is 2,472 lines and is the de-facto orchestrator: it owns nearly
+`src/App.tsx` is 3,128 lines and is the de-facto orchestrator: it owns nearly
 all cross-panel state and registers every backend subscription. Its render tree
-begins around line 1783.
+begins around line 2708.
 
-Five composition rules are encoded there and are easy to break by accident:
+Six composition rules are encoded there and are easy to break by accident:
 
 **One project affordance.** `📁 <name> ▾` (`ProjectMenu.tsx`) names the open
 project and holds every action on it — Open, Recent, New, Duplicate, Rename.
@@ -70,9 +70,35 @@ and `.main` use the same trick.
 The one deliberate exception: `AgentPanel` is **keyed on `sketchDir`**, so
 switching project does hard-reset its panel-local state.
 
+**Two announcement channels, and they do not mix.** An *outcome* is a toast —
+`notify(msg, isError?)`, whose signature has not changed; it reduces into
+`toasts` (`notifications.ts`) and renders in `ToastStack`. What is *running* is
+the status bar: one activity at a time (label + elapsed + progress), begun with
+`beginActivity` and closed with `endActivity`. The bar had a single text slot
+before, so App.tsx used to concatenate the outcome onto the in-progress
+message; that workaround is gone, and putting two messages in one string is now
+a bug, not a style. `endActivity` takes the key it expects to close, so a
+straggling agent event cannot end the user's build.
+
 **Layout prefs go to `localStorage`, not settings.** `bancada.bottomHeight`,
-`bancada.sidebarWidth`, `bancada.sidebarCollapsed`. They are per-machine window
-furniture, not project state.
+`bancada.sidebarWidth`, `bancada.sidebarCollapsed`, `bancada.buildDurations`
+(per-project compile/upload times, which only feed the "usually ~" hint and the
+estimate bar), `bancada.serial.baud` and `bancada.serial.ui`. They are
+per-machine window furniture, not project state.
+
+`bancada.serial.baud` is the one that looks like project state and is not. The
+sketch's own `Serial.begin` is the project's truth about baud — it is in git,
+it travels with the code — so the picker follows it by default and the stored
+per-sketch override is bench furniture: what *this* machine was told to listen
+at, until told otherwise.
+
+That makes the displayed baud **derived**, and derived state can drift away
+from a running child: switching project, or saving a sketch whose
+`Serial.begin` changed, moves it under a monitor still reading at the old rate.
+`openBaudRef` holds what the live child was actually opened with — it drives
+the toolbar while a monitor is up, and an effect re-opens the port when the two
+disagree. Do not display `baudrate` there; a monitor decoding at a rate the UI
+denies looks like a broken board.
 
 ---
 
@@ -84,15 +110,33 @@ matches its update frequency.
 ### Tier 1 — `App.tsx` local state, passed by props
 
 The majority: `sketchDir`, `profile`, open file and buffers, dirty set, open
-tabs, ports and selection, build and serial lines, monitor flags, layout,
-`busy`, conflicts, status.
+tabs, ports and selection, build lines, monitor flags, layout, `busy`,
+conflicts.
+
+Announcements are four fields, not one status string: `toasts`, `activity`,
+`lastResult`, `progress`. Baud is three: `baudOverrides` (persisted per sketch
+dir), `sketchBaud` (sniffed out of the sketch), and the effective `baudrate` +
+`baudSource` that `effectiveBaud` derives from them each render.
+
+**There is no `serialLines`.** The serial feed is a Tier 3 store (below); only
+the build feed is state.
 
 Shared downward **by props only** — which is why `<Toolbar>` takes ~30 of them.
 
 Heavy use of **ref mirrors** (`sketchDirRef`, `openFileRef`, `monitorOnRef`,
-`busyRef`, `bottomTabRef`, `uploadsArmedRef`, …) because the subscription effect
-is registered once with `[]` deps and must read current values without
-re-subscribing.
+`busyRef`, `bottomTabRef`, `uploadsArmedRef`, `activityRef`, `progressRef`,
+`monitorSessionRef`, `openBaudRef`, …) because the subscription effect is
+registered once with `[]` deps and must read current values without
+re-subscribing. Two refs point
+at the editor rather than at data: `editorRef` (the `ReactCodeMirrorRef`) and
+`pendingGotoRef`, the diagnostic jump parked while the file opens.
+
+**The build feed is state, and stays state.** `onBuildLine` pushes into a ref
+and schedules one rAF flush, so a chatty compile commits once a frame instead
+of once a line. It is not Tier 3 because it does not need to be: build output
+is human-paced, capped at 5,000 lines, and `parseBuildOutput` has to see the
+whole buffer anyway. Serial is the opposite case, and gets the opposite
+answer.
 
 ### Tier 2 — one zustand store
 
@@ -106,15 +150,26 @@ the store is a view model, not a controller.
 
 ### Tier 3 — plain classes, polled
 
-`AgentStore` (App-owned singleton) and `ObsStore` (one per MQTT/WS/Web panel),
-plus `ScopeEngine`. All expose a monotonic `version`; components **poll** it
-rather than subscribe — 100 ms for the agent panel, ~4 Hz for observability,
-250 ms for scope readouts.
+`AgentStore` and `SerialStore` (both App-owned singletons) and `ObsStore` (one
+per MQTT/WS/Web panel), plus `ScopeEngine`. All expose a monotonic `version`;
+components **poll** it rather than subscribe — 100 ms for the agent panel,
+10 Hz for the Serial Monitor, ~4 Hz for observability, 250 ms for scope
+readouts.
 
 This is the important one. These ingest at rates React should never see: a
-50 kSa/s ADC stream, a chatty MQTT topic, token-level streaming deltas. Polling
-a version counter decouples ingest rate from render rate. **Do not "fix" this
-into `useState`.**
+50 kSa/s ADC stream, a chatty MQTT topic, token-level streaming deltas, a board
+printing at 921600 baud. Polling a version counter decouples ingest rate from
+render rate. **Do not "fix" this into `useState`.**
+
+`SerialStore` is the newest of them and shows the shape end to end: the
+`serial://line` listener only calls `push`; the store caps at 5,000 rows and
+trims to 4,000 in one `splice` (amortised, not a `shift` per line); pausing
+takes a copy rather than a sequence watermark, because the ring keeps evicting
+behind a pause and a watermark would empty the very screen the user paused to
+read; and `SerialMonitor` renders only the rows in view. Being module-level
+rather than panel-local is deliberate — lines arrive while the tab is hidden
+(the recapture ladder, the agent's `serial_read`), so neither the scrollback
+nor the unseen dot may depend on a panel having been mounted.
 
 There are **no custom hooks** in the codebase. `useExplorerStore` is the only
 `use*` export.
@@ -133,6 +188,14 @@ So anything worth testing has been extracted into a plain `.ts` module — a
 |---|---|
 | `api.ts` | the entire IPC surface (§4) |
 | `bottomTabs.ts` | bottom panel tab order, labels, separators, and the per-tab dot/badge view model |
+| `notifications.ts` | the toast reducer: per-kind TTL, dedupe against the newest, the cap that never drops an error or the toast just pushed |
+| `statusLine.ts` | the status bar's whole vocabulary, and which of the four progress modes applies |
+| `buildProgress.ts` | esptool/avrdude output → a fraction, or honestly `null` |
+| `buildHistory.ts` | remembered per-project compile/upload durations, and the estimate derived from them |
+| `diagnostics.ts` | build output → diagnostics, memory summary, summary label, jump targets |
+| `editorGoto.ts` | line/column → a CodeMirror document position, clamped both ways |
+| `serialPrefs.ts` | the baud list, the line-ending vocabulary, the sketch-baud sniffer, and which baud wins |
+| `timeFormat.ts` | `hms` for a log stamp, `fileStamp` for an export filename |
 | `editorTabs.ts` | open/close/rename/delete tab transitions; dirty tabs are never bulk-closed |
 | `explorerOps.ts` | rename/delete path math, protected paths (mirrors core's `is_protected`) |
 | `fileTreeModel.ts` | tree building, visible nodes, expansion pruning |
@@ -153,8 +216,8 @@ So anything worth testing has been extracted into a plain `.ts` module — a
 | `usageDashboard.ts` | totals and display names |
 | `keys.ts` | accelerator parsing and matching; Ctrl and Cmd are one modifier |
 
-Plus `src/scope/`, `src/agent/` and `src/obs/`, which are subsystems in their
-own right (§5).
+Plus `src/scope/`, `src/agent/`, `src/obs/` and `src/serial/`, which are
+subsystems in their own right (§5).
 
 **The rule for new work:** if you are about to put logic in a `.tsx` file, put
 it in a module and call it from the component. Two components already export a
@@ -169,7 +232,7 @@ owns "now".**
 
 ## 4. The IPC layer
 
-`src/api.ts` (983 lines) is the only file importing `@tauri-apps/api/core` or
+`src/api.ts` (999 lines) is the only file importing `@tauri-apps/api/core` or
 `/event`. Elsewhere only `plugin-dialog` and `getVersion` appear.
 
 It holds the TypeScript mirrors of the Rust types, 96 `invoke` wrappers, the
@@ -180,6 +243,13 @@ three `Channel` openers, and the seven `listen` subscriptions. Full surface:
 `App.tsx` — build, serial ×3, ports hotplug (with 500 ms coalescing and
 deferral during a flash), agent event and agent closed. The only subscription
 outside `App.tsx` is `onSerialLine` inside `ScopeView` for the plotter source.
+
+The serial trio is session-guarded: `startMonitor` returns the monitor's
+session id, `serial://started` and `serial://closed` carry one, and App keeps
+the current id in `monitorSessionRef` so a reader thread that outlived its own
+child cannot report a live monitor as closed. A `null` ref still accepts any
+close — that is the case where the backend started the monitor before this
+window knew about it.
 
 Channel streams are opened by the panel that owns them: `ScopeView`
 (`scopeStart`), `MqttPanel` (`mqttConnect`), `DeviceBrowserPanel`
@@ -235,11 +305,23 @@ of the Rust one).
 Shared by `MqttPanel`, `WsPanel` and `DeviceBrowserPanel`, all rendering through
 the dumb `ObsLog` component.
 
+### `src/serial/` — the Serial Monitor's plumbing
+
+`serialStore.ts` (the Tier 3 store of §2: capped ring, amortised trim, frozen
+pause view, `rows` memoised per (version, filter), plus `filterRows` and
+`exportText`), `txHistory.ts` (shell-style ↑/↓ recall, immutable, and it saves
+the half-typed draft before recalling over it), `virtualize.ts` (`visibleRange`
+/ `isNearBottom`; `ROW_HEIGHT` is pinned to the `--serial-row-h` custom
+property, so the two must move together).
+
+No React and no wall clock in any of them: timestamps arrive with `push`, the
+same contract `ObsStore` keeps. `SerialMonitor.tsx` is the only consumer.
+
 ---
 
 ## 6. Styling
 
-One stylesheet: `src/styles.css`, 2,868 lines, imported once. No CSS modules, no
+One stylesheet: `src/styles.css`, 3,152 lines, imported once. No CSS modules, no
 Tailwind, no CSS-in-JS.
 
 Design tokens in `:root` — `--bg`, `--bg-panel`, `--bg-raised`, `--bg-hover`,
@@ -324,6 +406,65 @@ Two conventions that were practised but unwritten:
 `ariaLabel` — `GitPill` does, because its popover is a small form. Getting this
 wrong is invisible on screen and makes the fields unreachable in menu-mode
 navigation.
+
+The announcement surfaces added with the toasts and the status bar have rules
+of their own:
+
+- **A toast is `role="alert"` when it is an error, `role="status"` otherwise.**
+  An error stays until dismissed, so it may interrupt; a success that vanishes
+  in four seconds may not.
+- **A live region is mounted before it has anything to say.** The status bar's
+  progress element and the Build console's summary strip are always in the
+  DOM — a region that appears *with* its first message is not reliably
+  announced. Only the text comes and goes.
+- **`aria-valuenow` only when the number is real.** The status bar's
+  `role="progressbar"` always carries `aria-valuemin`/`max` and a label, but
+  `aria-valuenow` appears only in *measured* mode; an estimate says
+  `aria-valuetext="estimated"` instead, and an indeterminate bar says neither.
+  A guessed percentage announced as a fact is worse than no number.
+- **A clickable log row is a `<button>`.** The Build console's jumpable
+  diagnostics are real buttons with the absolute path in `title`, not `div`s
+  with an `onClick`. The errors-only toggle carries `aria-pressed`, bound to
+  what is actually filtered rather than to the raw state — so it cannot claim
+  a filter that the absence of errors has already released.
+- **Every Serial Monitor control has a name.** The two `<select>`s (baud, line
+  ending) and the filter and send inputs carry `aria-label`; the toggles say
+  what they do in `title`; the connection chip is a `role="status"`.
+
+---
+
+## 7. Known limitations
+
+Not bugs to be fixed in passing — each is a deliberate stop, and knowing where
+it is saves re-deriving it.
+
+**Progress is honest before it is informative.** A *measured* bar needs
+esptool's `Flash will be erased from … to …` announcements to weight the
+regions; a recipe that suppresses them leaves `fraction` null and the bar
+indeterminate, with only the per-segment `Writing … (62 %)` available as text.
+avrdude through a pipe prints no percentage at all — its progress is phase
+only (`Writing flash` → `Verifying` → `Done`). A plain compile has nothing to
+measure either. So the only measured bar in the app is an esptool flash that
+announces its regions; everything else with a remembered duration gets the
+dashed *estimate* bar, which is a guess and says so.
+
+**Not every diagnostic is clickable, and that is the design.** A jump target
+must relativise to the sketch directory *and* name a file the explorer lists.
+Two consequences: a diagnostic in a core header or a library keeps its
+shortened path and stays inert, and so does one gcc reports against the
+generated prologue (`/tmp/arduino/sketches/<hash>/sketch/X.ino.cpp`), which is
+outside the sketch. Linker errors carry no location by design, even though
+avr-gcc's `undefined reference` line does have a usable one.
+
+**`detectBaud` is best-effort.** It strips comments, resolves one level of
+`#define`/`const`/`constexpr`, and takes a single agreed `Serial.begin` as the
+answer — but it is not string-literal aware, so a `//` inside a string reads as
+a comment start. A wrong guess costs one click on the baud picker, which is why
+it is not worth a C tokenizer. `Serial1`/`Serial2` deliberately do not vote.
+
+**A baud override is keyed by absolute sketch directory.** Moving or renaming a
+project orphans its override — the sketch's own rate takes over, which is the
+benign direction — and leaves a dead key behind. Nothing collects them.
 
 ---
 
