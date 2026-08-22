@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ObsMsg } from "../obs/obsStore";
+import { hms } from "../timeFormat";
 
 interface Props {
   rows: ObsMsg[];
@@ -19,14 +20,6 @@ interface Props {
   onFilterChange: (f: string) => void;
   onClear: () => void;
 }
-
-const two = (n: number) => String(n).padStart(2, "0");
-
-/** Epoch-ms → HH:MM:SS.mmm local time. */
-const hms = (ts: number) => {
-  const d = new Date(ts);
-  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`;
-};
 
 /** offset + hex + ascii columns for the first 256 bytes of a base64 payload. */
 const hexDump = (b64: string): string => {
