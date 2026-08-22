@@ -60,6 +60,29 @@ describe("serial port handoff", () => {
     expect(body).toMatch(/if \(!selectedPort\) \{[\s\S]*?scheduleRecapture\(\)/);
   });
 
+  it("a baud restart stops before it starts, and disarms the recapture ladder first", () => {
+    // Two ways to get this wrong, both of which look like "the monitor is
+    // just broken at the new rate": start before stop and the two children
+    // fight over one port, or leave the ladder armed and the recapture takes
+    // the port back at the *old* baud before the deliberate restart lands.
+    const start = appSource.indexOf("const changeBaud");
+    expect(start, "changeBaud not found in App.tsx").toBeGreaterThan(-1);
+    const body = appSource.slice(start, appSource.indexOf("\n  };", start));
+
+    const cleared = body.indexOf("monitorWantedRef.current = false");
+    const stopped = body.indexOf("api.stopMonitor()");
+    const opened = body.indexOf("api.startMonitor(");
+    expect(cleared, "changeBaud must disarm the ladder").toBeGreaterThan(-1);
+    expect(stopped, "changeBaud must stop the monitor").toBeGreaterThan(-1);
+    expect(opened, "changeBaud must re-open the port").toBeGreaterThan(-1);
+    expect(cleared, "the ladder must be disarmed before the stop").toBeLessThan(
+      stopped,
+    );
+    expect(stopped, "the restart must stop before it starts").toBeLessThan(
+      opened,
+    );
+  });
+
   it("re-arms the standing request after a flash", () => {
     // The flash path clears the intent to free the port for esptool, so the
     // post-flash restart has to put it back — otherwise the ladder sees no

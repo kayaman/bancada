@@ -8,7 +8,7 @@ import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
 import { silentSerialWarning } from "./boardOptions";
-import { recapturePlan } from "./monitorRecovery";
+import { MAX_RECAPTURE_ATTEMPTS, recapturePlan } from "./monitorRecovery";
 import {
   flashTargetMismatch,
   missingPortName,
@@ -38,6 +38,13 @@ import {
 import { arrivals, bridgeArrivals } from "./portWatch";
 import { blockedByConflict, conflictMessage } from "./conflicts";
 import {
+  detectBaud,
+  effectiveBaud,
+  loadBaudOverrides,
+  saveBaudOverride,
+} from "./serialPrefs";
+import { SerialStore } from "./serial/serialStore";
+import {
   type ToastState,
   dismissToast,
   emptyToasts,
@@ -66,7 +73,9 @@ import LibraryManager from "./components/LibraryManager";
 import BoardsManager from "./components/BoardsManager";
 import FleetManager from "./components/FleetManager";
 import BuildConsole from "./components/BuildConsole";
-import Console from "./components/Console";
+import SerialMonitor, {
+  type SerialConnection,
+} from "./components/SerialMonitor";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
 import DuplicateProject from "./components/DuplicateProject";
@@ -111,16 +120,12 @@ const ACCEL_OPEN = parseAccel("Ctrl+O")!;
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
-const appendCapped = (prev: OutputLine[], l: OutputLine): OutputLine[] =>
-  prev.length >= MAX_CONSOLE_LINES
-    ? [...prev.slice(-TRIM_CONSOLE_LINES), l]
-    : [...prev, l];
-
-/** `appendCapped` for a whole frame's worth of lines at once — same cap and
- *  same trim policy, one new array instead of one per line. A compile emits
- *  thousands of lines in a burst, and the build console now re-parses the
- *  whole buffer on every change, so appending per event costs a parse per
- *  line; this coalesces a frame into a single state write. Pure. */
+/** Append a whole frame's worth of build lines at once, capped and trimmed
+ *  in one new array rather than one per line. A compile emits thousands of
+ *  lines in a burst, and the build console re-parses the whole buffer on
+ *  every change, so appending per event costs a parse per line; this
+ *  coalesces a frame into a single state write. The serial log does not come
+ *  through here — it lives in `serialStore`, outside React state. Pure. */
 const appendManyCapped = (
   prev: OutputLine[],
   batch: readonly OutputLine[],
@@ -156,6 +161,15 @@ const agentStore = new AgentStore();
 // saved chat replays into an identical transcript. Recording is
 // fire-and-forget (a failed append never breaks a live chat).
 const chatRecorder = new ChatRecorder();
+
+// The serial log, App-owned for the same reason `agentStore` is:
+// `serial://line` arrives while the Monitor tab is hidden — from the
+// recapture ladder's auto-start and from the agent's own `serial_read` — so
+// neither the scrollback nor the unseen dot may depend on a panel having been
+// mounted. Outside React state as well as outside the panel: a board at
+// 921600 baud emits faster than React can commit. See
+// src/serial/serialStore.ts.
+const serialStore = new SerialStore();
 
 /** `file_path` from an Edit/Write tool input is cwd-absolute (cwd = sketch
  *  dir); reduce it to the same rel_path shape the file tree/editor use. */
@@ -316,9 +330,24 @@ export default function App() {
   /** Whether a flush is already booked for this frame. A plain sentinel: the
    *  flush is never cancelled, so the rAF handle would be dead weight. */
   const buildFlushScheduledRef = useRef(false);
-  const [serialLines, setSerialLines] = useState<OutputLine[]>([]);
   const [monitorOn, setMonitorOn] = useState(false);
-  const [baudrate, setBaudrate] = useState(115200);
+  /** Per-sketch baud overrides, persisted. No entry for a sketch means "use
+   *  whatever its own `Serial.begin` asks for". */
+  const [baudOverrides, setBaudOverrides] = useState(() =>
+    loadBaudOverrides(localStorage),
+  );
+  /** The rate the open sketch calls `Serial.begin` with, or null when that is
+   *  not one clear answer. Re-sniffed on load and on save, never per
+   *  keystroke — `detectBaud` walks every source. */
+  const [sketchBaud, setSketchBaud] = useState<number | null>(null);
+  /** Keeping the name `baudrate` for the *effective* rate is deliberate:
+   *  every consumer (the monitor start, the target mirrored to Rust for the
+   *  agent, ScopeView) wants the rate the port is actually opened at, not the
+   *  raw override — and none of them had to change. */
+  const { baud: baudrate, source: baudSource } = effectiveBaud(
+    sketchDir ? baudOverrides[sketchDir] : undefined,
+    sketchBaud,
+  );
   // Live mirror of monitorOn for callbacks captured by timers (post-upload
   // auto-resume fires from a closure created while the monitor was still on).
   const monitorOnRef = useRef(false);
@@ -330,7 +359,15 @@ export default function App() {
   const monitorWantedRef = useRef(false);
   /** Recapture attempts since the last successful start. */
   const recaptureAttemptRef = useRef(0);
+  /** Render mirror of `recaptureAttemptRef` for the Monitor's status chip.
+   *  Written once per rung of the ladder, not per line. */
+  const [recaptureAttempt, setRecaptureAttempt] = useState(0);
   const recaptureTimerRef = useRef<number | undefined>(undefined);
+  /** The session id of the monitor child we are listening to. A
+   *  `serial://closed` naming any other session comes from a reader we have
+   *  already replaced — a baud restart, a recapture — and must be ignored,
+   *  or it flips the toggle off underneath a live monitor. */
+  const monitorSessionRef = useRef<number | null>(null);
   // New-content dots on the bottom tabs: set when lines arrive for a hidden
   // tab, cleared when that tab is opened.
   const [unseen, setUnseen] = useState<Partial<Record<BottomTab, boolean>>>({});
@@ -704,11 +741,22 @@ export default function App() {
         }
       }),
       api.onSerialLine((l) => {
-        setSerialLines((prev) => appendCapped(prev, l));
+        // Straight into the store: no state write, so a chatty board costs
+        // no renders at all while the panel polls at 10 Hz.
+        serialStore.push(l.stream, l.line, Date.now());
         if (bottomTabRef.current !== "serial")
-          setUnseen((u) => ({ ...u, serial: true }));
+          setUnseen((u) => (u.serial ? u : { ...u, serial: true }));
       }),
-      api.onSerialClosed(() => {
+      api.onSerialClosed(({ session }) => {
+        // A stale reader from an earlier monitor: both the baud restart and
+        // the recapture ladder replace the child, and the old one's stdout
+        // EOF can land after the new one is already live.
+        if (
+          monitorSessionRef.current !== null &&
+          session !== monitorSessionRef.current
+        )
+          return;
+        serialStore.push("info", "— monitor closed —", Date.now());
         setMonitorOn(false);
         // A native-USB board re-enumerates on every reset, taking the
         // monitor child with it. Nothing else brings it back: the
@@ -719,7 +767,17 @@ export default function App() {
       }),
       // The agent's serial_read auto-start: keep the Monitor toggle honest
       // (and monitorOnRef with it, so startMonitorQuiet never double-starts).
-      api.onSerialStarted(() => setMonitorOn(true)),
+      api.onSerialStarted((p) => {
+        // Adopt its session, or the very next close would look stale and be
+        // dropped — leaving the toggle stuck on over a dead child.
+        monitorSessionRef.current = p.session;
+        serialStore.push(
+          "info",
+          `— monitor started by the assistant at ${p.baud} baud —`,
+          Date.now(),
+        );
+        setMonitorOn(true);
+      }),
       api.onPortsChanged(() => {
         if (busyRef.current) {
           // arduino-cli probing ports mid-flash can disrupt esptool — defer.
@@ -959,6 +1017,22 @@ export default function App() {
     await loadSketch(dir);
   };
 
+  /** Re-sniff the rate the sketch opens `Serial` at.
+   *
+   *  Every open buffer votes alongside the on-disk main `.ino`, so an unsaved
+   *  edit to the rate is reflected — but this runs on load, on save and on an
+   *  agent edit only, never per keystroke: `detectBaud` walks every source. */
+  const refreshSketchBaud = useCallback(async (dir: string) => {
+    const rel = `${dir.split("/").pop()}.ino`;
+    // A dir with no main `.ino` (or one that will not read) simply votes
+    // with nothing; the picker falls back to the default.
+    const disk = await api.readSketchFile(dir, rel).catch(() => "");
+    const others = [...buffersRef.current.entries()]
+      .filter(([path]) => path !== rel)
+      .map(([, text]) => text);
+    setSketchBaud(detectBaud([buffersRef.current.get(rel) ?? disk, ...others]));
+  }, []);
+
   /** Load a sketch folder; opens `restoreFile` when present, else the main .ino. */
   const loadSketch = async (dir: string, restoreFile?: string): Promise<boolean> => {
     try {
@@ -972,6 +1046,9 @@ export default function App() {
       // a same-dir reopen, which changes nothing about the project scope.
       if (sketchDirRef.current !== dir) teardownAgentSession("project switched");
       setSketchDir(dir);
+      // The baud picker follows the project, so re-sniff before anything can
+      // render the old sketch's rate against the new one's dir.
+      void refreshSketchBaud(dir);
       setFiles(fs);
       setSketchYaml(yaml);
       // Reset synchronously before kicking off the async refresh: otherwise
@@ -1356,6 +1433,8 @@ export default function App() {
     try {
       await api.writeSketchFile(sketchDir, openFile, text);
       buffersRef.current.delete(openFile);
+      // A saved edit may well be the `Serial.begin` rate itself.
+      void refreshSketchBaud(sketchDir);
       setDirtyFiles((prev) => {
         const next = new Set(prev);
         next.delete(openFile);
@@ -1372,7 +1451,7 @@ export default function App() {
     } catch (e) {
       notify(String(e), true);
     }
-  }, [sketchDir, openFile, notify]);
+  }, [sketchDir, openFile, notify, refreshSketchBaud]);
 
   /** Flush every dirty buffer to disk (before compile/upload, or before a
    *  message to the agent), **except** buffers flagged as agent conflicts.
@@ -1418,7 +1497,8 @@ export default function App() {
       notify(conflictMessage(skipped), true);
     }
     refreshGitState(sketchDir);
-  }, [sketchDir, notify, refreshGitState]);
+    void refreshSketchBaud(sketchDir);
+  }, [sketchDir, notify, refreshGitState, refreshSketchBaud]);
 
   /** Refuse a build/flash while the agent's edits and the user's disagree.
    *
@@ -1741,6 +1821,9 @@ export default function App() {
     });
     if (!plan.retry) return;
     recaptureAttemptRef.current += 1;
+    // Mirrored for the status chip. Once per rung of the ladder, so the cost
+    // is a render per retry rather than one per serial line.
+    setRecaptureAttempt(recaptureAttemptRef.current);
     window.clearTimeout(recaptureTimerRef.current);
     recaptureTimerRef.current = window.setTimeout(
       () => void startMonitorQuietRef.current?.(),
@@ -1763,13 +1846,26 @@ export default function App() {
       return;
     }
     try {
-      setSerialLines([]);
-      await api.startMonitor(selectedPort, baudrate);
+      // The returned session id is what lets a `serial://closed` from the
+      // child we just replaced be told apart from this one dying.
+      monitorSessionRef.current = await api.startMonitor(
+        selectedPort,
+        baudrate,
+      );
       setMonitorOn(true);
+      // A marker rather than a wipe: the scrollback from before a reset is
+      // usually the half you wanted to read (the stack trace, the last
+      // print), so the log is never cleared on start.
+      serialStore.push(
+        "info",
+        `— monitor started at ${baudrate} baud —`,
+        Date.now(),
+      );
       // Capture is wanted from here until something explicitly stops it, and
       // the ladder resets so the next dropout starts from 1 s again.
       monitorWantedRef.current = true;
       recaptureAttemptRef.current = 0;
+      setRecaptureAttempt(0);
     } catch {
       // The port exists but will not open — still re-enumerating, or briefly
       // held by a dying previous child. This is the case that used to end
@@ -1787,6 +1883,7 @@ export default function App() {
   const requestCapture = useCallback(() => {
     monitorWantedRef.current = true;
     recaptureAttemptRef.current = 0;
+    setRecaptureAttempt(0);
     void startMonitorQuiet();
   }, [startMonitorQuiet]);
 
@@ -1840,11 +1937,65 @@ export default function App() {
           notify("Select a port first", true);
           return;
         }
-        setSerialLines([]);
-        await api.startMonitor(selectedPort, baudrate);
+        monitorSessionRef.current = await api.startMonitor(
+          selectedPort,
+          baudrate,
+        );
         setMonitorOn(true);
+        serialStore.push(
+          "info",
+          `— monitor started at ${baudrate} baud —`,
+          Date.now(),
+        );
         openBottomTab("serial");
       }
+    } catch (e) {
+      notify(String(e), true);
+    }
+  };
+
+  /**
+   * Set (or, with `null`, clear) this sketch's baud override — and re-open
+   * the port at the new rate if the monitor is running.
+   *
+   * Changing the number without re-opening the port is the classic way to
+   * spend ten minutes reading mojibake: the child already holds the port at
+   * the old rate and nothing else would ever restart it. When there is
+   * nothing to restart — no monitor, no port, or a flash owning the port —
+   * the choice is still stored and simply applies at the next start.
+   */
+  const changeBaud = async (baud: number | null) => {
+    if (!sketchDir) return;
+    setBaudOverrides(saveBaudOverride(localStorage, sketchDir, baud));
+    const next = effectiveBaud(baud ?? undefined, sketchBaud).baud;
+    if (
+      !monitorOn ||
+      !selectedPort ||
+      busyRef.current ||
+      agentFlashingRef.current
+    )
+      return;
+    try {
+      // The close this provokes is ours, not a dropout. Disarm the ladder
+      // first or it chases the port we are deliberately letting go — and
+      // re-opens it at the old rate.
+      monitorWantedRef.current = false;
+      window.clearTimeout(recaptureTimerRef.current);
+      await api.stopMonitor();
+      setMonitorOn(false);
+      // The old reader's `serial://closed` may still be in flight; it names
+      // the session we are leaving, so `onSerialClosed` drops it.
+      const session = await api.startMonitor(selectedPort, next);
+      monitorSessionRef.current = session;
+      setMonitorOn(true);
+      monitorWantedRef.current = true;
+      recaptureAttemptRef.current = 0;
+      setRecaptureAttempt(0);
+      serialStore.push(
+        "info",
+        `— monitor restarted at ${next} baud —`,
+        Date.now(),
+      );
     } catch (e) {
       notify(String(e), true);
     }
@@ -1859,9 +2010,13 @@ export default function App() {
       notify("Select a port first", true);
       return;
     }
-    setSerialLines([]);
-    await api.startMonitor(selectedPort, baudrate);
+    monitorSessionRef.current = await api.startMonitor(selectedPort, baudrate);
     setMonitorOn(true);
+    serialStore.push(
+      "info",
+      `— monitor started at ${baudrate} baud —`,
+      Date.now(),
+    );
     openBottomTab("serial");
   }, [monitorOn, selectedPort, baudrate, notify]);
 
@@ -1948,6 +2103,9 @@ export default function App() {
         /* best-effort — a missed tree refresh isn't worth surfacing */
       });
     gitStateRefreshRef.current(dir);
+    // The assistant rewriting `Serial.begin` is exactly the case where a
+    // silently stale picker costs a bench session.
+    void refreshSketchBaud(dir);
 
     const rel = relativeToSketchDir(filePath, dir);
     if (rel !== openFileRef.current) return;
@@ -2440,6 +2598,19 @@ export default function App() {
     [activity, sketchDir],
   );
 
+  /** What the Monitor's status chip shows. `retrying` only while the standing
+   *  request is still live: the attempt counter outlives a give-up, and a
+   *  stale "↻ 5/5" under a deliberate Stop would be a lie. */
+  const serialConnection: SerialConnection = monitorOn
+    ? { state: "on" }
+    : recaptureAttempt > 0 && monitorWantedRef.current
+      ? {
+          state: "retrying",
+          attempt: recaptureAttempt,
+          max: MAX_RECAPTURE_ATTEMPTS,
+        }
+      : { state: "off" };
+
   // No clock here: `StatusBar` owns the only ticking `now` in the app and
   // derives the estimate fraction from it. A second interval up here would
   // re-render the whole tree twice a second to move one dashed bar.
@@ -2788,34 +2959,26 @@ export default function App() {
             onClear={() => setBuildLines([])}
           />
         )}
-        {bottomTab === "serial" && (
-          <>
-            {/* Parked here until a SerialMonitor component (later task)
-                absorbs this toolbar together with the Console below it. */}
-            <div className="serial-toolbar">
-              <select
-                className="select small"
-                value={baudrate}
-                onChange={(e) => setBaudrate(Number(e.target.value))}
-                disabled={monitorOn}
-              >
-                {[9600, 19200, 57600, 115200, 230400, 921600].map((b) => (
-                  <option key={b} value={b}>
-                    {b} baud
-                  </option>
-                ))}
-              </select>
-              <button className="btn small" onClick={toggleMonitor}>
-                {monitorOn ? "Stop" : "Start"}
-              </button>
-            </div>
-            <Console
-              lines={serialLines}
-              onClear={() => setSerialLines([])}
-              onSend={(d) => api.monitorSend(d).catch((e) => notify(String(e), true))}
-            />
-          </>
-        )}
+        {/* Always mounted, hidden by `active`: unmounting would throw away
+            the scrollback, the filter and the scroll position every time the
+            user glanced at the build log. `onSend` gets the bytes with the
+            line ending already appended — the backend writes them verbatim. */}
+        <SerialMonitor
+          active={bottomTab === "serial"}
+          store={serialStore}
+          monitorOn={monitorOn}
+          busy={busy}
+          portLabel={selectedPort ? selectedPortName() : null}
+          baud={baudrate}
+          baudSource={baudSource}
+          sketchBaud={sketchBaud}
+          onBaudChange={(b) => void changeBaud(b)}
+          onUseSketchBaud={() => void changeBaud(null)}
+          connection={serialConnection}
+          onToggleMonitor={() => void toggleMonitor()}
+          onSend={(bytes) => api.monitorSend(bytes)}
+          notify={notify}
+        />
         {mqttMounted && (
           <MqttPanel active={bottomTab === "mqtt"} notify={notify} />
         )}

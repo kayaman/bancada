@@ -24,8 +24,9 @@ describe("App.tsx wiring: the build console, the badge and the editor jump", () 
   }
 
   it("gives the build tab the parsed console, not the raw one", () => {
-    // The raw `Console` is still imported — the serial tab uses it — so the
-    // meaningful assertion is that the *build* branch no longer does.
+    // The raw `Console` component is gone entirely now — the serial tab was
+    // its last user and `SerialMonitor` replaced it — so the build branch
+    // rendering the parsed console is the whole of the assertion.
     expect(src).toContain("<BuildConsole");
     expect(src).not.toContain("<Console lines={buildLines}");
   });
