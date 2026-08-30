@@ -9,6 +9,7 @@ import {
   DARK_PLUS,
   LIGHT_ALPHA,
   MISLABELLED,
+  MUTED_FOCUS_BORDER,
   SPARSE,
 } from "./fixtures/vscodeThemes";
 
@@ -18,6 +19,7 @@ const ALL: [string, VsCodeTheme][] = [
   ["Light+alpha", LIGHT_ALPHA],
   ["Awful", AWFUL],
   ["Mislabelled", MISLABELLED],
+  ["MutedFocus", MUTED_FOCUS_BORDER],
   ["Empty", {}],
   ["Colours-only-null", { colors: {} }],
 ];
@@ -58,6 +60,29 @@ describe("mapVsCodeTheme", () => {
     for (let i = 1; i < l.length; i++) {
       expect(l[i], `step ${i}`).toBeGreaterThan(l[i - 1]);
     }
+  });
+
+  it("takes the theme's signature colour, not its muted focus ring", () => {
+    // Found by running the real One Dark Pro through this: `focusBorder` is
+    // the most accent-shaped key name and routinely is NOT the accent.
+    const c = mapVsCodeTheme(MUTED_FOCUS_BORDER, "test").colors;
+    expect(c.accent).toBe("#61afef");
+    expect(c.accent).not.toBe("#3e4452");
+  });
+
+  it("keeps dimmed text distinguishable when the theme does not", () => {
+    // One Dark Pro sets descriptionForeground === editor.foreground. Mapping
+    // that faithfully is correct and useless: --text-dim exists to separate
+    // secondary text from primary, in 79 places.
+    const c = mapVsCodeTheme(MUTED_FOCUS_BORDER, "test").colors;
+    expect(c.textDim).not.toBe(c.text);
+    expect(contrastRatio(c.textDim, c.text)).toBeGreaterThan(1.15);
+  });
+
+  it("keeps a dim foreground the theme DID distinguish", () => {
+    // The check above must not throw away a deliberate choice.
+    const c = mapVsCodeTheme(DARK_PLUS, "test").colors;
+    expect(c.textDim).toBe("#9d9d9d");
   });
 
   it("composites 8-digit hex instead of taking it at face value", () => {

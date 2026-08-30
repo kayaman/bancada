@@ -78,6 +78,27 @@ export const AWFUL: VsCodeTheme = {
   },
 };
 
+/** Both quirks found by running the real One Dark Pro through the mapper, kept
+ *  because both produced a bad palette and neither is hypothetical:
+ *
+ *  - `focusBorder` is a muted grey while the theme's identity is the blue in
+ *    `textLink.foreground`. Leading the accent chain with focusBorder gives a
+ *    dull grey accent for a theme everyone recognises by its blue.
+ *  - `descriptionForeground` is set to exactly `editor.foreground`, so mapping
+ *    it faithfully erases the distinction --text-dim carries in 79 places. */
+export const MUTED_FOCUS_BORDER: VsCodeTheme = {
+  name: "Signature Blue",
+  type: "dark",
+  colors: {
+    "editor.background": "#282c34",
+    "editor.foreground": "#abb2bf",
+    descriptionForeground: "#abb2bf",
+    focusBorder: "#3e4452",
+    "textLink.foreground": "#61afef",
+    "activityBarBadge.background": "#4d78cc",
+  },
+};
+
 /** A theme whose declared `type` disagrees with its actual background. */
 export const MISLABELLED: VsCodeTheme = {
   name: "Mislabelled",

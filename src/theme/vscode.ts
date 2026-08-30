@@ -21,6 +21,7 @@
 
 import {
   composite,
+  contrastRatio,
   hslToRgb,
   parseHex,
   relativeLuminance,
@@ -84,11 +85,17 @@ const KEYS: Record<ColorToken, string[]> = {
     "disabledForeground",
     "editorLineNumber.foreground",
   ],
+  // `focusBorder` is LAST on purpose, despite being the most obviously
+  // accent-shaped name. Themes routinely set it to a muted separator colour —
+  // One Dark Pro uses #3e4452, a grey — while their actual signature colour
+  // lives in the link or the activity-bar badge. Leading with focusBorder
+  // produced a dull grey accent for a theme whose whole identity is a blue.
   accent: [
-    "focusBorder",
     "textLink.foreground",
-    "progressBar.background",
+    "activityBarBadge.background",
     "button.background",
+    "progressBar.background",
+    "focusBorder",
   ],
   accentDim: ["button.background", "button.hoverBackground", "badge.background"],
   onAccent: ["button.foreground", "badge.foreground"],
@@ -210,11 +217,21 @@ export function mapVsCodeTheme(theme: VsCodeTheme, id: string): Theme {
   const bgRaised = pick(colors, KEYS.bgRaised, bg) ?? shift(bg, dir * 0.06);
   const bgHover = pick(colors, KEYS.bgHover, bgPanel) ?? shift(bg, dir * 0.09);
 
-  const text =
-    pick(colors, KEYS.text, bg) ?? (dark ? "#d4d4d4" : "#1f1f1f");
+  const text = pick(colors, KEYS.text, bg) ?? (dark ? "#d4d4d4" : "#1f1f1f");
   // A dimmed foreground is the theme's text walked toward its background —
   // the relationship every hand-made theme encodes anyway.
-  const textDim = pick(colors, KEYS.textDim, bg) ?? mix(text, bg, 0.4);
+  //
+  // The distinguishability check is not paranoia: One Dark Pro really does set
+  // `descriptionForeground` to the same value as `editor.foreground`. Mapping
+  // that faithfully is correct and useless — Bancada leans on --text-dim in 79
+  // places to separate secondary text from primary, and a theme where the two
+  // are identical erases that everywhere at once. So a theme that declines to
+  // distinguish them gets a derived value instead of its own.
+  const declaredDim = pick(colors, KEYS.textDim, bg);
+  const textDim =
+    declaredDim && contrastRatio(declaredDim, text) >= 1.15
+      ? declaredDim
+      : mix(text, bg, 0.38);
 
   const accent = pick(colors, KEYS.accent, bg) ?? fallbacks.accent;
   const accentDim = pick(colors, KEYS.accentDim, bg) ?? shift(accent, -0.12);
