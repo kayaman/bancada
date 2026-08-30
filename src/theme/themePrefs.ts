@@ -29,8 +29,11 @@ export const DEFAULT_THEME_PREFS: ThemePrefs = {
   density: DEFAULT_DENSITY,
 };
 
-function knownTheme(id: unknown): id is string {
-  return typeof id === "string" && BUILTIN_THEMES.some((t) => t.id === id);
+function knownTheme(id: unknown, extra: readonly { id: string }[]): id is string {
+  return (
+    typeof id === "string" &&
+    (BUILTIN_THEMES.some((t) => t.id === id) || extra.some((t) => t.id === id))
+  );
 }
 
 /** Reads the saved preference, falling back per-field.
@@ -40,7 +43,12 @@ function knownTheme(id: unknown): id is string {
  *  certainly not a blank window. A half-valid record keeps the half that is
  *  valid: a recognised density with an unknown theme id (one that was removed,
  *  or an imported theme that is no longer installed) still gets its density. */
-export function loadThemePrefs(s: StorageLike): ThemePrefs {
+export function loadThemePrefs(
+  s: StorageLike,
+  /** Imported themes, so a saved import is not treated as an unknown id and
+   *  reset to the default on every launch. */
+  imported: readonly { id: string }[] = [],
+): ThemePrefs {
   let raw: unknown;
   try {
     const text = s.getItem(THEME_PREFS_KEY);
@@ -52,7 +60,7 @@ export function loadThemePrefs(s: StorageLike): ThemePrefs {
   if (typeof raw !== "object" || raw === null) return { ...DEFAULT_THEME_PREFS };
   const rec = raw as Record<string, unknown>;
   return {
-    themeId: knownTheme(rec.themeId) ? rec.themeId : DEFAULT_THEME_ID,
+    themeId: knownTheme(rec.themeId, imported) ? rec.themeId : DEFAULT_THEME_ID,
     density: isDensity(rec.density) ? rec.density : DEFAULT_DENSITY,
   };
 }

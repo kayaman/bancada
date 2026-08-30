@@ -696,6 +696,28 @@ export const identifyBoard = (port: string, previousId?: string | null) =>
 export const forgetBoard = (id: string) =>
   invoke<FleetEntry[]>("forget_board", { id });
 
+/** One colour theme found in a `.json` file or a `.vsix` package. */
+export interface ThemeSource {
+  /** Stable id: the package identity plus the theme's label. */
+  id: string;
+  label: string;
+  /** `dark` / `light` / `hc*` as the theme declared it, where it did. */
+  kind?: string | null;
+  /** The merged theme document, `include` chains already applied. */
+  json: string;
+}
+
+/**
+ * Reads the themes a `.json` theme file or `.vsix` package contributes.
+ *
+ * The backend only unpacks and merges; nothing is written to disk, entry
+ * sizes and counts are capped, and `include:` cannot escape the theme's own
+ * directory. What the colours *mean* — and whether the result clears the
+ * contrast floors — is decided in `theme/vscode.ts`.
+ */
+export const readThemeFile = (path: string) =>
+  invoke<ThemeSource[]>("read_theme_file", { path });
+
 export const loadSettings = () => invoke<AppSettings>("load_settings");
 /** Remember the open sketch and file for the next launch's restore. */
 export const setLastSketch = (dir: string, openFile: string | null) =>

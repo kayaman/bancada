@@ -11,6 +11,7 @@ import { portOptions } from "../ports";
 import { defaultRepoName } from "../publishRepo";
 import { buildBlockedReason, retargetBlockedReason } from "../toolbarModel";
 import type { ThemePrefs } from "../theme/themePrefs";
+import type { Theme as ThemeDef } from "../theme/tokens";
 import AppearanceMenu from "./AppearanceMenu";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
@@ -37,6 +38,10 @@ interface Props {
    *  the same reason Usage does. */
   themePrefs: ThemePrefs;
   onThemeChange: (p: ThemePrefs) => void;
+  importedThemes: readonly ThemeDef[];
+  onImportTheme: () => void;
+  onRemoveImportedTheme: (id: string) => void;
+  importingTheme: boolean;
   onCreateProfile: () => void;
   onAddProfile: () => void;
   onRetargetProfile: () => void;
@@ -203,7 +208,14 @@ export default function Toolbar(props: Props) {
           than with the project actions — it reports on every project, not
           the open one. */}
       <div className="toolbar-group toolbar-group-build">
-        <AppearanceMenu prefs={props.themePrefs} onChange={props.onThemeChange} />
+        <AppearanceMenu
+          prefs={props.themePrefs}
+          onChange={props.onThemeChange}
+          imported={props.importedThemes}
+          onImport={props.onImportTheme}
+          onRemoveImported={props.onRemoveImportedTheme}
+          importing={props.importingTheme}
+        />
         <button
           className="btn icon"
           onClick={props.onOpenUsage}

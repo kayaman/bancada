@@ -2329,6 +2329,20 @@ fn remove_recent_project(app: AppHandle, dir: String) -> Result<(), String> {
     update_settings(&app, |s| s.remove_recent(&dir))
 }
 
+/// Reads the colour themes in a `.json` theme file or a `.vsix` package.
+///
+/// The only path in Bancada that parses a third-party file, so the whole of
+/// the containment is on the other side of this call, in
+/// `bancada_core::vstheme`: nothing is extracted to disk, entry sizes and
+/// counts are capped, and `include:` chains cannot leave the theme's own
+/// directory. What comes back is merged JSON — deciding what the colours
+/// *mean*, and whether the result is legible enough to render, happens in
+/// `src/theme/vscode.ts` where the WCAG maths already lives.
+#[tauri::command]
+fn read_theme_file(path: String) -> Result<Vec<bancada_core::vstheme::ThemeSource>, String> {
+    bancada_core::vstheme::read_theme_path(std::path::Path::new(&path)).map_err(err_str)
+}
+
 // ---------- assistant chat history ----------
 
 fn chats_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -4869,6 +4883,7 @@ pub fn run() {
             save_text_file,
             save_binary_file,
             load_settings,
+            read_theme_file,
             set_last_sketch,
             set_last_project_parent,
             push_recent_project,

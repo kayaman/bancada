@@ -119,6 +119,23 @@ export const BUILTIN_THEMES: readonly Theme[] = [
 
 export const DEFAULT_THEME_ID = BANCADA_DARK.id;
 
-export function themeById(id: string | null | undefined): Theme {
-  return BUILTIN_THEMES.find((t) => t.id === id) ?? BANCADA_DARK;
+/** Resolves an id against the built-ins plus any imported themes.
+ *
+ *  Falls back to Bancada Dark rather than returning nothing: ids come from
+ *  user-editable storage, and an imported theme the user has since removed
+ *  must leave the window with a palette, not without one. */
+export function themeById(
+  id: string | null | undefined,
+  imported: readonly Theme[] = [],
+): Theme {
+  return (
+    BUILTIN_THEMES.find((t) => t.id === id) ??
+    imported.find((t) => t.id === id) ??
+    BANCADA_DARK
+  );
+}
+
+/** Every theme that can currently be chosen. */
+export function allThemes(imported: readonly Theme[] = []): Theme[] {
+  return [...BUILTIN_THEMES, ...imported];
 }

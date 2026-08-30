@@ -19,8 +19,16 @@ import {
 import { checkNewEntry } from "./newFile";
 import { applyTokens, serialRowHeight } from "./theme/apply";
 import { editorTheme } from "./theme/editorTheme";
+import {
+  addImportedThemes,
+  importThemeSource,
+  loadImportedThemes,
+  removeImportedTheme,
+  saveImportedThemes,
+} from "./theme/importedThemes";
 import { loadThemePrefs, saveThemePrefs, type ThemePrefs } from "./theme/themePrefs";
-import { themeById } from "./theme/themes";
+import { DEFAULT_THEME_ID, themeById } from "./theme/themes";
+import type { Theme as ThemeDef } from "./theme/tokens";
 import { badgeCount, parseBuildOutput, type JumpTarget } from "./diagnostics";
 import { gotoLine } from "./editorGoto";
 import { useExplorerStore } from "./explorerStore";
@@ -204,10 +212,17 @@ export default function App() {
   // Seeded from the same localStorage read main.tsx already did before mount,
   // so this state starts out agreeing with what is on screen rather than
   // re-theming the window one frame in.
-  const [themePrefs, setThemePrefs] = useState<ThemePrefs>(() =>
-    loadThemePrefs(window.localStorage),
+  const [importedThemes, setImportedThemes] = useState<ThemeDef[]>(() =>
+    loadImportedThemes(window.localStorage),
   );
-  const theme = useMemo(() => themeById(themePrefs.themeId), [themePrefs.themeId]);
+  const [themePrefs, setThemePrefs] = useState<ThemePrefs>(() =>
+    loadThemePrefs(window.localStorage, loadImportedThemes(window.localStorage)),
+  );
+  const [importingTheme, setImportingTheme] = useState(false);
+  const theme = useMemo(
+    () => themeById(themePrefs.themeId, importedThemes),
+    [themePrefs.themeId, importedThemes],
+  );
   const cmTheme = useMemo(() => editorTheme(theme), [theme]);
   const rowHeight = serialRowHeight(themePrefs.density);
   useEffect(() => {
@@ -544,6 +559,69 @@ export default function App() {
   const notify = useCallback((msg: string, isError = false) => {
     setToasts((s) => pushToast(s, kindOfNotify(msg, isError), msg, Date.now()));
   }, []);
+
+  // ---------- theme import ----------
+
+  const importTheme = useCallback(async () => {
+    const picked = await open({
+      multiple: false,
+      filters: [
+        { name: "VS Code theme", extensions: ["json", "jsonc", "vsix"] },
+      ],
+    });
+    if (typeof picked !== "string") return;
+    setImportingTheme(true);
+    try {
+      const sources = await api.readThemeFile(picked);
+      const outcomes = sources
+        .map((s) => importThemeSource(s.id, s.label, s.json))
+        .filter((o): o is NonNullable<typeof o> => o !== null);
+      if (outcomes.length === 0) {
+        notify("No usable colour theme in that file.", true);
+        return;
+      }
+      const themes = outcomes.map((o) => o.theme);
+      setImportedThemes((prev) => {
+        const next = addImportedThemes(prev, themes);
+        saveImportedThemes(window.localStorage, next);
+        return next;
+      });
+      // Selecting it is the point of importing it.
+      setThemePrefs((p) => ({ ...p, themeId: themes[0].id }));
+
+      // Say what was changed rather than changing it quietly. A marketplace
+      // theme has not been contrast-audited by anyone, and silently repairing
+      // one would leave the user thinking they are seeing the theme they
+      // chose when they are seeing a corrected version of it.
+      const repaired = outcomes.reduce((n, o) => n + o.violations.length, 0);
+      const many = themes.length > 1 ? ` (+${themes.length - 1} more)` : "";
+      notify(
+        repaired === 0
+          ? `Imported ${themes[0].name}${many}.`
+          : `Imported ${themes[0].name}${many} — ${repaired} colour${
+              repaired === 1 ? "" : "s"
+            } adjusted to stay readable.`,
+      );
+    } catch (e) {
+      notify(`Could not read that theme: ${e}`, true);
+    } finally {
+      setImportingTheme(false);
+    }
+  }, [notify]);
+
+  const removeImportedTheme_ = useCallback(
+    (id: string) => {
+      setImportedThemes((prev) => {
+        const next = removeImportedTheme(prev, id);
+        saveImportedThemes(window.localStorage, next);
+        return next;
+      });
+      // Falling back rather than leaving the window pointed at a theme that
+      // no longer exists.
+      setThemePrefs((p) => (p.themeId === id ? { ...p, themeId: DEFAULT_THEME_ID } : p));
+    },
+    [],
+  );
 
   // Nothing in `notifications.ts` owns a clock, so the expiry timer is here:
   // one timeout armed for the *soonest* deadline in the stack, re-armed after
@@ -2797,6 +2875,10 @@ export default function App() {
         onOpenUsage={() => showPane("usage")}
         themePrefs={themePrefs}
         onThemeChange={setThemePrefs}
+        importedThemes={importedThemes}
+        onImportTheme={importTheme}
+        onRemoveImportedTheme={removeImportedTheme_}
+        importingTheme={importingTheme}
         onCreateProfile={() => showPane(null, "bootstrap")}
         onAddProfile={() => showPane(null, "add")}
         onRetargetProfile={() => showPane(null, "retarget")}

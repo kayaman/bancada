@@ -3285,3 +3285,39 @@ body {
   line-height: 1.4;
   color: var(--text-dim);
 }
+
+/* An imported theme carries a remove affordance, so its row is the option
+   plus a trailing button rather than the option alone. */
+.appearance-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.appearance-row .appearance-option {
+  flex: 1;
+  min-width: 0;
+}
+
+.appearance-remove {
+  flex: none;
+  padding: 0 var(--sp-4);
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--fs-tiny);
+}
+
+.appearance-remove:hover {
+  background: var(--error-tint-strong);
+  color: var(--error);
+}
+
+.appearance-import {
+  color: var(--accent);
+}
+
+.appearance-import:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}

@@ -23,6 +23,14 @@ rumqttc = { version = "0.24", default-features = false }
 base64 = "0.22"
 # Explorer deletes go to the OS trash, never straight to fs::remove.
 trash = "5"
+# .vsix colour-theme packages are zips. default-features off: we only read,
+# and only deflate — the AES/bzip2/zstd/lzma backends are optional weight for
+# formats no .vsix uses. Nothing is ever extracted to disk (see vstheme.rs),
+# so this crate's job stays confined to inflating bytes in memory.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
+# tests/vstheme.rs builds .vsix fixtures; integration tests link the crate,
+# not the crate's dependencies, so zip has to be named again here.
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -7,6 +7,7 @@ import AppearanceMenu from "../AppearanceMenu";
 import { BUILTIN_THEMES } from "../../theme/themes";
 import { DENSITIES, DENSITY_LABEL } from "../../theme/density";
 import type { ThemePrefs } from "../../theme/themePrefs";
+import type { Theme } from "../../theme/tokens";
 
 afterEach(cleanup);
 
@@ -99,5 +100,89 @@ describe("AppearanceMenu", () => {
     await user.click(trigger());
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("group", { name: "Appearance" })).toBeNull();
+  });
+});
+
+describe("AppearanceMenu — imported themes", () => {
+  const IMPORTED: Theme = {
+    id: "vsix:acme.neon:Neon Dark",
+    name: "Neon Dark",
+    appearance: "dark",
+    colors: BUILTIN_THEMES[0].colors,
+  };
+
+  function setupImported(prefs: ThemePrefs = PREFS) {
+    const onChange = vi.fn();
+    const onImport = vi.fn();
+    const onRemoveImported = vi.fn();
+    render(
+      <AppearanceMenu
+        prefs={prefs}
+        onChange={onChange}
+        imported={[IMPORTED]}
+        onImport={onImport}
+        onRemoveImported={onRemoveImported}
+      />,
+    );
+    return { onChange, onImport, onRemoveImported, user: userEvent.setup() };
+  }
+
+  it("lists imported themes after the built-ins", async () => {
+    const { user } = setupImported();
+    await user.click(trigger());
+    const radios = within(
+      screen.getByRole("radiogroup", { name: "Theme" }),
+    ).getAllByRole("radio");
+    expect(radios).toHaveLength(BUILTIN_THEMES.length + 1);
+    expect(radios[radios.length - 1].textContent).toContain("Neon Dark");
+  });
+
+  it("offers an import action", async () => {
+    const { onImport, user } = setupImported();
+    await user.click(trigger());
+    await user.click(screen.getByRole("button", { name: /Import VS Code theme/ }));
+    expect(onImport).toHaveBeenCalled();
+  });
+
+  it("disables the import action while a file is being read", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppearanceMenu prefs={PREFS} onChange={vi.fn()} onImport={vi.fn()} importing />,
+    );
+    await user.click(trigger());
+    const btn = screen.getByRole("button", { name: /Reading/ });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("lets an imported theme be removed, and names which one", async () => {
+    // The label matters: with several imports the buttons are otherwise
+    // indistinguishable to a screen reader.
+    const { onRemoveImported, user } = setupImported();
+    await user.click(trigger());
+    await user.click(screen.getByRole("button", { name: "Remove Neon Dark" }));
+    expect(onRemoveImported).toHaveBeenCalledWith(IMPORTED.id);
+  });
+
+  it("offers no remove control for a built-in theme", async () => {
+    const { user } = setupImported();
+    await user.click(trigger());
+    expect(screen.queryByRole("button", { name: /Remove Bancada/ })).toBeNull();
+  });
+
+  it("can select an imported theme", async () => {
+    const { onChange, user } = setupImported();
+    await user.click(trigger());
+    await user.click(screen.getByRole("radio", { name: /Neon Dark/ }));
+    expect(onChange).toHaveBeenCalledWith({
+      themeId: IMPORTED.id,
+      density: PREFS.density,
+    });
+  });
+
+  it("hides import entirely when the host does not offer it", async () => {
+    const user = userEvent.setup();
+    render(<AppearanceMenu prefs={PREFS} onChange={vi.fn()} />);
+    await user.click(trigger());
+    expect(screen.queryByRole("button", { name: /Import VS Code theme/ })).toBeNull();
   });
 });

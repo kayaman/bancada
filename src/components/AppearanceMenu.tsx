@@ -6,13 +6,21 @@ import {
   DENSITY_LABEL,
   type Density,
 } from "../theme/density";
-import { BUILTIN_THEMES } from "../theme/themes";
+import { allThemes } from "../theme/themes";
 import type { ThemePrefs } from "../theme/themePrefs";
+import type { Theme } from "../theme/tokens";
 import Menu from "./Menu";
 
 interface Props {
   prefs: ThemePrefs;
   onChange: (p: ThemePrefs) => void;
+  /** Themes brought in from a `.json` file or `.vsix`, listed after the
+   *  built-ins and removable. */
+  imported?: readonly Theme[];
+  onImport?: () => void;
+  onRemoveImported?: (id: string) => void;
+  /** True while a file is being read and mapped. */
+  importing?: boolean;
 }
 
 type Anchor = { x: number; y: number };
@@ -35,7 +43,14 @@ type Anchor = { x: number; y: number };
  * cluster is pinned `flex: none` and every pixel it takes is a pixel the rest
  * of the bar cannot use.
  */
-export default function AppearanceMenu({ prefs, onChange }: Props) {
+export default function AppearanceMenu({
+  prefs,
+  onChange,
+  imported = [],
+  onImport,
+  onRemoveImported,
+  importing = false,
+}: Props) {
   const btnRef = useRef<HTMLButtonElement>(null);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
 
@@ -76,34 +91,58 @@ export default function AppearanceMenu({ prefs, onChange }: Props) {
           <div className="appearance-menu">
             <div className="appearance-section" role="radiogroup" aria-label="Theme">
               <div className="appearance-heading">Theme</div>
-              {BUILTIN_THEMES.map((t) => (
+              {allThemes(imported).map((t) => {
+                const isImported = imported.some((i) => i.id === t.id);
+                return (
+                  <div key={t.id} className="appearance-row">
+                    <button
+                      className="ctx-item appearance-option"
+                      role="radio"
+                      aria-checked={prefs.themeId === t.id}
+                      onClick={() => onChange({ ...prefs, themeId: t.id })}
+                    >
+                      <span
+                        className="appearance-swatch"
+                        aria-hidden="true"
+                        style={{
+                          background: t.colors.bgPanel,
+                          borderColor: t.colors.borderStrong,
+                        }}
+                      >
+                        <i style={{ background: t.colors.accent }} />
+                        <i style={{ background: t.colors.text }} />
+                        <i style={{ background: t.colors.warn }} />
+                      </span>
+                      <span className="appearance-label">{t.name}</span>
+                      {prefs.themeId === t.id && (
+                        <span className="appearance-tick" aria-hidden="true">
+                          ✓
+                        </span>
+                      )}
+                    </button>
+                    {isImported && onRemoveImported && (
+                      <button
+                        className="appearance-remove"
+                        title={`Remove ${t.name}`}
+                        aria-label={`Remove ${t.name}`}
+                        onClick={() => onRemoveImported(t.id)}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {onImport && (
                 <button
-                  key={t.id}
-                  className="ctx-item appearance-option"
-                  role="radio"
-                  aria-checked={prefs.themeId === t.id}
-                  onClick={() => onChange({ ...prefs, themeId: t.id })}
+                  className="ctx-item appearance-import"
+                  onClick={onImport}
+                  disabled={importing}
+                  title="Load a VS Code colour theme (.json) or extension (.vsix)"
                 >
-                  <span
-                    className="appearance-swatch"
-                    aria-hidden="true"
-                    style={{
-                      background: t.colors.bgPanel,
-                      borderColor: t.colors.borderStrong,
-                    }}
-                  >
-                    <i style={{ background: t.colors.accent }} />
-                    <i style={{ background: t.colors.text }} />
-                    <i style={{ background: t.colors.warn }} />
-                  </span>
-                  <span className="appearance-label">{t.name}</span>
-                  {prefs.themeId === t.id && (
-                    <span className="appearance-tick" aria-hidden="true">
-                      ✓
-                    </span>
-                  )}
+                  {importing ? "Reading…" : "Import VS Code theme…"}
                 </button>
-              ))}
+              )}
             </div>
 
             <div className="appearance-section" role="radiogroup" aria-label="Density">

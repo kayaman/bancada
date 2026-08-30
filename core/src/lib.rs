@@ -31,6 +31,7 @@ pub mod settings;
 pub mod sketch;
 pub mod types;
 pub mod usage;
+pub mod vstheme;
 
 use thiserror::Error;
 
