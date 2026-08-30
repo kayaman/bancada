@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { cpp } from "@codemirror/lang-cpp";
-import { oneDark } from "@codemirror/theme-one-dark";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
@@ -18,6 +17,10 @@ import {
   withPath,
 } from "./ports";
 import { checkNewEntry } from "./newFile";
+import { applyTokens, serialRowHeight } from "./theme/apply";
+import { editorTheme } from "./theme/editorTheme";
+import { loadThemePrefs, saveThemePrefs, type ThemePrefs } from "./theme/themePrefs";
+import { themeById } from "./theme/themes";
 import { badgeCount, parseBuildOutput, type JumpTarget } from "./diagnostics";
 import { gotoLine } from "./editorGoto";
 import { useExplorerStore } from "./explorerStore";
@@ -196,6 +199,22 @@ interface ContinuationStash {
 }
 
 export default function App() {
+  // appearance — theme + density.
+  //
+  // Seeded from the same localStorage read main.tsx already did before mount,
+  // so this state starts out agreeing with what is on screen rather than
+  // re-theming the window one frame in.
+  const [themePrefs, setThemePrefs] = useState<ThemePrefs>(() =>
+    loadThemePrefs(window.localStorage),
+  );
+  const theme = useMemo(() => themeById(themePrefs.themeId), [themePrefs.themeId]);
+  const cmTheme = useMemo(() => editorTheme(theme), [theme]);
+  const rowHeight = serialRowHeight(themePrefs.density);
+  useEffect(() => {
+    applyTokens(theme, themePrefs.density);
+    saveThemePrefs(window.localStorage, themePrefs);
+  }, [theme, themePrefs]);
+
   // project
   const [sketchDir, setSketchDir] = useState<string | null>(null);
   // File listing lives in the explorer store (tree state travels with it);
@@ -2776,6 +2795,8 @@ export default function App() {
         onDuplicateProject={() => showPane("duplicate")}
         onRenameProject={() => showPane("rename")}
         onOpenUsage={() => showPane("usage")}
+        themePrefs={themePrefs}
+        onThemeChange={setThemePrefs}
         onCreateProfile={() => showPane(null, "bootstrap")}
         onAddProfile={() => showPane(null, "add")}
         onRetargetProfile={() => showPane(null, "retarget")}
@@ -3052,7 +3073,7 @@ export default function App() {
             className="editor"
             value={content}
             height="100%"
-            theme={oneDark}
+            theme={cmTheme}
             extensions={[cpp()]}
             onChange={(value) => {
               if (openFile) {
@@ -3109,6 +3130,7 @@ export default function App() {
         <SerialMonitor
           active={bottomTab === "serial"}
           store={serialStore}
+          rowHeight={rowHeight}
           monitorOn={monitorOn}
           flashing={flashOwnsPort}
           portLabel={selectedPort ? selectedPortName() : null}

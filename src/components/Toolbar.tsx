@@ -10,6 +10,8 @@ import type {
 import { portOptions } from "../ports";
 import { defaultRepoName } from "../publishRepo";
 import { buildBlockedReason, retargetBlockedReason } from "../toolbarModel";
+import type { ThemePrefs } from "../theme/themePrefs";
+import AppearanceMenu from "./AppearanceMenu";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
 import ProjectMenu from "./ProjectMenu";
@@ -31,6 +33,10 @@ interface Props {
   onRenameProject: () => void;
   onDuplicateProject: () => void;
   onOpenUsage: () => void;
+  /** Appearance is application state, not project state — it rides here for
+   *  the same reason Usage does. */
+  themePrefs: ThemePrefs;
+  onThemeChange: (p: ThemePrefs) => void;
   onCreateProfile: () => void;
   onAddProfile: () => void;
   onRetargetProfile: () => void;
@@ -197,6 +203,7 @@ export default function Toolbar(props: Props) {
           than with the project actions — it reports on every project, not
           the open one. */}
       <div className="toolbar-group toolbar-group-build">
+        <AppearanceMenu prefs={props.themePrefs} onChange={props.onThemeChange} />
         <button
           className="btn icon"
           onClick={props.onOpenUsage}

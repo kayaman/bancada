@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.2",
-    "@codemirror/theme-one-dark": "^6.1.2",
+    "@codemirror/language": "^6.12.4",
+    "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@uiw/react-codemirror": "^4.23.0",

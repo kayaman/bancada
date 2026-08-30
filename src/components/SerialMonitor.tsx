@@ -67,6 +67,13 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void;
   /** Injected in tests; `window.localStorage` in the app. */
   storage?: StorageLike;
+  /** Row height in px for the current density, which must match what CSS
+   *  paints (`--serial-row-h`). The rows are virtualised: this number decides
+   *  which slice is rendered and where it is offset, so if it disagrees with
+   *  the painted height the list drifts further out of register the further
+   *  you scroll. App passes `serialRowHeight(density)`, the same source the
+   *  custom property comes from; the default keeps existing tests honest. */
+  rowHeight?: number;
 }
 
 /** 1234 → "1,234". Hand-rolled rather than `toLocaleString` so the count in
@@ -96,6 +103,7 @@ export default function SerialMonitor({
   onSend,
   notify,
   storage,
+  rowHeight = ROW_HEIGHT,
 }: Props) {
   const prefsStorage = storage ?? window.localStorage;
   const [prefs, setPrefs] = useState<SerialUiPrefs>(() =>
@@ -186,9 +194,9 @@ export default function SerialMonitor({
   // painted a blank band on every tick. The bottom of the list is arithmetic
   // we already have; there is no need to ask the DOM where it went.
   const anchored = autoFollow
-    ? Math.max(0, snap.rows.length * ROW_HEIGHT - viewport)
+    ? Math.max(0, snap.rows.length * rowHeight - viewport)
     : scrollTop;
-  const range = visibleRange(anchored, viewport, snap.rows.length);
+  const range = visibleRange(anchored, viewport, snap.rows.length, rowHeight);
   const window_ = snap.rows.slice(range.start, range.end);
 
   // Layout, not passive: this runs after the commit that added the rows (so
