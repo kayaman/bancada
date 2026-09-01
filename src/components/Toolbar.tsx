@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import type {
   DetectedPort,
   FleetSnapshot,
+  ProjectKind,
   RepoState,
   SketchYaml,
   Visibility,
@@ -16,11 +17,20 @@ import AppearanceMenu from "./AppearanceMenu";
 import BrandMark from "./BrandMark";
 import GitPill from "./GitPill";
 import ProjectMenu from "./ProjectMenu";
+import TargetPicker from "./TargetPicker";
 
 interface Props {
   sketchDir: string | null;
   sketchYaml: SketchYaml | null;
   profile: string | null;
+  /** Which toolchain builds this project. Decided in Rust; rendered here. */
+  projectKind: ProjectKind;
+  /** ESP-IDF only: the configured chip, and what could be chosen instead. */
+  idfTarget: string | null;
+  idfTargets: string[];
+  idfAvailable: boolean;
+  hasSdkconfig: boolean;
+  onSetIdfTarget: (target: string) => void;
   ports: DetectedPort[];
   selectedPort: string | null;
   /** Last fleet snapshot, so ports are named by nickname where one exists. */
@@ -108,7 +118,28 @@ export default function Toolbar(props: Props) {
       <div className="toolbar-sep" />
 
       <div className="toolbar-group">
-        {props.sketchDir && profiles.length === 0 ? (
+        {/* One slot, three shapes. ESP-IDF replaces the profile controls
+            rather than disabling them: `＋` and `✎` are *meaningless* for a
+            project with no sketch.yaml, and the house rule hides a control
+            that has nothing to refer to. An unrecognised folder shows
+            nothing — the slot's height is pinned in CSS so the bar does not
+            jump, and it holds no placeholder to imply a control that is not
+            there. */}
+        {props.projectKind === "idf" ? (
+          <TargetPicker
+            targets={props.idfTargets}
+            current={props.idfTarget}
+            sketchDir={props.sketchDir}
+            busy={props.busy}
+            idfAvailable={props.idfAvailable}
+            underGit={
+              props.gitState != null && props.gitState.kind !== "no_git"
+            }
+            hasSdkconfig={props.hasSdkconfig}
+            onSetTarget={props.onSetIdfTarget}
+          />
+        ) : props.projectKind === "unknown" && props.sketchDir ? null : props.sketchDir &&
+          profiles.length === 0 ? (
           <button
             className="btn"
             onClick={props.onCreateProfile}

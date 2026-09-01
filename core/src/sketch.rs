@@ -339,6 +339,54 @@ impl SketchProject {
         Ok(y)
     }
 
+    /// Fill in `platform_index_url:` for every pinned platform that lacks one
+    /// and whose packager one of `indexes` declares.
+    ///
+    /// `arduino-cli compile -m <profile>` is hermetic: it resolves platforms
+    /// from Arduino's official index plus whatever the profile itself names.
+    /// It ignores `board_manager.additional_urls` and will not fall back on an
+    /// installed core. So a profile pinning `esp8266:esp8266` without a URL
+    /// dies with "Platform not found: platform not installed" even with that
+    /// exact version installed and the URL sitting in the CLI config. `esp32`
+    /// *is* in the default index, so the identically-written sibling profile
+    /// builds fine — which is what makes this so hard to see.
+    ///
+    /// Applied as a repair over the whole file rather than as an argument to
+    /// the three writers, for two reasons: every writer is covered without
+    /// threading a parameter through their twenty-odd call sites, and a
+    /// profile that is ALREADY broken on disk is healed the next time the
+    /// project is touched.
+    ///
+    /// Deliberately additive-only. An existing URL is never overwritten — it
+    /// may be hand-written, or point at a staging index on purpose — and a
+    /// packager no index declares is left alone, which is the right answer for
+    /// the default-index ones (`arduino`, `esp32`) that need no URL at all.
+    ///
+    /// Writes nothing when nothing changed, so a no-op repair cannot reformat
+    /// the file or dirty git status.
+    pub fn ensure_platform_index_urls(&self, indexes: &[(String, String)]) -> Result<SketchYaml> {
+        let mut y = self.load_yaml()?;
+        let mut changed = false;
+        for profile in y.profiles.values_mut() {
+            for platform in profile.platforms.iter_mut() {
+                if platform.platform_index_url.is_some() {
+                    continue;
+                }
+                let id = crate::boards::platform_dep_id(&platform.platform);
+                // "esp8266:esp8266" -> packager "esp8266"; a bare id is its own.
+                let packager = id.split_once(':').map(|(p, _)| p).unwrap_or(id);
+                if let Some(url) = crate::boards::index_url_for_packager(packager, indexes) {
+                    platform.platform_index_url = Some(url);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save_yaml(&y)?;
+        }
+        Ok(y)
+    }
+
     /// All local `dir:` library paths of a profile, resolved to absolute paths.
     pub fn local_library_paths(&self, profile_name: &str) -> Result<Vec<PathBuf>> {
         let y = self.load_yaml()?;
@@ -359,7 +407,18 @@ impl SketchProject {
     }
 }
 
-pub(crate) const SKIP_DIRS: &[&str] = &["build", ".git", ".pio", "node_modules", ".vscode"];
+// `managed_components` is the ESP-IDF Component Manager's checkout: thousands
+// of vendored files that would swamp the Explorer tree. It is listed here
+// rather than in an IDF-only constant because this walker serves both project
+// kinds, and no Arduino sketch has such a directory anyway.
+pub(crate) const SKIP_DIRS: &[&str] = &[
+    "build",
+    ".git",
+    ".pio",
+    "node_modules",
+    ".vscode",
+    "managed_components",
+];
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<SketchFile>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -731,6 +790,122 @@ profiles:
             "one platform must not be pinned twice at two versions"
         );
         assert_eq!(platforms[0].platform, "esp32:esp32 (3.3.11)");
+    }
+
+    const NEEDS_URLS: &str = r#"
+default_profile: nodemcuv2
+profiles:
+  nodemcuv2:
+    fqbn: esp8266:esp8266:nodemcuv2
+    platforms:
+      - platform: esp8266:esp8266 (3.1.2)
+  esp32:
+    fqbn: esp32:esp32:esp32
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+  uno:
+    fqbn: arduino:avr:uno
+    platforms:
+      - platform: arduino:avr (1.8.8)
+        platform_index_url: https://example.invalid/hand-written.json
+"#;
+
+    fn esp8266_indexes() -> Vec<(String, String)> {
+        vec![(
+            "https://arduino.esp8266.com/stable/package_esp8266com_index.json".to_string(),
+            r#"{"packages":[{"name":"esp8266","platforms":[]}]}"#.to_string(),
+        )]
+    }
+
+    fn urls_project(tmp: &tempfile::TempDir) -> SketchProject {
+        std::fs::write(tmp.path().join("sketch.yaml"), NEEDS_URLS).unwrap();
+        SketchProject::open(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn back_fills_the_index_url_a_hermetic_build_needs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = urls_project(&tmp);
+
+        let y = proj
+            .ensure_platform_index_urls(&esp8266_indexes())
+            .unwrap();
+        assert_eq!(
+            y.profiles["nodemcuv2"].platforms[0]
+                .platform_index_url
+                .as_deref(),
+            Some("https://arduino.esp8266.com/stable/package_esp8266com_index.json")
+        );
+    }
+
+    #[test]
+    fn leaves_a_default_index_packager_alone() {
+        // esp32 IS in Arduino's default index. Inventing a URL for it would be
+        // noise at best and a wrong pin at worst.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = urls_project(&tmp);
+
+        let y = proj
+            .ensure_platform_index_urls(&esp8266_indexes())
+            .unwrap();
+        assert_eq!(y.profiles["esp32"].platforms[0].platform_index_url, None);
+    }
+
+    #[test]
+    fn never_overwrites_a_url_that_is_already_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = urls_project(&tmp);
+        let indexes = vec![(
+            "https://arduino.cc/derived.json".to_string(),
+            r#"{"packages":[{"name":"arduino","platforms":[]}]}"#.to_string(),
+        )];
+
+        let y = proj.ensure_platform_index_urls(&indexes).unwrap();
+        assert_eq!(
+            y.profiles["uno"].platforms[0].platform_index_url.as_deref(),
+            Some("https://example.invalid/hand-written.json")
+        );
+    }
+
+    #[test]
+    fn writes_nothing_when_there_is_nothing_to_fill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = urls_project(&tmp);
+        let before = std::fs::read_to_string(tmp.path().join("sketch.yaml")).unwrap();
+
+        proj.ensure_platform_index_urls(&[]).unwrap();
+
+        // Byte-identical: a no-op repair must not reformat the user's file,
+        // reorder its keys, or dirty their git status.
+        let after = std::fs::read_to_string(tmp.path().join("sketch.yaml")).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn repairs_every_profile_not_just_the_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("sketch.yaml"),
+            r#"
+default_profile: a
+profiles:
+  a:
+    fqbn: arduino:avr:uno
+    platforms:
+      - platform: arduino:avr (1.8.8)
+  b:
+    fqbn: esp8266:esp8266:nodemcuv2
+    platforms:
+      - platform: esp8266:esp8266 (3.1.2)
+"#,
+        )
+        .unwrap();
+        let proj = SketchProject::open(tmp.path()).unwrap();
+
+        let y = proj
+            .ensure_platform_index_urls(&esp8266_indexes())
+            .unwrap();
+        assert!(y.profiles["b"].platforms[0].platform_index_url.is_some());
     }
 
     #[test]

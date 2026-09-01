@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import StatusBar from "../StatusBar";
 import type { Activity } from "../../statusLine";
+import { AgentStore } from "../../agent/agentStore";
 
 const T0 = 1_700_000_000_000;
 
@@ -252,5 +253,105 @@ describe("StatusBar — progress", () => {
     );
     expect(bar().getAttribute("aria-valuenow")).toBe("42");
     expect(bar().querySelector(".fill.estimate")).toBe(null);
+  });
+});
+
+// ---------- the Assistant segment ----------
+
+const agentText = () =>
+  document.querySelector(".statusbar-agent")?.textContent ?? null;
+const pipClass = () =>
+  document.querySelector(".statusbar-agent .agent-pip")?.className ?? null;
+
+/** A store with a turn in flight since `startedAt`. */
+const liveStore = (startedAt = T0) => {
+  vi.setSystemTime(startedAt);
+  const s = new AgentStore();
+  s.userSent("fix the baud detection");
+  vi.setSystemTime(T0);
+  return s;
+};
+
+describe("StatusBar — the Assistant segment", () => {
+  it("shows nothing when there is no session", () => {
+    render(<StatusBar {...base} agentStore={new AgentStore()} agentLive={false} />);
+    expect(agentText()).toBeNull();
+  });
+
+  it("shows nothing while the session is alive but between turns", () => {
+    const s = new AgentStore();
+    s.push({ type: "system", subtype: "init" } as never);
+    render(<StatusBar {...base} agentStore={s} agentLive={false} />);
+    expect(agentText()).toBeNull();
+  });
+
+  it("names the assistant and what it is doing while a turn is in flight", () => {
+    render(
+      <StatusBar {...base} agentStore={liveStore(T0 - 3_000)} agentLive />,
+    );
+    expect(agentText()).toBe("Assistant · thinking · 0:03");
+    expect(pipClass()).toContain("working");
+  });
+
+  it("admits when nothing has arrived for a while", () => {
+    render(
+      <StatusBar {...base} agentStore={liveStore(T0 - 25_000)} agentLive />,
+    );
+    expect(agentText()).toBe(
+      "Assistant · thinking · 0:25 · no output for 0:25",
+    );
+    expect(pipClass()).toContain("stalled");
+  });
+
+  it("sits alongside a user build rather than replacing it", () => {
+    render(
+      <StatusBar
+        {...base}
+        activity={compiling}
+        busy
+        agentStore={liveStore(T0 - 3_000)}
+        agentLive
+      />,
+    );
+    expect(text()).toBe("Compiling… 0:07");
+    expect(agentText()).toBe("Assistant · thinking · 0:03");
+  });
+
+  it("stays quiet while the main line is already the assistant's own build", () => {
+    // "Assistant compiling… 0:12" plus "Assistant · 🔨 verify (compiling)"
+    // is the same fact twice on one row.
+    render(
+      <StatusBar
+        {...base}
+        activity={{
+          key: "agent_compile",
+          label: "Assistant compiling…",
+          startedAt: T0 - 12_000,
+        }}
+        busy
+        agentStore={liveStore(T0 - 30_000)}
+        agentLive
+      />,
+    );
+    expect(text()).toBe("Assistant compiling… 0:12");
+    expect(agentText()).toBeNull();
+  });
+
+  it("ticks the assistant's clock with no build activity to drive it", () => {
+    render(
+      <StatusBar {...base} agentStore={liveStore(T0 - 3_000)} agentLive />,
+    );
+    expect(agentText()).toBe("Assistant · thinking · 0:03");
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(agentText()).toBe("Assistant · thinking · 0:05");
+  });
+
+  it("arms no interval for an assistant that is not working", () => {
+    const spy = vi.spyOn(window, "setInterval");
+    render(<StatusBar {...base} agentStore={new AgentStore()} agentLive={false} />);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

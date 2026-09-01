@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   composeFqbn,
   defaultSelection,
+  idfSilentSerialWarning,
   parseFqbn,
   silentSerialWarning,
 } from "../boardOptions";
@@ -273,5 +274,70 @@ describe("silentSerialWarning", () => {
 
   it("stays quiet for a network port", () => {
     expect(silentSerialWarning("2804:7f0::1", "esp32:esp32:esp32s3")).toBeNull();
+  });
+});
+
+describe("idfSilentSerialWarning", () => {
+  const uartNoMirror = {
+    channel: "uart" as const,
+    secondary_usb: false,
+    baudrate: 115200,
+  };
+  const uartStock = { ...uartNoMirror, secondary_usb: true };
+
+  it("warns for a UART console with no USB mirror on a native-USB port", () => {
+    // The one configuration that is genuinely silent: real esp32s3 sdkconfig
+    // with CONFIG_ESP_CONSOLE_UART=y and CONFIG_ESP_CONSOLE_SECONDARY_NONE=y.
+    const w = idfSilentSerialWarning("/dev/ttyACM0", uartNoMirror);
+    expect(w).toContain("/dev/ttyACM0");
+    expect(w).toContain("UART0 peripheral");
+    expect(w).toContain("menuconfig");
+  });
+
+  it("stays silent on ESP-IDF's stock configuration", () => {
+    // THE false positive to avoid. Every unmodified project on a chip with a
+    // USB Serial/JTAG controller has a UART primary AND the secondary mirror,
+    // and prints perfectly well. Warning here would fire on almost everything.
+    expect(idfSilentSerialWarning("/dev/ttyACM0", uartStock)).toBeNull();
+  });
+
+  it("stays silent when the console is already on USB", () => {
+    for (const channel of ["usb_cdc", "usb_serial_jtag"] as const) {
+      expect(
+        idfSilentSerialWarning("/dev/ttyACM0", {
+          channel,
+          secondary_usb: false,
+          baudrate: null,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("stays silent on a bridge port, where UART0 is what you are reading", () => {
+    expect(idfSilentSerialWarning("/dev/ttyUSB0", uartNoMirror)).toBeNull();
+  });
+
+  it("says nothing when the console configuration is unknown", () => {
+    // A project whose sdkconfig names no channel: we did not read a
+    // configuration, so we make no claim about one.
+    expect(idfSilentSerialWarning("/dev/ttyACM0", null)).toBeNull();
+    expect(idfSilentSerialWarning(null, uartNoMirror)).toBeNull();
+  });
+
+  it("explains a console that is compiled out entirely", () => {
+    const w = idfSilentSerialWarning("/dev/ttyACM0", {
+      channel: "none",
+      secondary_usb: false,
+      baudrate: null,
+    });
+    // Different failure, different sentence: no port would help here.
+    expect(w).toContain("CONFIG_ESP_CONSOLE_NONE");
+    expect(w).toContain("every");
+  });
+
+  it("does not suggest switching cable, for the same reason as the Arduino one", () => {
+    const w = idfSilentSerialWarning("/dev/ttyACM0", uartNoMirror) ?? "";
+    expect(w.toLowerCase()).not.toContain("other port");
+    expect(w.toLowerCase()).not.toContain("different port");
   });
 });

@@ -406,6 +406,104 @@ pub fn rename_project(dir: &Path, new_name: &str) -> Result<RenamedProject> {
 
 // ---------- tests ----------
 
+
+// ---------- project kind ----------
+
+/// Which toolchain a directory is built with.
+///
+/// Bancada drives two: `arduino-cli` for sketches and `idf.py` for ESP-IDF
+/// projects. Which one applies is decided here, from the directory alone, and
+/// **only here** — the frontend renders this answer rather than computing a
+/// second copy of it that could drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+    Arduino,
+    Idf,
+    /// Neither — there is nothing here to build.
+    Unknown,
+}
+
+/// Does this `CMakeLists.txt` declare a CMake *project*?
+///
+/// Merely existing is not enough: every ESP-IDF component directory has a
+/// `CMakeLists.txt` too, and those call `idf_component_register` rather than
+/// `project()`. This mirrors the check ESP-IDF's own tooling makes before
+/// agreeing that a directory is a project at all.
+///
+/// CMake command names are case-insensitive, and a commented-out `project()`
+/// obviously does not count.
+pub fn declares_cmake_project(cmakelists: &str) -> bool {
+    cmakelists.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            return false;
+        }
+        let Some(rest) = t.get(..7) else {
+            return false;
+        };
+        if !rest.eq_ignore_ascii_case("project") {
+            return false;
+        }
+        // `project (name)` is legal; `project_something(...)` is not a match.
+        t[7..].trim_start().starts_with('(')
+    })
+}
+
+/// Decide a project's kind from what the directory contains.
+///
+/// **ESP-IDF wins when both are present.** A folder can legitimately hold an
+/// Arduino sketch beside a real IDF project — `arduino-esp32` ships as an IDF
+/// component, so hybrids exist — and of the two, only `idf.py` can build such a
+/// tree; `arduino-cli` cannot. Choosing IDF is therefore the reading that can
+/// actually succeed. This is a deliberate decision rather than an accident of
+/// ordering, which is why it has a test of its own.
+pub fn classify(has_ino: bool, has_sketch_yaml: bool, has_idf_cmake: bool) -> ProjectKind {
+    if has_idf_cmake {
+        ProjectKind::Idf
+    } else if has_ino || has_sketch_yaml {
+        ProjectKind::Arduino
+    } else {
+        ProjectKind::Unknown
+    }
+}
+
+/// Whether the directory holds a sketch's main file.
+///
+/// Deliberately looser than [`crate::sketch::SketchProject::main_ino`], which
+/// insists on `<dirname>.ino`. For *detection* a mis-named `.ino` still means
+/// "this is an Arduino sketch", and letting arduino-cli say "main file missing"
+/// is a far better error than bancada saying "unknown project kind".
+fn has_root_ino(dir: &Path) -> bool {
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if dir.join(format!("{name}.ino")).is_file() {
+            return true;
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path()
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("ino"))
+    })
+}
+
+/// Classify a directory on disk.
+pub fn detect_kind(dir: &Path) -> ProjectKind {
+    let cmake = dir.join("CMakeLists.txt");
+    let has_idf_cmake = std::fs::read_to_string(&cmake)
+        .map(|t| declares_cmake_project(&t))
+        .unwrap_or(false);
+    classify(
+        has_root_ino(dir),
+        dir.join("sketch.yaml").is_file(),
+        has_idf_cmake,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,5 +1028,54 @@ mod tests {
         assert_eq!(profile_name_for_fqbn(":::"), "default");
         // a board name with punctuation stays usable as a YAML key
         assert_eq!(profile_name_for_fqbn("a:b:c.d"), "c_d");
+    }
+
+    // ---------- project kind ----------
+
+    #[test]
+    fn a_top_level_cmakelists_declares_a_project() {
+        assert!(declares_cmake_project(
+            "cmake_minimum_required(VERSION 3.16)\ninclude($ENV{IDF_PATH}/tools/cmake/project.cmake)\nproject(hello_world)\n"
+        ));
+    }
+
+    #[test]
+    fn cmake_command_names_are_case_insensitive() {
+        assert!(declares_cmake_project("PROJECT (hello)\n"));
+        assert!(declares_cmake_project("   Project(hello)\n"));
+    }
+
+    #[test]
+    fn a_commented_out_project_line_does_not_count() {
+        assert!(!declares_cmake_project("# project(hello)\n"));
+    }
+
+    #[test]
+    fn a_component_cmakelists_is_not_a_project() {
+        // Every ESP-IDF component has one of these; none of them is a project.
+        assert!(!declares_cmake_project(
+            "idf_component_register(SRCS \"a.c\"\n                       INCLUDE_DIRS \".\")\n"
+        ));
+    }
+
+    #[test]
+    fn a_word_merely_containing_project_is_not_a_match() {
+        assert!(!declares_cmake_project("add_subdirectory(project)\n"));
+        assert!(!declares_cmake_project("project_extras(foo)\n"));
+    }
+
+    #[test]
+    fn esp_idf_wins_when_a_directory_looks_like_both() {
+        // Deliberate: only idf.py can build such a tree, so it is the reading
+        // that can succeed. Pinned so the choice stays explicit.
+        assert_eq!(classify(true, true, true), ProjectKind::Idf);
+        assert_eq!(classify(true, false, true), ProjectKind::Idf);
+    }
+
+    #[test]
+    fn a_plain_sketch_is_arduino_and_an_empty_folder_is_unknown() {
+        assert_eq!(classify(true, false, false), ProjectKind::Arduino);
+        assert_eq!(classify(false, true, false), ProjectKind::Arduino);
+        assert_eq!(classify(false, false, false), ProjectKind::Unknown);
     }
 }

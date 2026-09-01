@@ -24,6 +24,7 @@ import {
   ESP32_SKETCH_DIR,
   GIT_SYNC_NOISE,
 } from "./fixtures/buildOutput";
+import { IDF_BUILD_FAILURE, IDF_BUILD_OK } from "./fixtures/idfBuildOutput";
 
 const kinds = (rows: readonly Row[]) => rows.map((r) => r.kind);
 
@@ -636,5 +637,67 @@ describe("formatBytes", () => {
     expect(formatBytes(924)).toBe("924");
     expect(formatBytes(0)).toBe("0");
     expect(formatBytes(1310720)).toBe("1,310,720");
+  });
+});
+
+// ---------- ESP-IDF / ninja ----------
+
+describe("parseBuildOutput — ESP-IDF", () => {
+  it("collapses ninja progress into a single row that is replaced in place", () => {
+    // A real clean build emits well over a thousand of these. Appending them
+    // would swamp the console, the error filter and the autoscroll.
+    const m = parseBuildOutput(IDF_BUILD_FAILURE);
+    const progress = m.rows.filter((r) => r.kind === "progress");
+    expect(progress).toHaveLength(1);
+    // ...and it holds the LAST counter seen, not the first.
+    const p = progress[0] as Extract<Row, { kind: "progress" }>;
+    const counters = IDF_BUILD_FAILURE.map((l) =>
+      /^\[(\d+)\/(\d+)\]/.exec(l.line),
+    ).filter(Boolean) as RegExpExecArray[];
+    expect(p.done).toBe(Number(counters[counters.length - 1][1]));
+  });
+
+  it("keeps the gcc diagnostic even though ESP-IDF puts it on stdout", () => {
+    // arduino-cli sends diagnostics to stderr; ESP-IDF sends everything to
+    // stdout. The parser must not care.
+    const m = parseBuildOutput(IDF_BUILD_FAILURE);
+    expect(m.summary.errors).toBeGreaterThanOrEqual(1);
+    expect(
+      m.diagnostics.some((d) =>
+        d.message.includes("undefined_function_here"),
+      ),
+    ).toBe(true);
+  });
+
+  it("treats ninja's trailer as a build failure", () => {
+    const m = parseBuildOutput([
+      { stream: "stdout", line: "ninja: build stopped: subcommand failed." },
+    ]);
+    expect(m.summary.buildFailed).toBe(true);
+  });
+
+  it("counts a CMake error, which speaks no severity keyword", () => {
+    // The commonest ESP-IDF failure. DIAG never matches it, so without an
+    // explicit rule the console shows red text and the summary says
+    // "0 errors" — the worst of both.
+    const m = parseBuildOutput([
+      {
+        stream: "stdout",
+        line: "CMake Error at CMakeLists.txt:4 (idf_component_register):",
+      },
+      { stream: "stdout", line: "  Unknown component 'nope'" },
+    ]);
+    expect(m.summary.errors).toBe(1);
+    expect(m.summary.buildFailed).toBe(true);
+  });
+
+  it("takes only the total image size, leaving the rest null", () => {
+    // IDF's percentages are per-region (DRAM/IRAM), which is not what
+    // arduino-cli's "of program storage" means. Mapping them into the same
+    // shape would print a confident wrong number.
+    const m = parseBuildOutput(IDF_BUILD_OK);
+    expect(m.summary.memory?.flashBytes).toBe(121296);
+    expect(m.summary.memory?.flashPct).toBeNull();
+    expect(m.summary.memory?.ramBytes).toBeNull();
   });
 });

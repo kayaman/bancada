@@ -103,6 +103,28 @@ export function recordDuration(
   }
 }
 
+/**
+ * Forget a project's remembered durations.
+ *
+ * For when something makes the next build categorically unlike the last one.
+ * `idf.py set-target` is the case this exists for: it deletes `build/`, so the
+ * next build is a full rebuild — often two orders of magnitude slower than the
+ * incremental one that was measured. Keeping the old estimate would make the
+ * bar promise twelve seconds and then sit there for four minutes, exactly when
+ * the user is most anxious about whether anything is happening.
+ */
+export function forgetDurations(storage: KVStorage, sketchDir: string): void {
+  const all = readAll(storage);
+  if (!(sketchDir in all)) return;
+  delete all[sketchDir];
+  try {
+    storage.setItem(BUILD_HISTORY_KEY, JSON.stringify(all));
+  } catch {
+    // Same bargain as recordDuration: a stale estimate costs a progress bar,
+    // never a build.
+  }
+}
+
 /** Elapsed against a remembered duration, capped at 0.95 so the bar cannot
  *  claim to be finished on the strength of a guess. Null when there is no
  *  usable estimate — which is the signal to draw an indeterminate bar. */

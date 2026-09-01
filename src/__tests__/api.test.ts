@@ -532,6 +532,28 @@ describe("build, upload and monitor", () => {
     ]);
   });
 
+  it("projectInfo asks about one directory", async () => {
+    await api.projectInfo("/s");
+    expect(called()).toEqual(["project_info", { sketchDir: "/s" }]);
+  });
+
+  it("idfProbe and listIdfTargets take no arguments", async () => {
+    await api.idfProbe();
+    expect(called()).toEqual(["idf_probe"]);
+    await api.listIdfTargets();
+    expect(called()).toEqual(["list_idf_targets"]);
+  });
+
+  it("setIdfTarget names the project and the chip", async () => {
+    // Destructive on the Rust side (it regenerates sdkconfig), so the payload
+    // is pinned here as much as anywhere else.
+    await api.setIdfTarget("/s", "esp32c6");
+    expect(called()).toEqual([
+      "set_idf_target",
+      { sketchDir: "/s", target: "esp32c6" },
+    ]);
+  });
+
   it("uploadSketch passes the port and nulls the omitted rest", async () => {
     await api.uploadSketch("/s", "/dev/ttyACM0", "esp32s3");
     expect(called()).toEqual([

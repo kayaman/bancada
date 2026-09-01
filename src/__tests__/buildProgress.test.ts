@@ -318,3 +318,48 @@ describe("reduceBuildLine — irrelevant lines", () => {
     }
   });
 });
+
+describe("reduceBuildLine — ESP-IDF / ninja", () => {
+  it("turns ninja's step counter into a measured compile fraction", () => {
+    // The first genuinely measured compile-phase progress Bancada has: before
+    // this the bar was an estimate until esptool started talking.
+    const p = reduceBuildLine(
+      startProgress("compile"),
+      "[412/1180] Building C object esp-idf/mbedtls/x.c.obj",
+    );
+    expect(p.phase).toBe("compiling");
+    expect(p.fraction).toBeCloseTo(412 / 1180, 5);
+    expect(p.note).toBe("Compiling");
+  });
+
+  it("resets the fraction at the compile→flash handover", () => {
+    // `forward` holds the fraction monotonic, so without clearing it here the
+    // bar would sit at 100% for the whole flash. Same deliberate exception the
+    // avrdude branch makes.
+    let p = startProgress("upload");
+    p = reduceBuildLine(p, "[1180/1180] Generating binary image");
+    expect(p.fraction).toBeCloseTo(1, 5);
+    p = reduceBuildLine(p, "esptool v5.1.0");
+    expect(p.phase).toBe("uploading");
+    expect(p.fraction).toBeNull();
+  });
+
+  it("ignores a malformed counter rather than dividing by zero", () => {
+    const p = startProgress("compile");
+    expect(reduceBuildLine(p, "[0/0] Nothing to do")).toBe(p);
+  });
+
+  it("still drives the esptool segment arithmetic after an IDF build", () => {
+    // ESP-IDF flashes with the same esptool, so every existing matcher below
+    // the handover applies unchanged. Guarding it so nobody "fixes" it later.
+    let p = startProgress("upload");
+    p = reduceBuildLine(p, "esptool v5.1.0");
+    p = reduceBuildLine(
+      p,
+      "Flash will be erased from 0x00010000 to 0x00020fff",
+    );
+    p = reduceBuildLine(p, "Writing at 0x00010000... (50 %)");
+    expect(p.fraction).toBeGreaterThan(0);
+    expect(p.phase).toBe("uploading");
+  });
+});

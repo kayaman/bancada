@@ -158,6 +158,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+mod idfhost;
+
+use bancada_core::backend::{Backend, BackendKind, BuildSpec};
 use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
 use bancada_core::fleet::{self, Fleet};
@@ -251,6 +254,11 @@ struct AppState {
     /// serialising them behind a multi-minute compile would make the Boards
     /// and Libraries panels fail with "build already in progress" for no
     /// benefit.
+    /// Resolved ESP-IDF, populated lazily on first use. A leaf lock; see
+    /// [`idfhost`]. Separate from `cli` because the two toolchains answer
+    /// different questions — everything `cli` is used for (boards, cores,
+    /// libraries, the serial monitor) has no ESP-IDF analogue.
+    idf: Arc<Mutex<idfhost::IdfEnvCache>>,
     build_gate: Arc<Mutex<()>>,
 }
 
@@ -293,6 +301,64 @@ fn err_str(e: impl std::fmt::Display) -> String {
 /// silently killing it to flash would destroy a capture in progress. The
 /// caller must already hold the build gate; `serial` is a leaf lock taken
 /// under it and released here, never across the flash itself.
+/// The chip a project is configured for, from `sdkconfig` (or, before a first
+/// build, `sdkconfig.defaults`).
+fn idf_target_of(dir: &std::path::Path) -> Option<String> {
+    for name in ["sdkconfig", "sdkconfig.defaults"] {
+        if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
+            if let Some(t) = bancada_core::idf::parse_sdkconfig_target(&text) {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Where a project's console output goes, from `sdkconfig`.
+///
+/// Only the real `sdkconfig` is consulted, never `sdkconfig.defaults`: the
+/// defaults file is a *request*, and what the firmware actually does is
+/// whatever the last `set-target`/build resolved it to. Warning on the basis
+/// of a request that may not have been applied would be worse than silence.
+fn idf_console_of(dir: &std::path::Path) -> Option<bancada_core::idf::IdfConsole> {
+    let text = std::fs::read_to_string(dir.join("sdkconfig")).ok()?;
+    bancada_core::idf::parse_sdkconfig_console(&text)
+}
+
+/// Decide which toolchain builds `sketch_dir`, and with what.
+///
+/// The kind is detected from the directory rather than passed in from the
+/// frontend: one source of truth, so a project opened from a recents click
+/// cannot disagree with one opened from the picker.
+///
+/// **Call this before taking the build gate.** Resolving ESP-IDF may activate
+/// it, which spawns a shell; doing that under the gate would make an unrelated
+/// Verify wait on it.
+fn resolve_backend(
+    state: &AppState,
+    sketch_dir: &str,
+    profile: Option<String>,
+    fqbn: Option<String>,
+) -> Result<(Backend, BuildSpec), String> {
+    let dir = std::path::Path::new(sketch_dir);
+    match bancada_core::project::detect_kind(dir) {
+        bancada_core::project::ProjectKind::Idf => {
+            let target = idf_target_of(dir).ok_or_else(|| {
+                "this ESP-IDF project has no target set — choose one before building".to_string()
+            })?;
+            let cli = state.idf.lock().map_err(err_str)?.cli()?;
+            Ok((Backend::Idf(cli), BuildSpec::Idf { target }))
+        }
+        // Arduino, and also Unknown: an unrecognised folder has always gone
+        // down the arduino-cli path and received arduino-cli's own error,
+        // which is more specific than anything we would invent here.
+        _ => Ok((
+            Backend::Arduino(state.cli.clone()),
+            BuildSpec::Arduino { profile, fqbn },
+        )),
+    }
+}
+
 fn free_port_for_flash(serial: &Mutex<Option<SerialOwner>>) -> Result<(), String> {
     let mut guard = serial.lock().unwrap_or_else(|e| e.into_inner());
     match guard.as_ref() {
@@ -517,6 +583,24 @@ fn installed_platform_entry(cli: &ArduinoCli, fqbn: &str) -> Result<String, Stri
     ))
 }
 
+/// Fill in any `platform_index_url:` the profile's platforms need, from the
+/// indexes the user's arduino-cli config already knows.
+///
+/// A profile build is hermetic: it resolves platforms from Arduino's default
+/// index plus whatever the profile itself names, ignoring the CLI's
+/// `additional_urls` and refusing to fall back on an installed core. So a
+/// profile pinning a packager outside the default index — `esp8266` above all
+/// — is born unbuildable unless it carries its index URL inline. Bancada wrote
+/// exactly such profiles until this existed.
+///
+/// Deliberately silent on failure, and called only *after* the write it
+/// repairs has already succeeded: this adds a line that makes a build work,
+/// and not being able to add it leaves the file exactly as good as it used to
+/// be. Failing the user's profile write over it would be strictly worse.
+fn heal_platform_index_urls(cli: &ArduinoCli, proj: &SketchProject) {
+    let _ = proj.ensure_platform_index_urls(&cli.platform_indexes());
+}
+
 /// Pin `required_profile_libs` into a fresh or retargeted profile, loud on
 /// failure — a profile that silently cannot build is the bug this replaces.
 fn pin_required_libs(
@@ -552,6 +636,7 @@ async fn init_profile(
         let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
         proj.add_profile(&profile, &fqbn, Some(&entry), copy_libs_from.as_deref())
             .map_err(err_str)?;
+        heal_platform_index_urls(&cli, &proj);
         pin_required_libs(&cli, &sketch_dir, &profile, &fqbn)?;
         // Reload: profile lib add rewrites sketch.yaml behind the first write.
         proj.load_yaml().map_err(err_str)
@@ -573,6 +658,7 @@ async fn retarget_profile(
         let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
         proj.retarget_profile(&profile, &fqbn, &entry)
             .map_err(err_str)?;
+        heal_platform_index_urls(&cli, &proj);
         pin_required_libs(&cli, &sketch_dir, &profile, &fqbn)?;
         proj.load_yaml().map_err(err_str)
     })
@@ -811,7 +897,13 @@ async fn install_core(
         }
 
         if let (Some(dir), Some(prof), Some(v)) = (sketch_dir, profile, version) {
-            match SketchProject::open(&dir).and_then(|p| p.add_platform(&prof, &id, &v)) {
+            match SketchProject::open(&dir).and_then(|p| {
+                p.add_platform(&prof, &id, &v)?;
+                heal_platform_index_urls(&cli, &p);
+                // Re-read: the repair may have added a URL to the entry just
+                // pinned, and the frontend renders whatever comes back.
+                p.load_yaml()
+            }) {
                 Ok(y) => out.yaml = Some(y),
                 Err(e) => out.profile_error = Some(e.to_string()),
             }
@@ -860,13 +952,16 @@ async fn update_core_index(
 /// Pin an already-installed platform into a profile, without reinstalling.
 #[tauri::command]
 fn add_platform_to_profile(
+    state: State<'_, AppState>,
     sketch_dir: String,
     profile: String,
     id: String,
     version: String,
 ) -> Result<SketchYaml, String> {
     let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
-    proj.add_platform(&profile, &id, &version).map_err(err_str)
+    proj.add_platform(&profile, &id, &version).map_err(err_str)?;
+    heal_platform_index_urls(&state.cli, &proj);
+    proj.load_yaml().map_err(err_str)
 }
 
 // ---------- new projects ----------
@@ -1337,20 +1432,16 @@ async fn compile_sketch(
     profile: Option<String>,
     fqbn: Option<String>,
 ) -> Result<RunResult, String> {
-    let cli = state.cli.clone();
+    // Resolved before the gate is taken: activating ESP-IDF spawns a shell,
+    // and no other build should wait on that.
+    let (backend, spec) = resolve_backend(&state, &sketch_dir, profile, fqbn)?;
     let gate = state.build_gate.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _gate = try_build_gate(&gate)?;
-        let result = cli
-            .compile(
-                &sketch_dir,
-                profile.as_deref(),
-                fqbn.as_deref(),
-                &[],
-                |line| {
-                    let _ = app.emit("build://line", &line);
-                },
-            )
+        let result = backend
+            .verify(std::path::Path::new(&sketch_dir), &spec, |line| {
+                let _ = app.emit("build://line", &line);
+            })
             .map_err(err_str)?;
         Ok(result)
     })
@@ -1367,7 +1458,8 @@ async fn upload_sketch(
     fqbn: Option<String>,
     port: String,
 ) -> Result<RunResult, String> {
-    let cli = state.cli.clone();
+    // Before the gate, for the same reason as compile_sketch.
+    let (backend, spec) = resolve_backend(&state, &sketch_dir, profile, fqbn)?;
     let gate = state.build_gate.clone();
     let serial = state.serial.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1381,11 +1473,10 @@ async fn upload_sketch(
         let emit_line = |line: OutputLine| {
             let _ = app.emit("build://line", &line);
         };
-        let result = cli
-            .upload(
-                &sketch_dir,
-                profile.as_deref(),
-                fqbn.as_deref(),
+        let result = backend
+            .flash(
+                std::path::Path::new(&sketch_dir),
+                &spec,
                 &port,
                 &emit_line,
             )
@@ -1398,8 +1489,7 @@ async fn upload_sketch(
             let board = fleet_file.as_deref().and_then(|f| board_on_port(f, &port));
             let flashed = tag_flash(
                 &sketch_dir,
-                profile.as_deref(),
-                fqbn.as_deref(),
+                &spec,
                 &port,
                 board.as_ref().map(|(_, name)| name.as_str()),
                 &emit_line,
@@ -1413,6 +1503,129 @@ async fn upload_sketch(
             }
         }
         Ok(result)
+    })
+    .await
+    .map_err(err_str)?
+}
+
+// ---------- ESP-IDF ----------
+
+/// What kind of project a directory holds, and — for ESP-IDF — what it is
+/// configured to build for.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ProjectInfo {
+    kind: bancada_core::project::ProjectKind,
+    /// `CONFIG_IDF_TARGET`, or `None` when no target has been set yet.
+    /// Always `None` for an Arduino project.
+    idf_target: Option<String>,
+    /// Where console output goes. Feeds the silent-monitor warning and the
+    /// baud picker — the two things an Arduino project answers from its
+    /// FQBN and its `Serial.begin(...)`, neither of which an ESP-IDF project
+    /// has. `None` when unknown, which suppresses both rather than guessing.
+    idf_console: Option<bancada_core::idf::IdfConsole>,
+}
+
+/// Classify the open project.
+///
+/// The frontend renders this rather than deciding it, so the answer the
+/// Verify button acts on and the answer the toolbar displays cannot diverge.
+#[tauri::command]
+fn project_info(sketch_dir: String) -> ProjectInfo {
+    let dir = std::path::Path::new(&sketch_dir);
+    let kind = bancada_core::project::detect_kind(dir);
+    let idf = matches!(kind, bancada_core::project::ProjectKind::Idf);
+    ProjectInfo {
+        idf_target: if idf { idf_target_of(dir) } else { None },
+        idf_console: if idf { idf_console_of(dir) } else { None },
+        kind,
+    }
+}
+
+/// Is ESP-IDF usable on this machine, and if not, why?
+///
+/// Called lazily, when an ESP-IDF project is first opened — never at startup.
+/// Most users never open one, and a sticky "ESP-IDF not found" toast on every
+/// launch would train them to dismiss the arduino-cli warning beside it.
+#[tauri::command]
+async fn idf_probe(state: State<'_, AppState>) -> Result<idfhost::IdfProbe, String> {
+    let cache = state.idf.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).probe()
+    })
+    .await
+    .map_err(err_str)
+}
+
+/// The chip targets the installed ESP-IDF supports.
+///
+/// Asked of `idf.py` rather than hardcoded, for the same reason boards come
+/// from `board listall`: the list belongs to the toolchain, and a stale copy
+/// here would offer a chip this install cannot build.
+#[tauri::command]
+async fn list_idf_targets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let cache = state.idf.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).targets()
+    })
+    .await
+    .map_err(err_str)?
+}
+
+/// Set the project's chip target.
+///
+/// **Destructive**: `idf.py set-target` deletes `build/` and regenerates
+/// `sdkconfig`, discarding anything the user changed by hand. Two guards, in
+/// this order:
+///
+/// 1. A git checkpoint first, so the old `sdkconfig` is recoverable. This is
+///    the same bargain `tag_flash` already makes — Bancada commits before it
+///    does something it cannot undo. When the project is not under git there
+///    is nothing to fall back on, and the UI says so before calling this.
+/// 2. The build gate, because deleting `build/` under a running compile is
+///    exactly the corruption that gate exists to prevent.
+///
+/// Never reachable from the agent: it is not an MCP tool, and the session
+/// prompt forbids running it directly.
+#[tauri::command]
+async fn set_idf_target(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sketch_dir: String,
+    target: String,
+) -> Result<RunResult, String> {
+    // Resolved before the gate, as everywhere else.
+    let cli = state.idf.lock().map_err(err_str)?.cli()?;
+    let gate = state.build_gate.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _gate = try_build_gate(&gate)?;
+        let dir = std::path::Path::new(&sketch_dir);
+        let emit_line = |line: OutputLine| {
+            let _ = app.emit("build://line", &line);
+        };
+        let note = |line: String| {
+            emit_line(OutputLine {
+                stream: bancada_core::types::OutputStream::Stdout,
+                line,
+            })
+        };
+
+        if bancada_core::git::is_under_git(dir) {
+            match bancada_core::git::commit(dir, &format!("checkpoint before set-target {target}"))
+            {
+                Ok(bancada_core::git::CommitOutcome::Committed) => {
+                    note("checkpointed sdkconfig before set-target".to_string())
+                }
+                Ok(bancada_core::git::CommitOutcome::NothingToCommit) => {}
+                // A failed checkpoint is reported but does not block: the user
+                // already confirmed a destructive action, and refusing here
+                // would leave them unable to change target at all.
+                Err(e) => note(format!("could not checkpoint before set-target: {e}")),
+            }
+        } else {
+            note("not under git — set-target is not recoverable".to_string());
+        }
+
+        cli.set_target(dir, &target, emit_line).map_err(err_str)
     })
     .await
     .map_err(err_str)?
@@ -1627,8 +1840,7 @@ async fn git_project_drift(sketch_dir: String, commit: String) -> Result<Project
 /// line of tag metadata.
 fn tag_flash(
     sketch_dir: &str,
-    profile: Option<&str>,
-    fqbn: Option<&str>,
+    spec: &BuildSpec,
     port: &str,
     board: Option<&str>,
     on_line: &dyn Fn(OutputLine),
@@ -1698,11 +1910,20 @@ fn tag_flash(
     // Both are recorded when both are known: `upload_args` prefers the
     // profile, so which one is present says how the board was resolved.
     let mut body = format!("flashed to {port}\n");
-    if let Some(profile) = profile {
-        body.push_str(&format!("profile: {profile}\n"));
-    }
-    if let Some(fqbn) = fqbn {
-        body.push_str(&format!("fqbn: {fqbn}\n"));
+    match spec {
+        BuildSpec::Arduino { profile, fqbn } => {
+            if let Some(profile) = profile {
+                body.push_str(&format!("profile: {profile}\n"));
+            }
+            if let Some(fqbn) = fqbn {
+                body.push_str(&format!("fqbn: {fqbn}\n"));
+            }
+        }
+        // An ESP-IDF flash has no FQBN and no profile; the target is the
+        // equivalent fact about what was built.
+        BuildSpec::Idf { target } => {
+            body.push_str(&format!("idf_target: {target}\n"));
+        }
     }
     if let Some(board) = board {
         body.push_str(&format!("board: {board}\n"));
@@ -3318,10 +3539,17 @@ const VERIFY_MAX_BYTES: usize = 50_000;
 /// but still never locks `state.agent`.
 struct McpToolCtx {
     token: String,
-    cli: ArduinoCli,
+    /// arduino-cli, kept only for the serial monitor — which is
+    /// backend-independent, being a plain serial terminal. It is *not* what
+    /// builds: see `backend`.
+    monitor_cli: ArduinoCli,
     sketch_dir: String,
-    profile: Option<String>,
-    fqbn: Option<String>,
+    /// The toolchain this session builds with, frozen at spawn.
+    backend: Backend,
+    /// What it builds — frozen for the same reason the port is not a tool
+    /// argument: the agent must flash what its own `verify` built, not what
+    /// the project became halfway through the session.
+    spec: BuildSpec,
     build_gate: Arc<Mutex<()>>,
     /// The serial-owner slot, for `upload` (evict the monitor) and
     /// `serial_read`/`serial_send`. Leaf lock — see `AppState::serial`.
@@ -3419,19 +3647,35 @@ fn random_token() -> Result<String, String> {
 /// tightens. `create_new` is also `O_EXCL`, so this refuses to write
 /// through a pre-existing file or symlink at the same path rather than
 /// silently following it.
-fn write_mcp_config_file(port: u16, token: &str) -> Result<PathBuf, String> {
-    let mcp_config = serde_json::json!({
-        "mcpServers": {
-            "bancada": {
-                "type": "http",
-                "url": format!("http://127.0.0.1:{port}/mcp"),
-                "headers": {
-                    "Authorization": format!("Bearer {token}")
-                }
+fn write_mcp_config_file(port: u16, token: &str, with_docs: bool) -> Result<PathBuf, String> {
+    let mut servers = serde_json::json!({
+        "bancada": {
+            "type": "http",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "headers": {
+                "Authorization": format!("Bearer {token}")
             }
         }
-    })
-    .to_string();
+    });
+    // Espressif's hosted documentation server, for ESP-IDF sessions only.
+    //
+    // It carries no credential of ours: the CLI owns its OAuth, so the entry
+    // is just a URL. Until the user has authenticated it once, the server
+    // reports `needs-auth` and contributes **no tools** — which is harmless
+    // here, because `unexpected_tools` deliberately reports only *extra*
+    // tools, never missing ones.
+    if with_docs {
+        if let Some(map) = servers.as_object_mut() {
+            map.insert(
+                agent::ESPRESSIF_DOCS_SERVER.to_string(),
+                serde_json::json!({
+                    "type": "http",
+                    "url": agent::ESPRESSIF_DOCS_URL,
+                }),
+            );
+        }
+    }
+    let mcp_config = serde_json::json!({ "mcpServers": servers }).to_string();
     let path = std::env::temp_dir().join(format!("bancada-agent-mcp-{}.json", random_token()?));
     write_private_file(&path, &mcp_config, "MCP config")
 }
@@ -3809,11 +4053,9 @@ fn run_verify(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
     emit_agent(serde_json::json!({ "type": "verify_started" }));
 
     let mut collected: Vec<OutputLine> = Vec::new();
-    let run = ctx.cli.compile(
-        &ctx.sketch_dir,
-        ctx.profile.as_deref(),
-        ctx.fqbn.as_deref(),
-        &[],
+    let run = ctx.backend.verify(
+        std::path::Path::new(&ctx.sketch_dir),
+        &ctx.spec,
         |line| {
             // Console lines are session-agnostic, so they get the same
             // cancellation check rather than a pid stamp: a stopped
@@ -3833,8 +4075,36 @@ fn run_verify(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
             emit_agent(serde_json::json!({
                 "type": "verify_done", "success": result.success
             }));
+            // A failed ESP-IDF build needs narrowing before the generic
+            // summariser sees it. ninja emits ~500 progress lines and keeps
+            // compiling *past* the error, so a tail — which is the right
+            // answer for arduino-cli — is bootloader CMake chatter with the
+            // diagnostic hundreds of lines above it. On a real failing build
+            // this took 67 KB down to 409 bytes with the error intact.
+            let narrowed: Vec<OutputLine>;
+            let source = if !result.success && ctx.spec.kind() == BackendKind::Idf {
+                let lines: Vec<String> = collected.iter().map(|l| l.line.clone()).collect();
+                // Relabelled as stderr deliberately, and this is load-bearing
+                // rather than cosmetic: `summarize_build_output` keeps *all*
+                // stderr but only the *tail* of stdout, and ESP-IDF prints
+                // everything — gcc diagnostics and ninja's failure included —
+                // on stdout (measured: 166 stdout lines to 1 stderr line on a
+                // failing build). Left as stdout, the excerpt we just computed
+                // could be dropped from the front by the very summariser it
+                // exists to feed.
+                narrowed = bancada_core::idf::idf_failure_excerpt(&lines)
+                    .into_iter()
+                    .map(|line| OutputLine {
+                        stream: bancada_core::types::OutputStream::Stderr,
+                        line,
+                    })
+                    .collect();
+                &narrowed
+            } else {
+                &collected
+            };
             let summary =
-                agent::summarize_build_output(&collected, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
+                agent::summarize_build_output(source, VERIFY_MAX_LINES, VERIFY_MAX_BYTES);
             let text = format!(
                 "success: {}\nexit_code: {}\n\n{summary}",
                 result.success, result.exit_code
@@ -3910,6 +4180,25 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
         return (NO_SELECTED_TARGET.to_string(), true);
     };
 
+    // The ESP-IDF counterpart of the frozen FQBN. An Arduino session cannot
+    // drift — its board is on the command line we are about to run — but an
+    // ESP-IDF target lives in the project's sdkconfig, so `idf.py set-target`
+    // in another window would silently make this flash a different chip than
+    // the one `verify` built for. Refuse rather than flash it.
+    if let BuildSpec::Idf { target: frozen } = &ctx.spec {
+        let now = idf_target_of(std::path::Path::new(&ctx.sketch_dir));
+        if now.as_deref() != Some(frozen.as_str()) {
+            return (
+                format!(
+                    "the project's ESP-IDF target changed from {frozen} to {} since this \
+                     session started — ask the user to re-verify before flashing",
+                    now.as_deref().unwrap_or("none")
+                ),
+                true,
+            );
+        }
+    }
+
     // Same gate as compile_sketch/upload_sketch/run_verify (R5).
     let _gate = match try_build_gate(&ctx.build_gate) {
         Ok(guard) => guard,
@@ -3927,10 +4216,9 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
     emit_agent(serde_json::json!({ "type": "upload_started", "port": target.port }));
 
     let mut collected: Vec<OutputLine> = Vec::new();
-    let run = ctx.cli.upload(
-        &ctx.sketch_dir,
-        ctx.profile.as_deref(),
-        ctx.fqbn.as_deref(),
+    let run = ctx.backend.flash(
+        std::path::Path::new(&ctx.sketch_dir),
+        &ctx.spec,
         &target.port,
         |line| {
             if !ctx.is_cancelled() {
@@ -3962,8 +4250,7 @@ fn run_upload(ctx: &McpToolCtx, emit: &EmitFn) -> (String, bool) {
                     .and_then(|f| board_on_port(f, &target.port));
                 let flashed = tag_flash(
                     &ctx.sketch_dir,
-                    ctx.profile.as_deref(),
-                    ctx.fqbn.as_deref(),
+                    &ctx.spec,
                     &target.port,
                     board.as_ref().map(|(_, name)| name.as_str()),
                     &|line| {
@@ -4062,7 +4349,7 @@ fn run_serial_read(
                 };
                 let session = next_monitor_session(&ctx.monitor_session);
                 match spawn_monitor(
-                    &ctx.cli,
+                    &ctx.monitor_cli,
                     &target.port,
                     target.baud,
                     emit.clone(),
@@ -4150,21 +4437,58 @@ fn json_response(json: String) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> 
 }
 
 /// The project context appended to the agent's system prompt.
-fn system_prompt_extra(sketch_dir: &str, profile: Option<&str>, fqbn: Option<&str>) -> String {
+fn system_prompt_extra(sketch_dir: &str, spec: &BuildSpec) -> String {
+    let kind = match spec {
+        BuildSpec::Arduino { .. } => "Arduino",
+        BuildSpec::Idf { .. } => "ESP-IDF",
+    };
     let mut out = format!(
-        "You are embedded in Bancada, an Arduino workbench. The Arduino \
-         project you are working on is at {sketch_dir}, which is also your \
-         working directory."
+        "You are embedded in Bancada, an embedded-firmware workbench. The \
+         {kind} project you are working on is at {sketch_dir}, which is also \
+         your working directory."
     );
-    if let Some(profile) = profile {
-        out.push_str(&format!(" The active sketch.yaml profile is {profile}."));
+    match spec {
+        BuildSpec::Arduino { profile, fqbn } => {
+            if let Some(profile) = profile {
+                out.push_str(&format!(" The active sketch.yaml profile is {profile}."));
+            }
+            if let Some(fqbn) = fqbn {
+                out.push_str(&format!(" The active board FQBN is {fqbn}."));
+            }
+        }
+        BuildSpec::Idf { target } => {
+            out.push_str(&format!(" The active ESP-IDF target is {target}."));
+            // Each of these destroys state the user cannot get back, or state
+            // this session depends on. set-target in particular regenerates
+            // sdkconfig, discarding every value the user set by hand — it is
+            // the ESP-IDF analogue of `upload` taking no port argument, and is
+            // deliberately not reachable as a tool.
+            out.push_str(
+                " Never run idf.py set-target, idf.py menuconfig, or idf.py \
+                 fullclean. set-target destroys the user's sdkconfig; if the \
+                 target is wrong, say so and ask the user to change it in the \
+                 toolbar. ESP-IDF's own headers under IDF_PATH are outside \
+                 your sandbox and you cannot read them — do not retry those \
+                 reads. Use mcp__espressif-docs__search_espressif_sources \
+                 instead to look up ESP-IDF APIs, chip peripherals and \
+                 register details; it searches Espressif's official \
+                 documentation and is the intended substitute for the headers \
+                 you cannot open. If it reports that it needs authentication, \
+                 say so once and carry on without it rather than retrying — \
+                 the user has to authorise it themselves.",
+            );
+        }
     }
-    if let Some(fqbn) = fqbn {
-        out.push_str(&format!(" The active board FQBN is {fqbn}."));
-    }
-    out.push_str(
+    let tool = match spec {
+        BuildSpec::Arduino { .. } => "arduino-cli",
+        BuildSpec::Idf { .. } => "idf.py, cmake or ninja",
+    };
+    out.push_str(&format!(
         " To compile, use the mcp__bancada__verify tool — never shell out to \
-         arduino-cli. After every edit, run mcp__bancada__verify and iterate \
+         {tool}."
+    ));
+    out.push_str(
+        " After every edit, run mcp__bancada__verify and iterate \
          until the build passes. To flash the board, use mcp__bancada__upload \
          (it targets the board selected in the UI and requires the user's \
          'Allow uploads' switch — if it reports uploads are not armed, ask \
@@ -4288,11 +4612,15 @@ fn raise_agent_alarm(app: &AppHandle, pid: u32, kind: &str, detail: String) {
 fn agent_event_alarm(
     event: &agent::AgentEvent,
     sketch_dir: &str,
+    with_docs: bool,
 ) -> Option<(&'static str, String)> {
     match event {
         // A2: the session must have exactly the tools this argv asked for.
+        // `with_docs` is frozen at spawn alongside the backend, so the set
+        // asserted here is exact for this session rather than a superset that
+        // would stop asserting anything for the Arduino case.
         agent::AgentEvent::System(system) if system.subtype == "init" => {
-            let extra = agent::unexpected_tools(&system.tools);
+            let extra = agent::unexpected_tools(&system.tools, with_docs);
             if extra.is_empty() {
                 return None;
             }
@@ -4302,7 +4630,7 @@ fn agent_event_alarm(
                     "This session was given tools Bancada did not ask for: {}. \
                      Bancada's safety model only covers {}, so the session was stopped.",
                     extra.join(", "),
-                    agent::EXPECTED_TOOLS.join(", ")
+                    agent::expected_tools(with_docs).join(", ")
                 ),
             ))
         }
@@ -4456,6 +4784,17 @@ fn agent_start(
     // safe session to start (A1 pre-flight).
     check_hooks_are_enabled(&sketch_dir)?;
 
+    // Resolved here, ahead of the listener and both temp files, for two
+    // reasons: it is the one step that can spawn a shell (activating ESP-IDF),
+    // and its answer decides what goes *into* the MCP config written below.
+    // One detection path, the same one the Verify and Flash buttons use, so a
+    // session can never be building with a different toolchain than the UI.
+    let (backend, spec) = resolve_backend(&state, &sketch_dir, profile, fqbn)?;
+    // Espressif's documentation server is offered to ESP-IDF sessions only.
+    // Frozen here with everything else about the build, so the tool list the
+    // A2 backstop asserts is exactly the one this session was given.
+    let with_docs = spec.kind() == BackendKind::Idf;
+
     let (server, port) = bind_mcp_server()?;
     let token = match random_token() {
         Ok(token) => token,
@@ -4468,7 +4807,7 @@ fn agent_start(
     // F5: the bearer token goes into a 0600 temp file, not argv (see
     // write_mcp_config_file's doc comment) — write it before spawning so its
     // path can go straight into the child's --mcp-config.
-    let mcp_config_path = match write_mcp_config_file(port, &token) {
+    let mcp_config_path = match write_mcp_config_file(port, &token, with_docs) {
         Ok(path) => path,
         Err(e) => {
             server.unblock();
@@ -4487,7 +4826,7 @@ fn agent_start(
         }
     };
 
-    let mut prompt_extra = system_prompt_extra(&sketch_dir, profile.as_deref(), fqbn.as_deref());
+    let mut prompt_extra = system_prompt_extra(&sketch_dir, &spec);
     if let Some(facts) = context_facts.as_deref() {
         let facts = clamp_facts(facts);
         if !facts.is_empty() {
@@ -4499,6 +4838,7 @@ fn agent_start(
         settings_path: settings_path.to_string_lossy().into_owned(),
         system_prompt_extra: prompt_extra,
         resume_session_id,
+        with_docs,
     };
     let cleanup = |server: &Arc<tiny_http::Server>| {
         server.unblock(); // never leave the listener thread parked
@@ -4556,10 +4896,10 @@ fn agent_start(
         .next_seq();
     let ctx = McpToolCtx {
         token,
-        cli: state.cli.clone(),
+        monitor_cli: state.cli.clone(),
         sketch_dir: sketch_dir.clone(),
-        profile,
-        fqbn,
+        backend,
+        spec,
         build_gate: state.build_gate.clone(),
         serial: state.serial.clone(),
         serial_ring: state.serial_ring.clone(),
@@ -4607,7 +4947,9 @@ fn agent_start(
                     // Security backstop (A1 layer 2, A2), *after* the event
                     // itself is emitted so the panel can show what triggered
                     // the alarm right above it.
-                    if let Some((kind, detail)) = agent_event_alarm(&event, &guard_dir) {
+                    if let Some((kind, detail)) =
+                        agent_event_alarm(&event, &guard_dir, with_docs)
+                    {
                         raise_agent_alarm(&app_out, child_pid, kind, detail);
                         break; // the child is gone; stop reading its pipe
                     }
@@ -4781,6 +5123,7 @@ pub fn run() {
                 mqtt: Mutex::new(None),
                 device_browse: Mutex::new(None),
                 agent: Mutex::new(None),
+                idf: Arc::new(Mutex::new(idfhost::IdfEnvCache::default())),
                 build_gate: Arc::new(Mutex::new(())),
             });
             // Hotplug watcher: enumeration (does the port exist?) is orders of
@@ -4859,6 +5202,10 @@ pub fn run() {
             gh_add_library,
             gh_restore,
             compile_sketch,
+            project_info,
+            idf_probe,
+            list_idf_targets,
+            set_idf_target,
             upload_sketch,
             git_state,
             git_commit,
@@ -5249,10 +5596,10 @@ mod tests {
         let cursor_start = hw.ring.lock().unwrap().next_seq();
         let ctx = McpToolCtx {
             token: token.clone(),
-            cli,
+            monitor_cli: cli.clone(),
             sketch_dir: sketch_dir.to_string(),
-            profile: None,
-            fqbn: None,
+            backend: Backend::Arduino(cli),
+            spec: arduino_spec(None, None),
             build_gate: gate,
             serial: hw.serial,
             serial_ring: hw.ring,
@@ -6406,19 +6753,122 @@ mod tests {
         assert!(lock_slot(&browse).is_none());
     }
 
+    /// An Arduino build spec, for tests that predate the second backend.
+    fn arduino_spec(profile: Option<&str>, fqbn: Option<&str>) -> BuildSpec {
+        BuildSpec::Arduino {
+            profile: profile.map(str::to_string),
+            fqbn: fqbn.map(str::to_string),
+        }
+    }
+
     // ---------- misc ----------
 
     #[test]
     fn the_system_prompt_names_the_project_the_profile_and_the_verify_tool() {
-        let prompt = system_prompt_extra("/home/me/Blink", Some("esp32s3"), Some("esp32:esp32:x"));
+        let prompt = system_prompt_extra(
+            "/home/me/Blink",
+            &arduino_spec(Some("esp32s3"), Some("esp32:esp32:x")),
+        );
         assert!(prompt.contains("/home/me/Blink"), "{prompt}");
         assert!(prompt.contains("esp32s3"), "{prompt}");
         assert!(prompt.contains("esp32:esp32:x"), "{prompt}");
         assert!(prompt.contains("mcp__bancada__verify"), "{prompt}");
         // No profile/fqbn must not produce dangling text.
-        let bare = system_prompt_extra("/home/me/Blink", None, None);
+        let bare = system_prompt_extra("/home/me/Blink", &arduino_spec(None, None));
         assert!(!bare.contains("profile is"), "{bare}");
         assert!(!bare.contains("FQBN"), "{bare}");
+    }
+
+    #[test]
+    fn the_idf_system_prompt_names_the_target_and_forbids_set_target() {
+        // The ESP-IDF sibling of the assertion above. `set-target` regenerates
+        // sdkconfig, so the prompt has to say so plainly: it is the one
+        // destructive operation the agent could otherwise reach by shelling
+        // out, and it is deliberately not an MCP tool.
+        let prompt = system_prompt_extra(
+            "/home/me/blink",
+            &BuildSpec::Idf {
+                target: "esp32c6".to_string(),
+            },
+        );
+        assert!(prompt.contains("/home/me/blink"), "{prompt}");
+        assert!(prompt.contains("esp32c6"), "{prompt}");
+        assert!(prompt.contains("ESP-IDF"), "{prompt}");
+        assert!(prompt.contains("mcp__bancada__verify"), "{prompt}");
+        assert!(prompt.contains("Never run idf.py set-target"), "{prompt}");
+        // The docs tool is named as the substitute for the headers the
+        // session cannot read, not merely mentioned.
+        assert!(
+            prompt.contains("mcp__espressif-docs__search_espressif_sources"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("menuconfig"), "{prompt}");
+        // It must not tell an ESP-IDF session to avoid the wrong tool.
+        assert!(!prompt.contains("never shell out to arduino-cli"), "{prompt}");
+        // And it must warn that IDF headers are unreadable, so the model does
+        // not loop retrying reads the guard will refuse.
+        assert!(prompt.contains("outside"), "{prompt}");
+        assert!(prompt.contains("sandbox"), "{prompt}");
+    }
+
+    #[test]
+    fn an_arduino_prompt_still_names_arduino_cli() {
+        let prompt = system_prompt_extra("/home/me/Blink", &arduino_spec(Some("uno"), None));
+        assert!(prompt.contains("arduino-cli"), "{prompt}");
+        assert!(!prompt.contains("set-target"), "{prompt}");
+    }
+
+    #[test]
+    fn project_info_distinguishes_the_two_kinds() {
+        use bancada_core::project::ProjectKind;
+        let tmp = std::env::temp_dir().join(format!("bancada-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // An Arduino sketch.
+        let a = tmp.join("Blink");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("Blink.ino"), "void setup(){}\n").unwrap();
+        assert_eq!(
+            project_info(a.display().to_string()).kind,
+            ProjectKind::Arduino
+        );
+
+        // An ESP-IDF project, with a target already set.
+        let i = tmp.join("idfproj");
+        std::fs::create_dir_all(&i).unwrap();
+        std::fs::write(i.join("CMakeLists.txt"), "project(idfproj)\n").unwrap();
+        std::fs::write(i.join("sdkconfig"), "CONFIG_IDF_TARGET=\"esp32c3\"\n").unwrap();
+        let info = project_info(i.display().to_string());
+        assert_eq!(info.kind, ProjectKind::Idf);
+        assert_eq!(info.idf_target.as_deref(), Some("esp32c3"));
+        // No console keys in that sdkconfig, so nothing is claimed about it.
+        assert!(info.idf_console.is_none());
+
+        // With a console section, it comes through — and an Arduino project
+        // never reports one.
+        std::fs::write(
+            i.join("sdkconfig"),
+            "CONFIG_IDF_TARGET=\"esp32c3\"\nCONFIG_ESP_CONSOLE_UART=y\nCONFIG_ESP_CONSOLE_UART_BAUDRATE=74880\n",
+        )
+        .unwrap();
+        let info = project_info(i.display().to_string());
+        let console = info.idf_console.expect("console");
+        assert_eq!(console.baudrate, Some(74880));
+        assert!(!console.secondary_usb);
+        assert!(project_info(a.display().to_string()).idf_console.is_none());
+
+        // Both present: ESP-IDF wins, and the Arduino answer must not leak.
+        std::fs::write(i.join("idfproj.ino"), "void setup(){}\n").unwrap();
+        assert_eq!(project_info(i.display().to_string()).kind, ProjectKind::Idf);
+
+        // Neither.
+        let e = tmp.join("empty");
+        std::fs::create_dir_all(&e).unwrap();
+        let info = project_info(e.display().to_string());
+        assert_eq!(info.kind, ProjectKind::Unknown);
+        assert!(info.idf_target.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ---------- continue an AI session: valid_session_id / clamp_facts ----------
@@ -6528,7 +6978,7 @@ mod tests {
     // content/permissions/lifecycle directly.
     #[test]
     fn mcp_config_file_has_the_right_url_and_bearer_token() {
-        let path = write_mcp_config_file(54321, "sekrit").unwrap();
+        let path = write_mcp_config_file(54321, "sekrit", false).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         let server = &parsed["mcpServers"]["bancada"];
@@ -6538,11 +6988,42 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn the_docs_server_is_added_only_for_an_esp_idf_session() {
+        // Arduino: exactly one server, ours.
+        let path = write_mcp_config_file(1, "t", false).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert!(servers.contains_key("bancada"));
+        let _ = std::fs::remove_file(&path);
+
+        // ESP-IDF: ours plus Espressif's documentation server.
+        let path = write_mcp_config_file(1, "t", true).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        let docs = &servers[agent::ESPRESSIF_DOCS_SERVER];
+        assert_eq!(docs["type"], "http");
+        assert_eq!(docs["url"], agent::ESPRESSIF_DOCS_URL);
+        // It carries no credential of ours — the CLI owns its OAuth. A header
+        // here would mean Bancada had a secret it has no way to obtain.
+        assert!(docs.get("headers").is_none(), "docs server must carry no token");
+        // And ours is unchanged beside it, token included.
+        assert_eq!(
+            servers["bancada"]["headers"]["Authorization"],
+            "Bearer t"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[cfg(unix)]
     #[test]
     fn mcp_config_file_is_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let path = write_mcp_config_file(1, "t").unwrap();
+        let path = write_mcp_config_file(1, "t", false).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         // Mask down to the permission bits; the type bits vary by platform.
         assert_eq!(mode & 0o777, 0o600, "{mode:o}");
@@ -6873,7 +7354,7 @@ mod tests {
     #[test]
     fn the_backstop_stops_a_session_offered_tools_bancada_did_not_ask_for() {
         let line = r#"{"type":"system","subtype":"init","tools":["Read","Write","Bash","Skill"]}"#;
-        let (kind, detail) = agent_event_alarm(&event(line), "/s").expect("an alarm");
+        let (kind, detail) = agent_event_alarm(&event(line), "/s", false).expect("an alarm");
         assert_eq!(kind, "unexpected_tools");
         assert!(detail.contains("Bash"), "{detail}");
         assert!(detail.contains("Skill"), "{detail}");
@@ -6882,10 +7363,10 @@ mod tests {
     #[test]
     fn the_backstop_is_quiet_for_the_expected_tool_set() {
         let line = r#"{"type":"system","subtype":"init","tools":["Read","Edit","Write","Glob","Grep","mcp__bancada__verify"]}"#;
-        assert!(agent_event_alarm(&event(line), "/s").is_none());
+        assert!(agent_event_alarm(&event(line), "/s", false).is_none());
         // A non-init system line carries no tools and must not alarm.
         let status = r#"{"type":"system","subtype":"status"}"#;
-        assert!(agent_event_alarm(&event(status), "/s").is_none());
+        assert!(agent_event_alarm(&event(status), "/s", false).is_none());
     }
 
     #[test]
@@ -6893,7 +7374,7 @@ mod tests {
         let sketch = tempfile::tempdir().unwrap();
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"/etc/passwd","content":"x"}}]}}"#;
         let (kind, detail) =
-            agent_event_alarm(&event(line), &sketch.path().to_string_lossy()).expect("an alarm");
+            agent_event_alarm(&event(line), &sketch.path().to_string_lossy(), false).expect("an alarm");
         assert_eq!(kind, "path_escape");
         assert!(detail.contains("/etc/passwd"), "{detail}");
     }
@@ -6907,7 +7388,7 @@ mod tests {
                 r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Edit","input":{{"file_path":"{path}"}}}}]}}}}"#
             );
             assert!(
-                agent_event_alarm(&event(&line), &dir).is_none(),
+                agent_event_alarm(&event(&line), &dir, false).is_none(),
                 "{path} is inside the project"
             );
         }
@@ -6915,7 +7396,7 @@ mod tests {
         // to read outside the project (that is what `--allowedTools Read` is),
         // and alarming on it would stop sessions for looking at a library.
         let read = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"/usr/include/stdio.h"}}]}}"#;
-        assert!(agent_event_alarm(&event(read), &dir).is_none());
+        assert!(agent_event_alarm(&event(read), &dir, false).is_none());
     }
 
     #[test]
@@ -6929,12 +7410,12 @@ mod tests {
         let dir = sketch.path().to_string_lossy().into_owned();
         let inside = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"NotebookEdit","input":{"notebook_path":"probe.ipynb","new_source":"x"}}]}}"#;
         assert!(
-            agent_event_alarm(&event(inside), &dir).is_none(),
+            agent_event_alarm(&event(inside), &dir, false).is_none(),
             "a notebook inside the project is an ordinary edit"
         );
 
         let outside = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"NotebookEdit","input":{"notebook_path":"/tmp/escape.ipynb","new_source":"x"}}]}}"#;
-        let (kind, detail) = agent_event_alarm(&event(outside), &dir).expect("an alarm");
+        let (kind, detail) = agent_event_alarm(&event(outside), &dir, false).expect("an alarm");
         assert_eq!(kind, "path_escape");
         assert!(detail.contains("/tmp/escape.ipynb"), "{detail}");
     }
@@ -6944,7 +7425,7 @@ mod tests {
         let sketch = tempfile::tempdir().unwrap();
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Write","input":{"content":"x"}}]}}"#;
         assert!(
-            agent_event_alarm(&event(line), &sketch.path().to_string_lossy()).is_some(),
+            agent_event_alarm(&event(line), &sketch.path().to_string_lossy(), false).is_some(),
             "a guarded tool whose path cannot be read must alarm, not pass"
         );
     }
@@ -6954,8 +7435,8 @@ mod tests {
         // Each call gets its own nonce-named file — two live sessions (or a
         // stop/restart in quick succession) must never collide or overwrite
         // each other's config before cleanup runs.
-        let a = write_mcp_config_file(1, "t").unwrap();
-        let b = write_mcp_config_file(1, "t").unwrap();
+        let a = write_mcp_config_file(1, "t", false).unwrap();
+        let b = write_mcp_config_file(1, "t", false).unwrap();
         assert_ne!(a, b);
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
@@ -7001,7 +7482,7 @@ mod tests {
     #[test]
     fn stop_agent_session_removes_both_temp_files_and_cancels_verify() {
         let (server, port) = bind_mcp_server().unwrap();
-        let mcp_config_path = write_mcp_config_file(port, "t").unwrap();
+        let mcp_config_path = write_mcp_config_file(port, "t", false).unwrap();
         let settings_path = write_agent_settings_file("/nowhere").unwrap();
         assert!(mcp_config_path.exists());
         assert!(settings_path.exists());
@@ -7063,17 +7544,17 @@ mod tests {
         let cli = stub_cli(&dir, &format!("echo '{sentinel}' >&2\nexit 1"));
         let l = start_listener(cli, &sketch.path().to_string_lossy(), gate());
 
-        let mcp_config_path = write_mcp_config_file(l.port, &l.token).unwrap();
+        let mcp_config_path = write_mcp_config_file(l.port, &l.token, false).unwrap();
         let settings_path = write_agent_settings_file(&sketch.path().to_string_lossy()).unwrap();
         let cfg = AgentCfg {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
             system_prompt_extra: system_prompt_extra(
                 &sketch.path().to_string_lossy(),
-                Some("test"),
-                None,
+                &arduino_spec(Some("test"), None),
             ),
             resume_session_id: None,
+            with_docs: false,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))
@@ -7173,13 +7654,14 @@ mod tests {
         let git_hook = format!("{sketch_dir}/.git/hooks/pre-commit");
         let inside = format!("{sketch_dir}/helper.h");
 
-        let mcp_config_path = write_mcp_config_file(1, "unused-no-listener").unwrap();
+        let mcp_config_path = write_mcp_config_file(1, "unused-no-listener", false).unwrap();
         let settings_path = write_agent_settings_file_with_exe(&sketch_dir, &exe).unwrap();
         let cfg = AgentCfg {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
-            system_prompt_extra: system_prompt_extra(&sketch_dir, None, None),
+            system_prompt_extra: system_prompt_extra(&sketch_dir, &arduino_spec(None, None)),
             resume_session_id: None,
+            with_docs: false,
         };
 
         let mut child = std::process::Command::new("claude")
@@ -7331,10 +7813,10 @@ mod tests {
         let hw = HwParts::default();
         let ctx = McpToolCtx {
             token: token.clone(),
-            cli,
+            monitor_cli: cli.clone(),
             sketch_dir: sketch_dir.clone(),
-            profile: Some(profile.clone()),
-            fqbn: None,
+            backend: Backend::Arduino(cli),
+            spec: arduino_spec(Some(&profile), None),
             build_gate: gate(),
             serial: hw.serial,
             serial_ring: hw.ring,
@@ -7358,13 +7840,14 @@ mod tests {
             mcp_listener_loop(thread_server, ctx, emit);
         });
 
-        let mcp_config_path = write_mcp_config_file(port, &token).unwrap();
+        let mcp_config_path = write_mcp_config_file(port, &token, false).unwrap();
         let settings_path = write_agent_settings_file(&sketch_dir).unwrap();
         let cfg = AgentCfg {
             mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             settings_path: settings_path.to_string_lossy().into_owned(),
-            system_prompt_extra: system_prompt_extra(&sketch_dir, Some(&profile), None),
+            system_prompt_extra: system_prompt_extra(&sketch_dir, &arduino_spec(Some(&profile), None)),
             resume_session_id: None,
+            with_docs: false,
         };
         let mut child = std::process::Command::new("claude")
             .args(agent::agent_args(&cfg))

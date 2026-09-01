@@ -10,6 +10,7 @@
 //! structs, and manages the project-level `sketch.yaml` file.
 
 pub mod agent;
+pub mod backend;
 pub mod boards;
 pub mod chatlog;
 pub mod cli;
@@ -20,10 +21,13 @@ pub mod files;
 pub mod fleet;
 pub mod ghlib;
 pub mod git;
+pub mod idf;
+pub mod idfenv;
 pub mod library;
 pub mod mcp;
 pub mod mqtt;
 pub mod ports;
+pub mod proc;
 pub mod project;
 pub mod scope;
 pub mod serialring;

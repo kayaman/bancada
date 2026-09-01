@@ -4,10 +4,12 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **96** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **100** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
+
+An ESP-IDF session is additionally given Espressif's hosted documentation server — one retrieval-only tool, no credentials of ours, inert until the user authorises it. See [agent-safety §3](agent-safety.md).
 
 Authoritative sources: the `generate_handler![…]` list in
 `src-tauri/src/lib.rs`, and `src/api.ts` — the **only** frontend file importing
@@ -31,7 +33,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (96)
+## 2. Commands (100)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -102,8 +104,19 @@ at a path that no longer exists. Each failure comes back in `warnings`.
 `gh_restore` re-materialises every manifest entry at its pinned commit,
 collecting per-entry errors rather than aborting on the first.
 
+### ESP-IDF — 4
+
+| Command | Returns |
+|---|---|
+| `project_info` | `{ kind: "arduino" \| "idf" \| "unknown", idf_target, idf_console }` — classified in Rust from the directory. The frontend renders this and never computes its own copy, so the Verify button and the toolbar cannot disagree. `idf_console` carries the two `sdkconfig` values Bancada reads — the console channel and its baud — and is `null` when the file names no channel, which suppresses both consumers rather than guessing. |
+| `idf_probe` | `{ ok, version?, idf_path?, error?, shadowed? }`. A struct, not a thrown string: absent, present-but-broken and usable are three different answers and the UI says something different for each. Called lazily on first ESP-IDF project open — **never at startup**. |
+| `list_idf_targets` | The chips this install supports, from `idf.py --list-targets`. Never hardcoded, for the same reason boards come from `board listall`. |
+| `set_idf_target` | **Destructive.** Deletes `build/` and regenerates `sdkconfig`. Checkpoints to git first when it can, takes the build gate, and is confirmed in the UI before it is called. Not an MCP tool — see [agent-safety §3](agent-safety.md). |
+
 ### Build and flash — 2
 `compile_sketch` · `upload_sketch`
+
+Both commands **dispatch on the detected project kind**: their signatures are unchanged, but `compile_sketch` runs `arduino-cli compile` or `idf.py build`, and `upload_sketch` runs `compile -u` or `idf.py flash`, according to what the directory holds. The backend is resolved *before* the build gate is taken, because activating ESP-IDF spawns a shell and no other build should wait on it.
 
 Both `async`, both `spawn_blocking`, both take the **non-blocking** build gate
 and stream every `OutputLine` as `build://line`. Contention returns

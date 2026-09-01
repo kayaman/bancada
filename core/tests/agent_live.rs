@@ -55,6 +55,7 @@ fn live_claude_replies_pong_and_parses_as_system_init_and_result() {
         // A fresh session, not a resumed one — this scenario has no prior
         // transcript for the CLI to continue from.
         resume_session_id: None,
+        with_docs: false,
     };
 
     let mut child = Command::new("claude")

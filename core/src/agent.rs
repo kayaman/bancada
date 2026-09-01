@@ -289,6 +289,14 @@ pub struct AgentCfg {
     /// (src-tauri's `agent_start`) validates the id's shape before it ever
     /// reaches here; `agent_args` trusts it and only decides placement.
     pub resume_session_id: Option<String>,
+    /// Offer Espressif's hosted documentation server to this session.
+    ///
+    /// Set for ESP-IDF projects only. It is the compensation for a limitation
+    /// this design accepts elsewhere: the containment anchor confines the
+    /// session to the project directory, so ESP-IDF's own headers under
+    /// `$IDF_PATH` are unreadable, and the model would otherwise be guessing
+    /// at APIs it cannot see.
+    pub with_docs: bool,
 }
 
 /// The built-in tools the embedded session is given, as a `--tools` value.
@@ -351,6 +359,36 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "mcp__bancada__serial_send",
 ];
 
+/// Espressif's hosted documentation server.
+///
+/// Retrieval only — its own documentation states it "does not execute code,
+/// modify files, or perform actions". That is what makes it admissible at all:
+/// every objection to Espressif's *Tools* server (a raw port argument, a flash
+/// outside the build gate) is about capabilities this one does not have.
+pub const ESPRESSIF_DOCS_SERVER: &str = "espressif-docs";
+pub const ESPRESSIF_DOCS_URL: &str = "https://mcp.espressif.com/docs";
+pub const ESPRESSIF_DOCS_TOOL: &str = "mcp__espressif-docs__search_espressif_sources";
+
+/// The tools a session is expected to report, given whether the documentation
+/// server was offered to it.
+///
+/// **Why this is a function and not one constant.** The docs server is offered
+/// only to ESP-IDF sessions, so a single list would have to be a superset —
+/// and a superset stops asserting anything for the Arduino case, which is most
+/// sessions. Returning an *exact* set per kind keeps [`unexpected_tools`] as
+/// strong as it was: an Arduino session that somehow reports the docs tool is
+/// still an alarm.
+///
+/// Adding a name here means changing `agent_args`'s `--allowedTools` in the
+/// same commit, exactly as for [`BUILTIN_TOOLS`].
+pub fn expected_tools(with_docs: bool) -> Vec<&'static str> {
+    let mut v = EXPECTED_TOOLS.to_vec();
+    if with_docs {
+        v.push(ESPRESSIF_DOCS_TOOL);
+    }
+    v
+}
+
 /// Tools present in a session's `system`/`init` `tools` array that Bancada did
 /// not ask for, sorted and de-duplicated (A2).
 ///
@@ -366,10 +404,11 @@ pub const EXPECTED_TOOLS: &[&str] = &[
 /// emitted before an MCP server finishes connecting legitimately lacks
 /// `mcp__bancada__verify`, and a session with too few tools is a usability
 /// problem, not a safety one.
-pub fn unexpected_tools(tools: &[String]) -> Vec<String> {
+pub fn unexpected_tools(tools: &[String], with_docs: bool) -> Vec<String> {
+    let expected = expected_tools(with_docs);
     let mut extra: Vec<String> = tools
         .iter()
-        .filter(|t| !EXPECTED_TOOLS.contains(&t.as_str()))
+        .filter(|t| !expected.contains(&t.as_str()))
         .cloned()
         .collect();
     extra.sort();
@@ -828,9 +867,19 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "--tools".to_string(),
         BUILTIN_TOOLS.to_string(),
         "--allowedTools".to_string(),
-        "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
-         mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
-            .to_string(),
+        {
+            let mut allowed = String::from(
+                "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
+                 mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send",
+            );
+            // Appended rather than spliced, so the literal above stays
+            // readable and diffable against EXPECTED_TOOLS.
+            if cfg.with_docs {
+                allowed.push(',');
+                allowed.push_str(ESPRESSIF_DOCS_TOOL);
+            }
+            allowed
+        },
         "--disallowedTools".to_string(),
         "Bash,Task,NotebookEdit,KillShell,BashOutput".to_string(),
         "--mcp-config".to_string(),
@@ -1301,6 +1350,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
@@ -1318,6 +1368,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
@@ -1336,6 +1387,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
@@ -1353,6 +1405,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         assert!(
@@ -1375,6 +1428,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
@@ -1396,6 +1450,7 @@ mod tests {
             settings_path: "/tmp/s.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1426,6 +1481,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-nonce.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1447,6 +1503,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /home/me/Blink, profile esp32s3".to_string(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let idx = args
@@ -1465,6 +1522,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         assert!(!args.iter().any(|a| a == "--cwd" || a == "-cwd"));
@@ -1477,6 +1535,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         assert_eq!(
@@ -1502,6 +1561,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
             resume_session_id: Some("abc123de".to_string()),
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         assert_eq!(
@@ -1515,6 +1575,7 @@ mod tests {
             settings_path: "/tmp/bancada-agent-settings-x.json".to_string(),
             system_prompt_extra: "project at /s, profile esp32s3".to_string(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args_none = agent_args(&cfg_none);
         assert!(
@@ -2039,7 +2100,7 @@ mod tests {
     #[test]
     fn the_expected_tool_set_raises_nothing() {
         let tools: Vec<String> = EXPECTED_TOOLS.iter().map(|s| s.to_string()).collect();
-        assert!(unexpected_tools(&tools).is_empty());
+        assert!(unexpected_tools(&tools, false).is_empty());
     }
 
     #[test]
@@ -2050,7 +2111,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(unexpected_tools(&tools).is_empty());
+        assert!(unexpected_tools(&tools, false).is_empty());
     }
 
     #[test]
@@ -2063,7 +2124,7 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        assert_eq!(unexpected_tools(&tools), vec!["Bash", "Task"]);
+        assert_eq!(unexpected_tools(&tools, false), vec!["Bash", "Task"]);
     }
 
     #[test]
@@ -2076,7 +2137,7 @@ mod tests {
             "mcp__someones_plugin__deploy".to_string(),
         ];
         assert_eq!(
-            unexpected_tools(&tools),
+            unexpected_tools(&tools, false),
             vec!["mcp__someones_plugin__deploy"]
         );
     }
@@ -2106,6 +2167,7 @@ mod tests {
             settings_path: "/tmp/s.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
@@ -2132,6 +2194,7 @@ mod tests {
             settings_path: "/tmp/s.json".to_string(),
             system_prompt_extra: String::new(),
             resume_session_id: None,
+            with_docs: false,
         };
         let args = agent_args(&cfg);
         let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
@@ -2140,6 +2203,66 @@ mod tests {
         assert_eq!(args[allowed_idx + 1], EXPECTED_TOOLS.join(","));
         for tool in BUILTIN_TOOLS.split(',') {
             assert!(EXPECTED_TOOLS.contains(&tool), "{tool}");
+        }
+    }
+
+    // ---------- the documentation server (ESP-IDF sessions only) ----------
+
+    #[test]
+    fn the_docs_tool_is_offered_only_when_asked_for() {
+        assert!(!expected_tools(false).contains(&ESPRESSIF_DOCS_TOOL));
+        assert!(expected_tools(true).contains(&ESPRESSIF_DOCS_TOOL));
+        // The base set is untouched either way.
+        assert_eq!(expected_tools(false).len(), EXPECTED_TOOLS.len());
+        assert_eq!(expected_tools(true).len(), EXPECTED_TOOLS.len() + 1);
+    }
+
+    #[test]
+    fn an_arduino_session_reporting_the_docs_tool_is_still_an_alarm() {
+        // This is the whole reason `expected_tools` is a function returning an
+        // *exact* set rather than one widened constant: a superset would stop
+        // asserting anything for the Arduino case, which is most sessions.
+        let tools = vec![ESPRESSIF_DOCS_TOOL.to_string()];
+        assert_eq!(unexpected_tools(&tools, false), vec![ESPRESSIF_DOCS_TOOL]);
+        assert!(unexpected_tools(&tools, true).is_empty());
+    }
+
+    #[test]
+    fn a_session_missing_the_docs_tool_does_not_alarm() {
+        // Until the user authenticates, the server reports `needs-auth` and
+        // contributes no tools at all. That must be quiet: missing tools are a
+        // usability question, extra ones are a safety question.
+        let tools: Vec<String> = EXPECTED_TOOLS.iter().map(|t| t.to_string()).collect();
+        assert!(unexpected_tools(&tools, true).is_empty());
+    }
+
+    #[test]
+    fn allowed_tools_and_expected_tools_agree_about_the_docs_tool() {
+        // The drift these two lists can develop is the failure this asserts:
+        // a name in --allowedTools but not EXPECTED_TOOLS alarms every
+        // session at init; the reverse silently permits nothing.
+        for with_docs in [false, true] {
+            let cfg = AgentCfg {
+                mcp_config_path: "/tmp/m.json".into(),
+                settings_path: "/tmp/s.json".into(),
+                system_prompt_extra: "x".into(),
+                resume_session_id: None,
+                with_docs,
+            };
+            let args = agent_args(&cfg);
+            let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+            let allowed: Vec<&str> = args[at + 1].split(',').map(str::trim).collect();
+            for t in expected_tools(with_docs) {
+                assert!(
+                    allowed.contains(&t),
+                    "{t} is expected but not allowed (with_docs={with_docs})"
+                );
+            }
+            assert_eq!(
+                allowed.contains(&ESPRESSIF_DOCS_TOOL),
+                with_docs,
+                "the docs tool must be allowed exactly when it is expected"
+            );
         }
     }
 

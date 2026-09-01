@@ -15,10 +15,17 @@ import { useEffect, useState } from "react";
 import {
   type Activity,
   type LastResult,
+  isAgentActivity,
   progressMode,
   statusLineText,
 } from "../statusLine";
 import { estimateFraction } from "../buildHistory";
+import {
+  agentActivity,
+  agentActivityParts,
+  formatAgentActivity,
+} from "../agent/activity";
+import type { AgentStore } from "../agent/agentStore";
 
 interface Props {
   activity: Activity | null;
@@ -34,6 +41,14 @@ interface Props {
   /** What the uploader last said it was doing ("Writing", "Verifying"), from
    *  `BuildProgress.note`. Appended to the running line; null at rest. */
   note: string | null;
+  /** The app-wide assistant store, read (never subscribed to) for the
+   *  Assistant segment. Optional so every existing test and caller that has
+   *  no assistant to report keeps working unchanged. */
+  agentStore?: AgentStore | null;
+  /** Is the assistant working? Handed down rather than read off the store
+   *  because nothing here re-renders on an `agent://event` — this is what
+   *  arms the clock. `AgentStore.live` is the value App passes. */
+  agentLive?: boolean;
 }
 
 export default function StatusBar({
@@ -45,21 +60,26 @@ export default function StatusBar({
   measuredFraction,
   estimateMs,
   note,
+  agentStore = null,
+  agentLive = false,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
 
   // Keyed on the activity's identity rather than the object, so a parent that
   // rebuilds the prop inline every render does not re-arm the interval.
   const activityKey = activity ? `${activity.key}:${activity.startedAt}` : null;
+  // A working assistant arms the same clock: its elapsed and "no output for"
+  // both count in wall time, and a turn can run for minutes with no build
+  // activity on the bar at all.
   useEffect(() => {
-    if (activityKey === null) return;
+    if (activityKey === null && !agentLive) return;
     // Read the clock immediately: `now` has been frozen since the last
     // activity ended, so without this the first frame of a build shows an
     // elapsed time measured from whenever the ticker last stopped.
     setNow(Date.now());
     const id = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(id);
-  }, [activityKey]);
+  }, [activityKey, agentLive]);
 
   const { text, isError } = statusLineText({
     activity,
@@ -76,6 +96,25 @@ export default function StatusBar({
     activity ? estimateFraction(now - activity.startedAt, estimateMs) : null,
   );
   const pct = Math.round(fraction * 100);
+
+  // Suppressed while the main line is already the assistant's own build:
+  // "Assistant compiling… 0:12" next to "Assistant · 🔨 verify (compiling)"
+  // is one fact printed twice. Otherwise the segment is additive — it never
+  // competes with the activity text for the row, so a user flash and a
+  // working assistant are both legible at once.
+  const agent =
+    agentStore && agentLive && !(activity && isAgentActivity(activity.key))
+      ? agentActivity({
+          ...agentStore.snapshot(),
+          lastEventAt: agentStore.lastEventAt,
+          now,
+        })
+      : null;
+  // "Working" alone would not say working at *what*, a metre from a status
+  // line that is also about work. Here the subject is the word.
+  const agentShown =
+    agent && (agent.phase === "working" || agent.phase === "stalled");
+  const agentParts = agentShown ? agentActivityParts(agent, "Assistant") : null;
 
   return (
     <footer className={`statusbar${isError ? " error" : ""}`}>
@@ -104,6 +143,26 @@ export default function StatusBar({
         />
       </div>
       <span className="statusbar-text">{text}</span>
+      {agentParts && agent && (
+        <span
+          className="statusbar-agent"
+          title={formatAgentActivity(agent, "Assistant")}
+        >
+          <span
+            className={`agent-pip ${agent.phase}`}
+            role="img"
+            aria-label={
+              agent.phase === "stalled"
+                ? "Assistant working, no output"
+                : "Assistant working"
+            }
+          />
+          {/* Only the middle shrinks — see `agentActivityParts`. */}
+          <span className="activity-head">{agentParts.head}</span>
+          <span className="activity-detail">{agentParts.detail}</span>
+          <span className="activity-tail">{agentParts.tail}</span>
+        </span>
+      )}
     </footer>
   );
 }

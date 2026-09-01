@@ -20,6 +20,13 @@ export type ActivityKey =
   | "agent_compile"
   | "agent_upload";
 
+/** Whether an activity belongs to the Assistant rather than the user. The
+ *  two must never close or clobber each other's work (see App's
+ *  `beginActivity`), and the status bar's Assistant segment stays quiet
+ *  while the main line is already the assistant's own build. */
+export const isAgentActivity = (k: ActivityKey): boolean =>
+  k.startsWith("agent_");
+
 export interface Activity {
   key: ActivityKey;
   /** Present participle, shown verbatim: "Compiling…", "Uploading…". */

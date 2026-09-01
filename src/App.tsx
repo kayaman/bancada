@@ -6,7 +6,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
-import { silentSerialWarning } from "./boardOptions";
+import { idfSilentSerialWarning, silentSerialWarning } from "./boardOptions";
 import { MAX_RECAPTURE_ATTEMPTS, recapturePlan } from "./monitorRecovery";
 import {
   flashTargetMismatch,
@@ -66,14 +66,22 @@ import {
   pushToast,
 } from "./notifications";
 import type { Activity, ActivityKey, LastResult } from "./statusLine";
+import { isAgentActivity } from "./statusLine";
 import {
   type BuildProgress,
   reduceBuildLine,
   startProgress,
 } from "./buildProgress";
-import { loadDurations, recordDuration } from "./buildHistory";
+import { forgetDurations, loadDurations, recordDuration } from "./buildHistory";
 import { projectButtonLabel } from "./toolbarModel";
-import type { AgentEvent, DetectedPort, OutputLine, SketchYaml } from "./api";
+import type {
+  AgentEvent,
+  DetectedPort,
+  IdfConsole,
+  OutputLine,
+  ProjectKind,
+  SketchYaml,
+} from "./api";
 import { AgentStore } from "./agent/agentStore";
 import { ChatRecorder, chatFileName, applyChatOps } from "./agent/chatLog";
 import { distillFacts } from "./agent/continueChat";
@@ -159,10 +167,9 @@ const normalizeEol = (s: string) => s.replace(/\r\n?/g, "\n");
  *  it for why firing early is the dangerous direction. */
 const EXPIRY_SLACK_MS = 16;
 
-/** Whether a status-bar activity belongs to the Assistant rather than the
- *  user. The two must never close or clobber each other's work — see
- *  `beginActivity`/`endActivity`. */
-const isAgentKey = (k: ActivityKey): boolean => k.startsWith("agent_");
+/** Re-exported name for `statusLine`'s predicate — see it for why the two
+ *  kinds of activity must never close or clobber each other's work. */
+const isAgentKey = isAgentActivity;
 
 // One store for the whole app lifetime (not panel-owned): App-level
 // `agent://event` listeners feed it even before the Assistant panel has ever
@@ -237,6 +244,19 @@ export default function App() {
   const files = useExplorerStore((s) => s.files);
   const setFiles = useExplorerStore((s) => s.setFiles);
   const [sketchYaml, setSketchYaml] = useState<SketchYaml | null>(null);
+  // Which toolchain builds the open project, decided in Rust from the
+  // directory itself. The frontend renders this rather than deciding it, so
+  // the Verify button and the toolbar cannot disagree about what a project is.
+  const [projectKind, setProjectKind] = useState<ProjectKind>("unknown");
+  const [idfTarget, setIdfTarget] = useState<string | null>(null);
+  const [idfTargets, setIdfTargets] = useState<string[]>([]);
+  // Where an ESP-IDF project's console output goes. Two consumers: the
+  // silent-monitor warning below, and the baud picker — the two questions an
+  // Arduino project answers from its FQBN and its `Serial.begin(...)`, which
+  // an ESP-IDF project has neither of.
+  const [idfConsole, setIdfConsole] = useState<IdfConsole | null>(null);
+  const [idfAvailable, setIdfAvailable] = useState(false);
+  const [hasSdkconfig, setHasSdkconfig] = useState(false);
   const [profile, setProfile] = useState<string | null>(null);
   /** When true the editor area shows the New Project form instead. */
   const [creatingProject, setCreatingProject] = useState(false);
@@ -487,6 +507,14 @@ export default function App() {
    * other's state.
    */
   const [agentBuilding, setAgentBuilding] = useState(false);
+  /** Is the assistant working right now (`AgentStore.live`)? Mirrored into
+   *  React state because nothing re-renders on an `agent://event`, and the
+   *  status bar's Assistant segment needs its clock armed the moment a turn
+   *  starts. Refreshed after every store mutation below; React bails out of
+   *  the re-render when the boolean has not actually changed, so paying this
+   *  on each streamed delta costs nothing. */
+  const [agentLive, setAgentLive] = useState(false);
+  const syncAgentLive = useCallback(() => setAgentLive(agentStore.live), []);
   const busy = userBusy || agentBuilding;
   /** The Assistant's "Allow uploads" arm switch — per session, off by
    *  default; lives here (not panel-local) because it must survive the
@@ -934,6 +962,7 @@ export default function App() {
         // — Send disabled, panel saying "Session ended", child alive and
         // still streaming.
         agentStore.closed(p.reason, p.pid);
+        syncAgentLive();
         // Follow the store's pid-guard verdict (FE-C1): a stale close from
         // a superseded session must not write a foreign `closed` op into
         // the NEW session's file and stop its recording for good. If the
@@ -1735,7 +1764,14 @@ export default function App() {
     // whether the profile turns USB CDC on. When they disagree the board
     // flashes perfectly and prints nothing — the failure that is hardest to
     // read, because nothing about it looks like a configuration problem.
-    const silent = silentSerialWarning(selectedPort, profileFqbn ?? target.fqbn);
+    // Whichever backend this project builds with, the question is the same:
+    // will the port that is open actually see anything? Only the evidence
+    // differs — an FQBN option for Arduino, `CONFIG_ESP_CONSOLE_*` for
+    // ESP-IDF.
+    const silent =
+      projectKind === "idf"
+        ? idfSilentSerialWarning(selectedPort, idfConsole)
+        : silentSerialWarning(selectedPort, profileFqbn ?? target.fqbn);
     if (flashTargetMismatch(profileFqbn, detected)) {
       notify(
         `⚠ ${selectedPortName()} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
@@ -2451,6 +2487,7 @@ export default function App() {
     const betweenSessions = snap.status === "idle" && snap.pid === undefined;
     if (!betweenSessions) {
       agentStore.push(ev);
+      syncAgentLive();
       // Deltas are transient duplicates of the authoritative assistant
       // event that follows them — recording them would write the same
       // text twice and fire one IPC append per streamed fragment. Replay
@@ -2588,6 +2625,7 @@ export default function App() {
       }
     }
     agentStore.userSent(text);
+    syncAgentLive();
     chatRecorder.record({ op: "userSent", text });
     try {
       await api.agentSend(text);
@@ -2720,6 +2758,7 @@ export default function App() {
     api.agentStop().catch(() => {});
     chatRecorder.stop();
     agentStore.clear();
+    syncAgentLive();
     agentConflictsRef.current.clear();
     setConflicts([]);
     // The stopped session's verify (if any) will never emit `verify_done`
@@ -2785,6 +2824,7 @@ export default function App() {
       if (!dir || dir !== startDir) return;
       applyChatOps(agentStore, lines);
       agentStore.prepareContinuation();
+      syncAgentLive();
       const snap = agentStore.snapshot();
       continuationRef.current = {
         file,
@@ -2855,6 +2895,79 @@ export default function App() {
   // derives the estimate fraction from it. A second interval up here would
   // re-render the whole tree twice a second to move one dashed bar.
 
+  // Classify the open project, and probe ESP-IDF only when one is actually
+  // opened. Probing at startup would put a sticky "ESP-IDF not found" toast in
+  // front of every user who never touches it — and train them to dismiss the
+  // arduino-cli warning sitting next to it.
+  useEffect(() => {
+    let cancelled = false;
+    if (!sketchDir) {
+      setProjectKind("unknown");
+      setIdfTarget(null);
+      setHasSdkconfig(false);
+      setIdfConsole(null);
+      return;
+    }
+    void (async () => {
+      try {
+        const info = await api.projectInfo(sketchDir);
+        if (cancelled) return;
+        setProjectKind(info.kind);
+        setIdfTarget(info.idf_target);
+        setHasSdkconfig(info.idf_target !== null);
+        setIdfConsole(info.idf_console);
+        // An ESP-IDF project has no `<dir>.ino` to sniff `Serial.begin` from,
+        // so without this the picker would silently fall back to the default
+        // and a 74880-baud boot log would arrive as mojibake.
+        if (info.idf_console?.baudrate != null) {
+          setSketchBaud(info.idf_console.baudrate);
+        }
+        if (info.kind !== "idf") return;
+
+        const probe = await api.idfProbe();
+        if (cancelled) return;
+        setIdfAvailable(probe.ok);
+        if (!probe.ok) {
+          notify(probe.error ?? "ESP-IDF is not available", true);
+          return;
+        }
+        // Reported, never corrected: silently reordering PATH would make
+        // Bancada build with a different toolchain than the user's terminal.
+        for (const s of probe.shadowed ?? []) notify(s);
+        const targets = await api.listIdfTargets();
+        if (!cancelled) setIdfTargets(targets);
+      } catch (e) {
+        if (!cancelled) notify(String(e), true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sketchDir, notify]);
+
+  /** Change the ESP-IDF chip target. Destructive — the picker confirms first. */
+  const onSetIdfTarget = async (target: string) => {
+    if (!sketchDir) return;
+    setUserBusy(true);
+    try {
+      const r = await api.setIdfTarget(sketchDir, target);
+      if (r.success) {
+        setIdfTarget(target);
+        notify(`Target set to ${target}`);
+        // A post-set-target build is a full rebuild, so the remembered
+        // duration would understate it by two orders of magnitude exactly
+        // when the user is most anxious about the wait.
+        forgetDurations(window.localStorage, sketchDir);
+      } else {
+        notify(`Could not set target (exit ${r.exit_code})`, true);
+      }
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setUserBusy(false);
+    }
+  };
+
   // ---------- render ----------
 
   return (
@@ -2863,6 +2976,12 @@ export default function App() {
         sketchDir={sketchDir}
         sketchYaml={sketchYaml}
         profile={profile}
+        projectKind={projectKind}
+        idfTarget={idfTarget}
+        idfTargets={idfTargets}
+        idfAvailable={idfAvailable}
+        hasSdkconfig={hasSdkconfig}
+        onSetIdfTarget={(t) => void onSetIdfTarget(t)}
         ports={ports}
         selectedPort={selectedPort}
         fleet={fleet}
@@ -3282,6 +3401,8 @@ export default function App() {
         measuredFraction={progress?.fraction ?? null}
         estimateMs={estimate}
         note={progress?.note ?? null}
+        agentStore={agentStore}
+        agentLive={agentLive}
       />
     </div>
   );

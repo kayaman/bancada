@@ -170,6 +170,33 @@ export class AgentStore {
   }
 
   /**
+   * Is the assistant doing something right now? Distinct from `status`,
+   * which only says whether the child process is alive: a session sitting
+   * at "running" between turns is *idle*, and a build kicked off through
+   * MCP is still work after the turn that asked for it has ended.
+   *
+   * O(1) on purpose. Consumers poll this to decide whether to arm a clock,
+   * and `snapshot()` copies both the message list and the 500-entry raw log
+   * on every call — far too much to pay per event just to read one bit.
+   */
+  get live(): boolean {
+    return (
+      this.turnActiveFlag || this.verifyRunningFlag || this.uploadRunningFlag
+    );
+  }
+
+  /**
+   * When the last `agent://event` of any kind landed, or `undefined` before
+   * the first. Every event is already stamped into the raw log by
+   * `recordRaw`, so "how long has the CLI been silent" needs no new state —
+   * which is the one thing that separates a turn that is thinking hard from
+   * a turn that has wedged.
+   */
+  get lastEventAt(): number | undefined {
+    return this.rawLog[this.rawLog.length - 1]?.ts;
+  }
+
+  /**
    * Is `pid` the session this store is showing?
    *
    * `undefined` on either side means "cannot tell, assume it is ours": a

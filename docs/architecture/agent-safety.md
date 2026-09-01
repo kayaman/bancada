@@ -131,8 +131,16 @@ signal at all**.
 ```rust
 BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
 
-EXPECTED_TOOLS = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send}
+expected_tools(false) = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send}
+expected_tools(true)  = the above + mcp__espressif-docs__search_espressif_sources
 ```
+
+**`expected_tools` is a function, and that is the point.** The documentation
+server below is offered to ESP-IDF sessions only, so a single constant would
+have to be a *superset* — and a superset asserts nothing for the Arduino case,
+which is most sessions. The argument is `with_docs`, frozen at spawn beside the
+backend, so the set A2 checks is exact for the session that is actually
+running: an Arduino session reporting the docs tool is still an alarm.
 
 **`--tools` is a boundary. `--disallowedTools` is not.** The latter is a
 permission-layer nudge — a session with it set still lists 25 built-in tools.
@@ -161,6 +169,40 @@ same trust level as the user's hooks, which this design already loads and
 cannot suppress (§1) — and the agent cannot author one, because `.claude/**`
 is covered by the layer-1 deny rules and by the containment hook.
 
+### The one third-party server, and why it is admissible
+
+ESP-IDF sessions are additionally given Espressif's hosted **documentation**
+server (`https://mcp.espressif.com/docs`, one tool:
+`search_espressif_sources`). This is the only MCP server in the design that
+Bancada does not implement itself, so it needs its own justification.
+
+- **It is retrieval only.** Its documentation states it "does not execute code,
+  modify files, or perform actions". Every objection that rules out Espressif's
+  *Tools* server — `flash_project(port)` taking a raw port, outside the build
+  gate, undoing the property stated below — is about capabilities this server
+  does not have.
+- **It compensates for a limitation this design accepts.** §5 records that an
+  ESP-IDF session cannot read ESP-IDF's own headers under `$IDF_PATH`, because
+  the containment anchor is the project directory. Without a documentation
+  source the model is guessing at APIs it cannot see. The session prompt names
+  the tool as the substitute for exactly that.
+- **It holds none of our credentials.** The entry in the `--mcp-config` file is
+  a bare URL; the CLI owns its OAuth. Bancada could not supply a token if it
+  wanted to.
+- **It is inert until the user authorises it.** Unauthenticated, the server
+  reports `needs-auth` and contributes **no tools**, which is silent here
+  because [`unexpected_tools`] reports only *extra* tools, never missing ones
+  (probe-verified: a headless session shows
+  `mcp_servers: [{"name":"espressif-docs","status":"needs-auth"}]` and no
+  `mcp__espressif-docs__*` entry in `tools`).
+- **It is an egress**, in the same category as the web pair below: search
+  queries leave the machine, tied to an anonymised account id, under a
+  published rate limit. Recorded, not accidental.
+
+`--strict-mcp-config` still applies: this server is present because Bancada's
+own generated config names it, **not** because the user registered it in their
+Claude Code. A server the user adds themselves is still excluded.
+
 ### The web pair is a deliberate egress trade
 
 `WebFetch` and `WebSearch` were added in 0.12.0 knowingly: reads were never
@@ -176,6 +218,37 @@ recorded, not accidental.
 - `serial_read` / `serial_send` drive the app's own monitor under the same
   single-owner discipline as the UI.
 - None of them can touch the scope.
+
+### ESP-IDF: the same structure, one new refusal
+
+Bancada drives two build backends, and the tool surface does **not** grow to
+accommodate the second one. `verify` and `upload` keep their names, their
+empty JSON schemas and their guarantees; only the toolchain behind them
+changes, chosen from the project directory at spawn and frozen for the session
+exactly as the profile and FQBN are. `EXPECTED_TOOLS` is therefore unchanged,
+and so is the §2 backstop that asserts it.
+
+Two additions, both refusals:
+
+- **`set-target` is never a tool.** `idf.py set-target` deletes `build/` and
+  regenerates `sdkconfig`, discarding everything the user set by hand. It is
+  the ESP-IDF analogue of "`upload` takes no port argument": a destructive
+  choice that belongs to the person, not the model. It ships as a Tauri
+  command behind a confirmation, and the session prompt forbids running it —
+  along with `menuconfig` and `fullclean` — directly.
+- **Target drift is refused at flash time.** An Arduino session cannot drift:
+  its board is on the command line being run. An ESP-IDF target lives in
+  `sdkconfig`, so `set-target` in another window would make `upload` flash a
+  different chip than `verify` built for. `run_upload` re-reads
+  `CONFIG_IDF_TARGET` and refuses on a mismatch, in the same shape as
+  `UPLOAD_NOT_ARMED`.
+
+**We deliberately do not use ESP-IDF's own `idf.py mcp-server`.** It exists,
+and this machine's install even ships it. Routing the agent at it would hand
+the model `flash_project(port)` — a raw port argument, outside the build gate —
+dissolving the property the first bullet of this section exists to state. It
+would also trip the §2 backstop, since bancada passes `--strict-mcp-config`
+and asserts the tool list at init.
 
 ---
 
@@ -211,6 +284,16 @@ misleading:
 - **An already-started compile cannot be aborted**, so cancelling a session
   leaves it holding the build gate until it finishes.
 - **Layer 4 is after-the-fact** by construction (§2).
+- **An ESP-IDF session cannot read the headers it is working against.**
+  Everything under `$IDF_PATH/components/` is outside the project directory,
+  so the containment hook refuses writes there and the agent has no reason to
+  expect reads to be useful either. It is told so in its system prompt rather
+  than left to discover it by looping. Widening the anchor to a second tree
+  would weaken the one thing layer 2 asserts, so the gap is **compensated
+  rather than closed** — ESP-IDF sessions get Espressif's documentation server
+  (§3) to look up what they cannot read. That is a substitute for the headers,
+  not a replacement: it returns prose and examples, not the project's own
+  vendored component sources.
 
 ### Why `rename_project` refuses while a session is live
 

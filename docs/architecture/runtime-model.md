@@ -97,7 +97,9 @@ threads may lock the ring, because nothing joins a thread while holding it.
 
 ## 3. The build gate
 
-Four entry points drive the same arduino-cli build cache for one sketch:
+Four entry points drive the same build cache for one project — an
+`arduino-cli` cache for a sketch, a `build/` directory for an ESP-IDF project.
+Which toolchain runs is decided per project; the gate does not care:
 
 | Entry point | Triggered by |
 |---|---|
@@ -120,13 +122,17 @@ touch the platform and library trees, not a sketch's build cache, and
 serialising them behind a long compile would make the Boards and Libraries
 panels fail for no benefit.
 
-There are **six** `try_build_gate` call sites, and only four of them are
+There are **seven** `try_build_gate` call sites, and only four of them are
 builds. Naming the rule rather than the count: *the gate is held by anything
 that must not run beside a compile or a flash.*
 
 - Four **builds** — user Verify, user Flash, and the agent's MCP `verify` and
   `upload`.
 - `rename_project`, which moves the very tree the other four compile from.
+- `set_idf_target`, which **deletes `build/`** — running that beside a compile
+  is precisely the corruption this gate exists to prevent. It is also the one
+  gate holder that commits to git first, because it is the one that destroys
+  something the user cannot otherwise get back.
 - The MCP `serial_read` tool, but **only on the path where it would start a
   monitor**. Reading a monitor that is already open never consults the gate:
   it contends for nothing, and refusing it would blind the agent for the whole

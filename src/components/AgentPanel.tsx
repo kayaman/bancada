@@ -16,7 +16,6 @@ import { replayChat } from "../agent/chatLog";
 import type {
   AgentAlarm,
   AgentMessage,
-  AgentStatus,
   AgentStore,
   RawLogEntry,
 } from "../agent/agentStore";
@@ -25,7 +24,11 @@ import remarkGfm from "remark-gfm";
 import { diffForToolInput, type DiffLine } from "../agent/diff";
 import { alarmConsequence } from "../agent/alarmCopy";
 import { parseVerifyResult } from "../agent/verifyResult";
-import { activityLabel } from "../agent/activity";
+import {
+  agentActivity,
+  agentActivityParts,
+  formatAgentActivity,
+} from "../agent/activity";
 import { formatTokens } from "../agent/usage";
 import type { BottomTab } from "../bottomTabs";
 
@@ -249,6 +252,17 @@ export default function AgentPanel({
 
   const snap = store.snapshot();
   const disabled = snap.status === "ended";
+  // One vocabulary for the panel and the status bar alike — see
+  // src/agent/activity.ts. `phase` is total, so the footer always states
+  // whether the assistant is working; it never falls silent and leaves the
+  // question to be inferred from whether the transcript is moving.
+  const act = agentActivity({
+    ...snap,
+    lastEventAt: store.lastEventAt,
+    now: Date.now(),
+  });
+  const actLine = formatAgentActivity(act);
+  const actParts = agentActivityParts(act);
 
   return (
     <section
@@ -311,9 +325,16 @@ export default function AgentPanel({
       </div>
 
       <div className="agent-footer">
-        <span className="agent-status">
-          {activityLabel({ ...snap, now: Date.now() }) ??
-            statusLabel(snap.status, snap.verifyRunning, snap.uploadRunning)}
+        <span className="agent-status" title={actLine}>
+          <span
+            className={`agent-pip ${act.phase}`}
+            role="img"
+            aria-label={act.state}
+          />
+          {/* Only the middle shrinks — see `agentActivityParts`. */}
+          <span className="activity-head">{actParts.head}</span>
+          <span className="activity-detail">{actParts.detail}</span>
+          <span className="activity-tail">{actParts.tail}</span>
         </span>
         {(snap.sessionUsage.costUsd > 0 ||
           snap.sessionUsage.inputTokens > 0) && (
@@ -926,30 +947,6 @@ export function TurnSummaryView({
 }
 
 // ---------- small helpers ----------
-
-function statusLabel(
-  status: AgentStatus,
-  verifyRunning: boolean,
-  uploadRunning: boolean,
-): string {
-  if (uploadRunning) return "Flashing…";
-  if (verifyRunning) return "Verifying…";
-  switch (status) {
-    case "idle":
-      return "Not started";
-    case "starting":
-      return "Starting…";
-    case "running":
-      // Only reachable between turns: while a turn is in flight,
-      // activityLabel always wins. So "running" here means the session is
-      // alive and the agent is waiting for the user.
-      return "Ready";
-    case "ended":
-      return "Session ended";
-    default:
-      return status;
-  }
-}
 
 /** The wire tool_use name is `mcp__bancada__verify` (confirmed: this is the
  *  exact string `agent_args()` requires in `--allowedTools`,

@@ -4,6 +4,7 @@ import {
   projectButtonLabel,
   projectMenuItems,
   retargetBlockedReason,
+  setTargetBlockedReason,
 } from "../toolbarModel";
 
 describe("buildBlockedReason", () => {
@@ -97,5 +98,26 @@ describe("projectMenuItems", () => {
     const items = projectMenuItems({ sketchDir: "/s" });
     expect(items.find((i) => i.id === "open")?.accel).toBe("Ctrl+O");
     expect(items.filter((i) => i.accel).map((i) => i.id)).toEqual(["open"]);
+  });
+});
+
+describe("setTargetBlockedReason", () => {
+  const base = { sketchDir: "/p", busy: false, idfAvailable: true };
+
+  it("allows the change when everything is in place", () => {
+    expect(setTargetBlockedReason(base)).toBeNull();
+  });
+
+  it("reports the most fundamental obstacle first", () => {
+    // With nothing open, a missing toolchain is not the thing to say.
+    expect(
+      setTargetBlockedReason({ ...base, sketchDir: null, idfAvailable: false }),
+    ).toBe("open a project first");
+    expect(setTargetBlockedReason({ ...base, idfAvailable: false })).toBe(
+      "ESP-IDF is not available on this machine",
+    );
+    expect(setTargetBlockedReason({ ...base, busy: true })).toBe(
+      "a build is already running",
+    );
   });
 });

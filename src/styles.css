@@ -163,6 +163,12 @@ body {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  /* Pin the height so the bar does not jump when this slot changes shape —
+     an Arduino project shows the profile pair here, an ESP-IDF project shows
+     the target picker, and a folder that is neither shows nothing at all.
+     The slot stays the size of a control; it just holds no control. Same
+     idiom as the serial row's fixed height. */
+  min-height: 28px;
   /* Without this, a flex item's min-content width is its content, so nothing
      in the bar can actually shrink and the overflow is pushed onto whatever
      comes last instead. */
@@ -1747,9 +1753,8 @@ body {
 .agent-status {
   min-width: 0;
   flex: 0 1 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
 }
 
 .agent-cost {
@@ -2315,6 +2320,114 @@ body {
   color: var(--text-dim);
 }
 
+/* The status line and the Assistant segment share one row. The text yields
+   first: it is the one with a project path in it. */
+.statusbar-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Additive, never a competing tier: a user flash and a working assistant are
+   both legible at once. Pushed right so the eye learns one place to look. */
+.statusbar-agent {
+  margin-left: auto;
+  padding-left: var(--sp-6);
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  color: var(--text-dim);
+}
+
+/* `text-overflow` never applies to a flex container, only to a block of text
+   — and both outer spans had to become flex rows to seat the pip. So the line
+   is rendered as three children, and only the middle one is allowed to
+   shrink. Left as a single text node the browser cuts from the right, which
+   sacrifices exactly the wrong things: it clipped "0:08" down to "0:0" — a
+   truncated clock that reads as a real one — while the file path nobody is
+   squinting at survived in full. Head and tail hold; the path yields. */
+/* `pre`, not `nowrap`: each part is a flex item and therefore blockified, so
+   normal white-space collapsing eats the leading space of its " · " separator
+   and the line renders "Working· thinking". `pre` keeps it and still never
+   wraps, so the ellipsis below behaves the same. */
+.activity-head,
+.activity-detail,
+.activity-tail {
+  white-space: pre;
+}
+
+.activity-head,
+.activity-tail {
+  flex: none;
+}
+
+.activity-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- the working/idle pip ----------
+   The one mark that answers "is it working?" without being read. Three
+   distinctions, and only one of them is motion — see the reduced-motion
+   override at the foot of this file for why that matters:
+     filled + pulsing  working, events arriving
+     hollow  + still   working, but nothing has arrived for a while
+     dim     + still   alive and waiting for you                        */
+.agent-pip {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-right: var(--sp-3);
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.5;
+}
+
+.agent-pip.working,
+.agent-pip.starting {
+  background: var(--accent);
+  opacity: 1;
+  animation: agent-pip-pulse 1.4s ease-in-out infinite;
+}
+
+/* Hollow, and deliberately the warning colour: the session has not failed —
+   it is working and quiet — but this is the state worth a second look. */
+.agent-pip.stalled {
+  background: transparent;
+  border: 1.5px solid var(--warn);
+  opacity: 1;
+  animation: none;
+}
+
+.agent-pip.ready {
+  background: var(--accent-dim);
+  opacity: 0.9;
+}
+
+.agent-pip.offline,
+.agent-pip.ended {
+  background: transparent;
+  border: 1.5px solid var(--border-strong);
+  opacity: 1;
+}
+
+@keyframes agent-pip-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+
 .statusbar.error {
   color: var(--error);
 }
@@ -2781,6 +2894,17 @@ body {
     animation: none;
     width: 100%;
     opacity: 0.45;
+  }
+
+  /* Same trap, higher stakes: the blanket rule would freeze the working pip,
+     and a frozen pip is precisely how this design says "stalled". Motion is
+     never the only carrier — filled-vs-hollow and the "no output for M:SS"
+     text both survive here — so simply hold the working pip at full paint
+     and let those two do the work. */
+  .agent-pip.working,
+  .agent-pip.starting {
+    animation: none;
+    opacity: 1;
   }
 }
 
@@ -3265,7 +3389,7 @@ body {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--sp-1);
   width: 34px;
   height: 16px;
   padding: 0 3px;
@@ -3320,4 +3444,21 @@ body {
 .appearance-import:disabled {
   color: var(--text-dim);
   cursor: default;
+}
+
+/* ninja's `[n/total]` counter, for ESP-IDF builds. Exactly one of these rows
+   ever exists — each new one replaces the last — so it reads as a live status
+   line rather than scrollback, and is dimmed to say so. */
+.console-row.progress {
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+/* The honest half of the set-target confirmation: what is about to be lost.
+   Warn-coloured because it is a caution, not an error — nothing has gone
+   wrong yet, and the user can still cancel. */
+.target-warning {
+  color: var(--warn);
+  font-size: var(--fs-small);
+  white-space: nowrap;
 }

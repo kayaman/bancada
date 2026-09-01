@@ -54,7 +54,15 @@ should recognise them as consequences rather than quirks:
 ### PATH resolution, by bare name
 
 Every engine is looked up on `PATH` by its plain name — `arduino-cli`, `git`,
-`gh`, `claude` — with no bundled copy and no configured path. `esptool` is the
+`gh`, `claude` — with no bundled copy and no configured path.
+
+**ESP-IDF is the deliberate exception**, and the reason is worth stating: it is
+resolved from the installer's own registry (`~/.espressif/tools/eim_idf.json`),
+**never** from the ambient `IDF_PATH`. A windowed app launched from a desktop
+file has no shell environment to inherit one from, and on a machine with more
+than one ESP-IDF tree the exported one is as likely to be a half-installed git
+clone as the working install. `core/src/idfenv.rs` records what else was tried
+and why each alternative failed. `esptool` is the
 one exception: it probes `esptool` then `esptool.py`, taking the first whose
 `version` subcommand succeeds (`core/src/esptool.rs`), because the pip package
 has shipped under both names.

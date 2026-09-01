@@ -13,7 +13,7 @@
 
 // The Rust-facing shapes live in `api.ts` with every other mirror of a core
 // type; re-exported here so a caller of this module needs only one import.
-import type { ConfigOption, ConfigValue } from "./api";
+import type { ConfigOption, ConfigValue, IdfConsole } from "./api";
 
 export type { ConfigOption, ConfigValue };
 
@@ -171,5 +171,59 @@ export function silentSerialWarning(
     `default this board sends Serial to the UART0 peripheral rather than the ` +
     `USB port, so the monitor stays empty while the upload itself looks fine. ` +
     `Set USB CDC On Boot to Enabled in the profile's board options.`
+  );
+}
+
+/**
+ * The ESP-IDF counterpart of [`silentSerialWarning`], for the same bench
+ * failure: a board that flashes clean and then prints nothing.
+ *
+ * The trap is the same shape but the evidence is different. An Arduino sketch
+ * says where `Serial` goes through `CDCOnBoot` in the FQBN; an ESP-IDF project
+ * says it through `CONFIG_ESP_CONSOLE_*` in `sdkconfig`.
+ *
+ * **The secondary console is why this is not a one-line check.** ESP-IDF
+ * defaults to mirroring output to USB Serial/JTAG whenever the primary console
+ * is UART — its Kconfig help says it exists for exactly this case, "when UART0
+ * port as a primary is selected but not connected". So a UART console is *not*
+ * silent on the stock configuration, and warning about it would fire on
+ * essentially every unmodified project. That is the false positive the
+ * companion function's own note warns against: a warning on a working setup
+ * teaches people to ignore warnings.
+ *
+ * Warned only when all of these hold:
+ *   - the selected port is the chip's own USB (a bridge port sees UART0 fine),
+ *   - the console is on UART, or compiled out entirely,
+ *   - and no secondary USB mirror is configured.
+ */
+export function idfSilentSerialWarning(
+  portAddress: string | null,
+  console: IdfConsole | null,
+): string | null {
+  if (!portAddress || !console) return null;
+  if (!isNativeUsbPort(portAddress)) return null;
+  // A USB console is already talking on the port that is open.
+  if (console.channel === "usb_cdc" || console.channel === "usb_serial_jtag")
+    return null;
+  // The mirror carries output to USB even with a UART primary.
+  if (console.secondary_usb) return null;
+
+  if (console.channel === "none") {
+    return (
+      `This project has no console: CONFIG_ESP_CONSOLE_NONE is set, so ` +
+      `printing is compiled out and the monitor will stay empty on every ` +
+      `port. Choose a console channel in menuconfig if you expected output.`
+    );
+  }
+
+  // Same reasoning as the Arduino version: no "use the other port" advice.
+  // Whether UART0 reaches anything openable is the board's business, and
+  // moving the console to USB is the fix that works regardless.
+  return (
+    `Serial output will not reach ${portAddress}: this project's console is ` +
+    `on UART with no USB secondary, so it goes to the UART0 peripheral rather ` +
+    `than the USB port you have open, and the monitor stays empty while the ` +
+    `flash itself looks fine. Set the console channel to USB Serial/JTAG (or ` +
+    `enable the secondary output) in menuconfig.`
   );
 }

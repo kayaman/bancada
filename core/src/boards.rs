@@ -198,6 +198,46 @@ pub fn platform_dep_id(entry: &str) -> &str {
     }
 }
 
+/// Which package index declares `packager`, given already-fetched indexes as
+/// `(url, file contents)` pairs.
+///
+/// This exists because `arduino-cli compile -m <profile>` is **hermetic**: it
+/// resolves platforms from Arduino's official index plus whatever
+/// `platform_index_url:` the profile itself carries. It does NOT read
+/// `board_manager.additional_urls` from the CLI config, and it does NOT fall
+/// back on an already-installed core. So a profile pinning a packager that is
+/// not in the default index — `esp8266` above all; `esp32` *is* in there,
+/// which is what makes the failure so confusing — must name its index inline
+/// or the build dies with "Platform not found: platform not installed".
+///
+/// Derived rather than tabulated: a hardcoded packager→URL map goes stale the
+/// day a project moves its index, and only ever covers packagers someone
+/// thought to add. The indexes the user already has say it exactly.
+///
+/// Returns `None` for a packager no index declares — which is the right answer
+/// for `esp32`/`arduino`, since a default-index platform needs no URL.
+pub fn index_url_for_packager(packager: &str, indexes: &[(String, String)]) -> Option<String> {
+    let packager = packager.trim();
+    for (url, body) in indexes {
+        // A cache file arduino-cli owns and may be rewriting: a corrupt one
+        // costs this lookup, never the profile write that asked for it.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+            continue;
+        };
+        let Some(packages) = v.get("packages").and_then(|p| p.as_array()) else {
+            continue;
+        };
+        if packages
+            .iter()
+            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+            .any(|n| n == packager)
+        {
+            return Some(url.clone());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +419,82 @@ mod tests {
         // A hand-written sketch.yaml may pin without a version.
         assert_eq!(platform_dep_id("esp32:esp32"), "esp32:esp32");
         assert_eq!(platform_dep_id("  esp32:esp32  "), "esp32:esp32");
+    }
+}
+
+#[cfg(test)]
+mod index_url_tests {
+    use super::*;
+
+    const ESP8266_URL: &str = "https://arduino.esp8266.com/stable/package_esp8266com_index.json";
+    const RP2040_URL: &str = "https://github.com/earlephilhower/x/package_rp2040_index.json";
+
+    fn idx(names: &[&str]) -> String {
+        let packages: Vec<String> = names
+            .iter()
+            .map(|n| format!(r#"{{"name":"{n}","platforms":[]}}"#))
+            .collect();
+        format!(r#"{{"packages":[{}]}}"#, packages.join(","))
+    }
+
+    #[test]
+    fn finds_the_index_that_declares_the_packager() {
+        let indexes = vec![(ESP8266_URL.to_string(), idx(&["esp8266"]))];
+        assert_eq!(
+            index_url_for_packager("esp8266", &indexes).as_deref(),
+            Some(ESP8266_URL)
+        );
+    }
+
+    #[test]
+    fn a_packager_no_index_declares_has_no_url() {
+        // esp32 lives in Arduino's DEFAULT index, which is never one of these
+        // — and a profile pinning it needs no URL at all. None is correct.
+        let indexes = vec![(ESP8266_URL.to_string(), idx(&["esp8266"]))];
+        assert_eq!(index_url_for_packager("esp32", &indexes), None);
+    }
+
+    #[test]
+    fn picks_the_right_index_out_of_several() {
+        let indexes = vec![
+            (RP2040_URL.to_string(), idx(&["rp2040"])),
+            (ESP8266_URL.to_string(), idx(&["esp8266"])),
+        ];
+        assert_eq!(
+            index_url_for_packager("esp8266", &indexes).as_deref(),
+            Some(ESP8266_URL)
+        );
+        assert_eq!(
+            index_url_for_packager("rp2040", &indexes).as_deref(),
+            Some(RP2040_URL)
+        );
+    }
+
+    #[test]
+    fn reads_every_packager_an_index_declares() {
+        let indexes = vec![(RP2040_URL.to_string(), idx(&["rp2040", "rp2350"]))];
+        assert_eq!(
+            index_url_for_packager("rp2350", &indexes).as_deref(),
+            Some(RP2040_URL)
+        );
+    }
+
+    #[test]
+    fn a_corrupt_index_is_skipped_not_fatal() {
+        // These files are a cache arduino-cli owns; a half-written one must
+        // cost at most this one lookup, never a profile write.
+        let indexes = vec![
+            ("https://x/package_broken_index.json".to_string(), "{oh no".to_string()),
+            (ESP8266_URL.to_string(), idx(&["esp8266"])),
+        ];
+        assert_eq!(
+            index_url_for_packager("esp8266", &indexes).as_deref(),
+            Some(ESP8266_URL)
+        );
+    }
+
+    #[test]
+    fn nothing_to_search_is_simply_none() {
+        assert_eq!(index_url_for_packager("esp8266", &[]), None);
     }
 }

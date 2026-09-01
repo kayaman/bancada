@@ -1052,3 +1052,37 @@ describe("raw event log", () => {
     expect(s.snapshot().rawLog).toHaveLength(0);
   });
 });
+
+describe("AgentStore: live", () => {
+  it("is false before a turn and true once one is sent", () => {
+    const s = new AgentStore();
+    expect(s.live).toBe(false);
+    s.userSent("hi");
+    expect(s.live).toBe(true);
+  });
+
+  it("goes false again when the turn ends", () => {
+    const s = new AgentStore();
+    s.userSent("hi");
+    s.push({ type: "result", is_error: false } as AgentEvent);
+    expect(s.live).toBe(false);
+  });
+
+  it("stays true for a build that outlives the turn", () => {
+    const s = new AgentStore();
+    s.userSent("verify it");
+    s.push({ type: "verify_started" } as AgentEvent);
+    s.push({ type: "result", is_error: false } as AgentEvent);
+    expect(s.live).toBe(true);
+    s.push({ type: "verify_done", success: true } as AgentEvent);
+    expect(s.live).toBe(false);
+  });
+
+  it("reports when the last event landed, for staleness", () => {
+    const s = new AgentStore();
+    expect(s.lastEventAt).toBeUndefined();
+    vi.setSystemTime(new Date(50_000));
+    s.push({ type: "assistant", message: { content: [] } } as AgentEvent);
+    expect(s.lastEventAt).toBe(50_000);
+  });
+});

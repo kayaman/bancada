@@ -56,6 +56,24 @@ export function retargetBlockedReason(
   return null;
 }
 
+/**
+ * Why the ESP-IDF target cannot be changed right now, or null.
+ *
+ * Same "disable and say why" rule as [`buildBlockedReason`], and ordered the
+ * same way — most fundamental first, because with no project open the missing
+ * toolchain is not the thing to mention.
+ */
+export function setTargetBlockedReason(s: {
+  sketchDir: string | null;
+  busy: boolean;
+  idfAvailable: boolean;
+}): string | null {
+  if (!s.sketchDir) return "open a project first";
+  if (!s.idfAvailable) return "ESP-IDF is not available on this machine";
+  if (s.busy) return "a build is already running";
+  return null;
+}
+
 /** The project button's label: the open project's name, or the invitation. */
 export function projectButtonLabel(sketchDir: string | null): string {
   const name = sketchDir?.split("/").filter(Boolean).pop();

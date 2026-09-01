@@ -4,10 +4,8 @@
 //! (compile/upload) stream their human-readable output line by line through a
 //! callback so the UI can show live progress.
 
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
 
 use crate::types::*;
 use crate::{Error, Result};
@@ -43,11 +41,7 @@ impl ArduinoCli {
     }
 
     fn map_spawn_err(&self, e: std::io::Error) -> Error {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            Error::ToolMissing(self.bin.clone())
-        } else {
-            Error::Io(e)
-        }
+        crate::proc::map_spawn_err(e, &self.bin)
     }
 
     /// Run to completion and parse stdout as JSON.
@@ -75,18 +69,8 @@ impl ArduinoCli {
     /// side effect rather than parsed output (`sketch new`, `profile create`).
     /// `--json` is not passed: these print prose, and some reject the flag.
     fn run_ok(&self, args: &[&str]) -> Result<String> {
-        let out = self
-            .base_command(args)
-            .output()
-            .map_err(|e| self.map_spawn_err(e))?;
-        if !out.status.success() {
-            return Err(Error::ToolFailed {
-                tool: format!("{} {}", self.bin, args.join(" ")),
-                status: out.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let display = format!("{} {}", self.bin, args.join(" "));
+        crate::proc::output(self.base_command(args), &self.bin, &display)
     }
 
     /// Run to completion, streaming stdout+stderr lines (interleaved) into
@@ -94,48 +78,9 @@ impl ArduinoCli {
     pub fn run_streaming(
         &self,
         args: &[&str],
-        mut on_line: impl FnMut(OutputLine),
+        on_line: impl FnMut(OutputLine),
     ) -> Result<RunResult> {
-        let mut child = self
-            .base_command(args)
-            .spawn()
-            .map_err(|e| self.map_spawn_err(e))?;
-
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-
-        let (tx, rx) = mpsc::channel::<OutputLine>();
-        let tx_err = tx.clone();
-
-        let t_out = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-                let _ = tx.send(OutputLine {
-                    stream: OutputStream::Stdout,
-                    line,
-                });
-            }
-        });
-        let t_err = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-                let _ = tx_err.send(OutputLine {
-                    stream: OutputStream::Stderr,
-                    line,
-                });
-            }
-        });
-
-        // Receive until both writer threads hang up.
-        for line in rx {
-            on_line(line);
-        }
-        let _ = t_out.join();
-        let _ = t_err.join();
-
-        let status = child.wait()?;
-        Ok(RunResult {
-            success: status.success(),
-            exit_code: status.code().unwrap_or(-1),
-        })
+        crate::proc::stream(self.base_command(args), &self.bin, on_line)
     }
 
     /// Spawn a long-lived subprocess (serial monitor) without waiting.
@@ -316,6 +261,41 @@ impl ArduinoCli {
     // whatever the user's arduino-cli config already knows and never edits
     // `board_manager.additional_urls` — same principle as refusing to flip
     // `library.enable_unsafe_install` for git installs.
+
+    /// Every third-party package index the user's config knows, as
+    /// `(url, cached file contents)` — the raw material for
+    /// `boards::index_url_for_packager`, and through it for
+    /// `SketchProject::ensure_platform_index_urls`.
+    ///
+    /// Read-only, in keeping with the note above: bancada consults
+    /// `board_manager.additional_urls` and never edits it.
+    ///
+    /// Infallible by design. Every way this can come up short — the key unset
+    /// on a stock install, an index the user has configured but never
+    /// downloaded, an unreadable cache file — means the same thing ("no extra
+    /// indexes to offer"), and none of them is a reason to fail the profile
+    /// write that asked. An index that is missing here simply leaves that
+    /// platform's URL unfilled, exactly as before.
+    pub fn platform_indexes(&self) -> Vec<(String, String)> {
+        let Ok(urls) = self.run_json::<Vec<String>>(&["config", "get", "board_manager.additional_urls"])
+        else {
+            return Vec::new();
+        };
+        let Ok(data_dir) = self.run_json::<String>(&["config", "get", "directories.data"]) else {
+            return Vec::new();
+        };
+        let dir = PathBuf::from(data_dir.trim());
+        urls.into_iter()
+            .filter_map(|url| {
+                let name = index_file_name(&url);
+                if name.is_empty() {
+                    return None;
+                }
+                let body = std::fs::read_to_string(dir.join(name)).ok()?;
+                Some((url, body))
+            })
+            .collect()
+    }
 
     pub fn core_search(&self, query: &str) -> Result<Vec<Platform>> {
         let r: CoreListResponse = self.run_json(&["core", "search", query])?;
@@ -516,9 +496,49 @@ fn monitor_args(port: &str, baudrate: u32) -> Vec<String> {
 
 // ---------- tests ----------
 
+/// The file name arduino-cli caches an index URL under: the basename of its
+/// path, query string discarded. Empty when the URL has no path segment,
+/// which means there is nothing on disk to read.
+fn index_file_name(url: &str) -> &str {
+    let no_query = url.split(['?', '#']).next().unwrap_or("");
+    // The scheme comes off first: without that, a URL carrying no path at all
+    // ("https://x.test") splits on the slash inside "https://" and yields the
+    // HOSTNAME as a file name — a plausible-looking path to a file that was
+    // never there.
+    let after_scheme = no_query.split_once("://").map_or(no_query, |(_, rest)| rest);
+    match after_scheme.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_index_url_names_its_cached_file() {
+        // arduino-cli caches each index under the basename of its URL, so the
+        // URL is enough to find the copy already on disk.
+        assert_eq!(
+            index_file_name("https://arduino.esp8266.com/stable/package_esp8266com_index.json"),
+            "package_esp8266com_index.json"
+        );
+    }
+
+    #[test]
+    fn an_index_url_query_string_is_not_part_of_the_file_name() {
+        assert_eq!(
+            index_file_name("https://x.test/package_x_index.json?raw=1"),
+            "package_x_index.json"
+        );
+    }
+
+    #[test]
+    fn a_url_with_no_path_yields_nothing_to_read() {
+        assert_eq!(index_file_name("https://x.test"), "");
+        assert_eq!(index_file_name("https://x.test/"), "");
+    }
 
     #[test]
     fn compile_prefers_the_profile_over_an_fqbn() {

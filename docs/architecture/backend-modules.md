@@ -10,7 +10,7 @@ Two crates, one workspace (`Cargo.toml`, members `["core", "src-tauri"]`).
 └───────────────────────────┬──────────────────────────────────┘
                             │ calls
 ┌───────────────────────────┴──────────────────────────────────┐
-│ core  (crate `bancada-core`) — 22 modules, ~16.0k lines      │
+│ core  (crate `bancada-core`) — 26 modules, ~17.5k lines      │
 │   Pure of Tauri. Parsers, validators, policy, wire formats.  │
 │   Owns: no long-lived state, no knowledge that a UI exists   │
 └──────────────────────────────────────────────────────────────┘
@@ -20,7 +20,7 @@ The rule and its rationale are in [conventions §1](conventions.md#1-the-layerin
 
 ---
 
-## 1. `bancada-core` — the 22 modules
+## 1. `bancada-core` — the 26 modules
 
 `core/src/lib.rs` is 61 lines: the module list, one `Error` enum, one `Result`
 alias. Every error in the crate is one of six variants — `Io`, `ToolFailed`,
@@ -32,6 +32,10 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | Module | LoC | Responsibility |
 |---|---|---|
 | `cli.rs` | 1126 | The `arduino-cli` wrapper. `ArduinoCli { bin }` defaults to `"arduino-cli"` on PATH. Three invocation modes: `run_json` (appends `--json`, deserialises stdout), `run_ok` (side-effect commands that reject `--json`), `run_streaming` (two reader threads → one `mpsc` → `OutputLine` callback). `monitor()` returns a live `Child` with piped stdio. |
+| `proc.rs` | 105 | Subprocess plumbing shared by both toolchains — spawn, interleave stdout/stderr into one ordered stream, translate a missing binary into `ToolMissing`. Extracted from `cli.rs` when ESP-IDF arrived; `ArduinoCli::run_streaming` is now a one-line delegate with a byte-identical signature. |
+| `idf.rs` | 340 | The `idf.py` wrapper. Pure argv builders (`build_args`, `flash_args`, `set_target_args`), `parse_sdkconfig_target` (which must match the exact key — `CONFIG_IDF_TARGET_ESP32S3=y` is a decoy), and `idf_failure_excerpt`, which narrows a failing build for the agent. |
+| `idfenv.rs` | 400 | Finding and activating an ESP-IDF install, from the installer registry rather than `IDF_PATH`. Its rustdoc records the three approaches that do **not** work, each probe-verified — `idf_tools.py export`, a hand-built environment, and sourcing the activation script (which mutates the registry it reads). |
+| `backend.rs` | 240 | The seam between the two toolchains: `Backend` / `BuildSpec`, an enum rather than a trait because `run_streaming` takes `impl FnMut` and the set is closed at two. Only `verify` and `flash` are polymorphic — boards, cores, libraries and the monitor stay on `ArduinoCli`. |
 | `esptool.rs` | 316 | MAC address and chip type. Probes `esptool` then `esptool.py`. Keeps raw output for the UI's "details" view. |
 | `types.rs` | 701 | The serde structs for everything `arduino-cli --json` returns — `DetectedPort`, `Port`, `IndexedLibrary`, `InstalledLibrary`, `Platform`, `BoardOption` — plus the streaming shapes `OutputLine { stream, line }` and `RunResult`. |
 | `boards.rs` | 383 | Core/platform identity: `parse_core_id`, `fqbn_platform_id`, install-status derivation, version sorting, and the `sketch.yaml` platform-dependency strings. |

@@ -70,6 +70,20 @@ const AVR_WRITING = /^avrdude: writing flash/;
 const AVR_VERIFYING = /^avrdude: verifying/;
 const AVR_DONE = /^avrdude done/;
 const NEW_PORT = /^New upload port:/;
+// ninja, which ESP-IDF builds through. Unlike arduino-cli — which says nothing
+// at all until it is done — ninja counts its own steps, so this is the first
+// genuinely *measured* compile-phase fraction Bancada has ever had. Before it,
+// the bar was an estimate or indeterminate until esptool started talking.
+const NINJA_PROGRESS = /^\[(\d+)\/(\d+)\]\s/;
+// esptool announcing itself, which is the compile→flash handover on the IDF
+// path. `Sketch uses …` never appears there, so without this the bar would
+// stay pinned at the end of the compile for the whole flash.
+//
+// Deliberately just the banner: `Connecting....` is pinned by an existing test
+// as a line that must NOT be treated as a transition (it can arrive after the
+// phase has already moved), and matching it here would break the
+// same-reference contract callers rely on to skip a re-render.
+const IDF_HANDOVER = /^esptool(?:\.py)? v/;
 
 const size = (s: Segment) => s.to - s.from + 1;
 
@@ -167,6 +181,27 @@ export function reduceBuildLine(
   // The explicit `null` is the one place a fraction is allowed to go
   // backwards — a fresh write has begun and whatever the compile phase left
   // on the bar is now a lie.
+  const ninja = NINJA_PROGRESS.exec(line);
+  if (ninja) {
+    const total = Number(ninja[2]);
+    if (total <= 0) return p;
+    return {
+      ...p,
+      phase: "compiling",
+      fraction: forward(p, Number(ninja[1]) / total),
+      note: "Compiling",
+    };
+  }
+
+  // The compile just reached 1.0, and `forward` holds the fraction monotonic —
+  // so without clearing it here the bar would sit at 100% for the entire
+  // flash. This is the same deliberate exception the avrdude branch below
+  // makes, and the only other place a fraction is allowed to go backwards.
+  if (IDF_HANDOVER.test(line)) {
+    if (p.op !== "upload") return p;
+    return { ...p, phase: "uploading", fraction: null, note: "Connecting…" };
+  }
+
   if (AVR_WRITING.test(line))
     return { ...p, fraction: null, note: "Writing flash" };
   if (AVR_VERIFYING.test(line)) return { ...p, note: "Verifying" };

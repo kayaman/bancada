@@ -22,10 +22,10 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
 ├────────────────────────────────────────────────────────────────────┤
-│ core (bancada-core) — 22 modules of pure Rust, no UI deps:         │
+│ core (bancada-core) — 26 modules of pure Rust, no UI deps:         │
 │   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
-      subprocesses: arduino-cli · esptool · git · gh · claude
+      subprocesses: arduino-cli · idf.py · esptool · git · gh · claude
 ```
 
 **Full architecture documentation: [docs/architecture/](docs/architecture/README.md)** —
@@ -35,6 +35,19 @@ Bancada is a **bench tool** and stays one. The wider system these boards belong
 to — fleet identity, firmware lifecycle, telemetry governance — is documented
 separately in [`bancada-platform`](https://github.com/kayaman/bancada-platform),
 which deliberately puts factory and fleet operations in a CLI rather than here.
+
+ESP-IDF support is the same bargain: **build, flash, monitor.** Bancada drives
+two toolchains — `arduino-cli` for sketches, `idf.py` for ESP-IDF projects —
+and stops there. `menuconfig`, the component manager and the partition-table
+editor stay where they are; `sdkconfig.defaults` is a text file and your editor
+is right here.
+
+Bancada *reads* exactly two values out of `sdkconfig`, and only because they
+answer questions it already asks of every Arduino project: which console
+channel the firmware prints on (so a board that flashes clean and then stays
+silent says so, instead of costing you an evening on the wiring), and the
+console baud rate (which an ESP-IDF project cannot state through a
+`Serial.begin(...)` the way a sketch does). It writes nothing back.
 
 ## Prerequisites (openSUSE Tumbleweed)
 

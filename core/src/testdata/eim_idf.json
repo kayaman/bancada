@@ -1,0 +1,17 @@
+{
+  "gitPath": "/usr/bin/git",
+  "idfInstalled": [
+    {
+      "activationScript": "/home/u/.espressif/tools/activate_idf_v6.0.1.sh",
+      "id": "esp-idf-070adc68a5a9498fb4fb398fdec6f8ef",
+      "idfToolsPath": "/home/u/.espressif/tools",
+      "name": "v6.0.1",
+      "path": "/home/u/.espressif/v6.0.1/esp-idf",
+      "python": "/home/u/.espressif/tools/python/v6.0.1/venv/bin/python",
+      "installationConfig": "<base64 blob, deliberately not modelled>"
+    }
+  ],
+  "idfSelectedId": "esp-idf-070adc68a5a9498fb4fb398fdec6f8ef",
+  "eimPath": "/home/u/.local/share/Trash/files/.espressif/eim_gui/eim",
+  "version": "2.0"
+}

@@ -161,6 +161,48 @@ export interface RunResult {
   exit_code: number;
 }
 
+/** Which toolchain builds the open project. Decided in Rust from the directory
+ *  itself — the frontend renders this answer and never computes its own, so the
+ *  Verify button and the toolbar cannot disagree. */
+export type ProjectKind = "arduino" | "idf" | "unknown";
+
+/** Where an ESP-IDF project's console output goes. */
+export type IdfConsoleChannel = "uart" | "usb_cdc" | "usb_serial_jtag" | "none";
+
+export interface IdfConsole {
+  channel: IdfConsoleChannel;
+  /** Whether ESP-IDF also mirrors output to USB Serial/JTAG. This is the
+   *  default on every SoC that has the controller, and it is what makes a
+   *  UART console reach a native-USB port anyway — so it decides whether a
+   *  silent-monitor warning is true or a false alarm. */
+  secondary_usb: boolean;
+  /** `null` for USB channels, which have no baud rate. */
+  baudrate: number | null;
+}
+
+export interface ProjectInfo {
+  kind: ProjectKind;
+  /** `CONFIG_IDF_TARGET` from sdkconfig. `null` when no target has been set
+   *  yet, and always `null` for an Arduino project. */
+  idf_target: string | null;
+  /** `null` when unknown — which suppresses both the console warning and the
+   *  baud hint rather than guessing at a configuration we did not read. */
+  idf_console: IdfConsole | null;
+}
+
+/** Is ESP-IDF usable, and if not, why? A struct rather than a thrown string
+ *  because there are three different answers — absent, present-but-broken and
+ *  usable — and the UI says something different for each. */
+export interface IdfProbe {
+  ok: boolean;
+  version?: string;
+  idf_path?: string;
+  error?: string;
+  /** Tools ESP-IDF pins that the activated PATH resolves elsewhere. Reported,
+   *  never corrected. */
+  shadowed?: string[];
+}
+
 export interface ChipInfo {
   mac: string;
   chip_type?: string;
@@ -639,6 +681,27 @@ export const uploadSketch = (
     profile: profile ?? null,
     fqbn: fqbn ?? null,
   });
+
+// ---------- ESP-IDF ----------
+
+/** Classify the open project. Call this on open, before enabling Verify. */
+export const projectInfo = (sketchDir: string) =>
+  invoke<ProjectInfo>("project_info", { sketchDir });
+
+/** Probe ESP-IDF. Called lazily on first ESP-IDF project open, never at
+ *  startup — most users never open one, and a sticky "not found" toast on
+ *  every launch would train them to ignore the arduino-cli one beside it. */
+export const idfProbe = () => invoke<IdfProbe>("idf_probe");
+
+/** Chip targets the installed ESP-IDF supports, from `idf.py --list-targets`.
+ *  Never hardcoded, for the same reason boards come from `board listall`. */
+export const listIdfTargets = () => invoke<string[]>("list_idf_targets");
+
+/** **Destructive.** Deletes `build/` and regenerates `sdkconfig`, discarding
+ *  hand-edited configuration. The backend checkpoints to git first when it
+ *  can. Confirm in the UI before calling this. */
+export const setIdfTarget = (sketchDir: string, target: string) =>
+  invoke<RunResult>("set_idf_target", { sketchDir, target });
 
 /** Starts the monitor and resolves to **its session id**. Every
  *  `serial://closed` names the session it belongs to, so a close from a

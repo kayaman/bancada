@@ -40,6 +40,17 @@ export type Row =
   | { kind: "diag"; index: number; text: string; diag: Diagnostic }
   | { kind: "detail"; index: number; text: string; of: number; tone: Severity }
   | { kind: "memory"; index: number; text: string }
+  /** ninja's `[n/total]` counter. Exactly **one** of these ever exists: each
+   *  new one overwrites the last, because a clean ESP-IDF build emits well
+   *  over a thousand and appending them would swamp the console, the filter
+   *  and the autoscroll. */
+  | {
+      kind: "progress";
+      index: number;
+      text: string;
+      done: number;
+      total: number;
+    }
   | { kind: "status"; index: number; text: string; tone: "error" | "info" }
   | {
       kind: "raw";
@@ -108,6 +119,23 @@ const UPLOAD_FAILED =
   /^(?:Failed uploading|Error during [Uu]pload|Upload error):\s*(.*)$/;
 // arduino-cli's own advisories (library architecture mismatches, …).
 const CLI_WARNING = /^(?:WARNING|Warning):\s/;
+// ninja, which ESP-IDF builds through: `[412/1180] Building C object ...`.
+const NINJA_PROGRESS = /^\[(\d+)\/(\d+)\]\s+(.*)$/;
+// ninja's own failure markers. `FAILED:` precedes the command and the
+// diagnostic; the trailer is what it prints on the way out.
+const NINJA_STOPPED = /^ninja: build stopped:/;
+const NINJA_FAILED_STEP = /^FAILED:\s/;
+// CMake reports the commonest ESP-IDF failures — an unknown component, a
+// malformed idf_component_register, an unset target — and speaks no severity
+// keyword, so DIAG never matches it. Without this the console shows a wall of
+// red text and the summary strip says "0 errors".
+const CMAKE_ERROR = /^CMake Error\b/;
+// ESP-IDF's size report. Only the total is taken: IDF's percentages are
+// per-region (DRAM/IRAM), which do not mean the same thing as arduino-cli's
+// "of program storage", and mapping them into this shape would print a
+// confident wrong number.
+const IDF_TOTAL_IMAGE = /^Total image size:\s+(\d[\d,]*) bytes/;
+
 // arduino-cli's memory report, printed on a successful compile.
 const SKETCH_USES =
   /^Sketch uses (\d[\d,]*) bytes \((\d+)%\) of program storage space\. Maximum is (\d[\d,]*) bytes\.?$/;
@@ -116,6 +144,28 @@ const GLOBALS_USE =
 const GLOBALS_USE_NOMAX =
   /^Global variables use (\d[\d,]*) bytes of dynamic memory\.?$/;
 
+/**
+ * Strip SGR and cursor-movement escapes.
+ *
+ * **There is deliberately no `\r` handling here**, and the measurements are
+ * recorded so the next person does not have to re-derive them:
+ *
+ * - `idf.py` and esptool contain **no literal `\r` writes at all**. Progress is
+ *   overwritten with ANSI `\x1b[1A` / `\x1b[2K`, which the pattern below already
+ *   removes — and esptool disables even those unless stdout is a tty or `TERM`
+ *   names a colour terminal, neither of which holds when Bancada spawns it
+ *   (piped, `TERM=dumb`, `NO_COLOR=1`). A real failing build measured zero
+ *   carriage returns.
+ * - `git` output reaches this console too, but Bancada never passes
+ *   `--progress`, and git suppresses progress when stderr is not a tty.
+ *   Measured: zero.
+ * - `arduino-cli` and the esptool it invokes: zero in both captured fixtures.
+ *
+ * Rust's `BufRead::lines()` already strips a *trailing* `\r`, so CRLF is safe
+ * before a line ever gets here; only an *embedded* one would survive, and
+ * nothing produces one. A rule with no observed failure behind it is a rule
+ * nobody can later evaluate, so this stays a note rather than a branch.
+ */
 export function stripAnsi(s: string): string {
   return s.replace(ANSI, "");
 }
@@ -165,6 +215,8 @@ export function parseMemoryLine(text: string): Partial<MemorySummary> | null {
     };
   const ramOnly = GLOBALS_USE_NOMAX.exec(t);
   if (ramOnly) return { ramBytes: num(ramOnly[1]) };
+  const idf = IDF_TOTAL_IMAGE.exec(t);
+  if (idf) return { flashBytes: num(idf[1]) };
   return null;
 }
 
@@ -254,8 +306,29 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
     };
   };
 
+  // Where the single live progress row sits in `rows`, so the next one can
+  // replace it rather than pile up behind it.
+  let progressAt: number | null = null;
+
   lines.forEach((l, index) => {
     const text = stripAnsi(l.line);
+
+    const prog = NINJA_PROGRESS.exec(text);
+    if (prog) {
+      const row: Row = {
+        kind: "progress",
+        index,
+        text,
+        done: Number(prog[1]),
+        total: Number(prog[2]),
+      };
+      if (progressAt !== null) rows[progressAt] = row;
+      else {
+        progressAt = rows.length;
+        rows.push(row);
+      }
+      return;
+    }
 
     const diag = parseDiagnosticLine(text);
     if (diag) {
@@ -337,6 +410,24 @@ export function parseBuildOutput(lines: readonly OutputLine[]): BuildModel {
     if (BUILD_FAILED.test(text)) {
       summary.buildFailed = true;
       rows.push({ kind: "status", index, text, tone: "error" });
+      return;
+    }
+    if (CMAKE_ERROR.test(text)) {
+      // Counted, unlike the trailers below: this *is* the error, not a report
+      // that one happened, and a summary reading "0 errors" beside a red
+      // console is the worst of both.
+      summary.errors++;
+      summary.buildFailed = true;
+      rows.push({ kind: "status", index, text, tone: "error" });
+      return;
+    }
+    if (NINJA_STOPPED.test(text)) {
+      summary.buildFailed = true;
+      rows.push({ kind: "status", index, text, tone: "error" });
+      return;
+    }
+    if (NINJA_FAILED_STEP.test(text)) {
+      rows.push({ kind: "raw", index, text, stream: l.stream, tone: "error" });
       return;
     }
 
