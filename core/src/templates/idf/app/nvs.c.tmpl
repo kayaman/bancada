@@ -1,0 +1,66 @@
+/*
+ * {{PROJECT_NAME}} — state that survives a reboot.
+ *
+ * Counts boots in NVS and prints the total. Press reset a few times and watch
+ * the number climb: that is the whole demonstration, and it proves the flash
+ * partition table and the NVS partition are both working.
+ *
+ * NVS initialisation here handles the one failure every project hits sooner or
+ * later — a partition left over from a previous firmware with a different NVS
+ * layout — by erasing and retrying rather than aborting.
+ */
+#include <stdio.h>
+#include <inttypes.h>
+
+#include "esp_log.h"
+#include "esp_system.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "{{PROJECT_NAME}}";
+
+#define NVS_NAMESPACE  "{{PROJECT_NAME}}"
+#define BOOT_COUNT_KEY "boot_count"
+
+static esp_err_t init_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition unusable (%s), erasing", esp_err_to_name(err));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    return err;
+}
+
+void app_main(void)
+{
+    ESP_ERROR_CHECK(init_nvs());
+
+    nvs_handle_t handle;
+    ESP_ERROR_CHECK(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle));
+
+    uint32_t boot_count = 0;
+    esp_err_t err = nvs_get_u32(handle, BOOT_COUNT_KEY, &boot_count);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "first boot — no counter stored yet");
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+
+    boot_count++;
+    ESP_ERROR_CHECK(nvs_set_u32(handle, BOOT_COUNT_KEY, boot_count));
+    /* set_u32 only stages the write; without the commit the value is lost on
+     * a power cut, which is exactly the case this example is about. */
+    ESP_ERROR_CHECK(nvs_commit(handle));
+    nvs_close(handle);
+
+    ESP_LOGI(TAG, "boot #%" PRIu32 " — press reset to increment", boot_count);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        ESP_LOGI(TAG, "still running, boot #%" PRIu32, boot_count);
+    }
+}

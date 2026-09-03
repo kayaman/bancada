@@ -1,0 +1,69 @@
+/*
+ * {{PROJECT_NAME}} — two FreeRTOS tasks and a queue.
+ *
+ * The shape almost every real ESP-IDF application ends up having: something
+ * produces events, something else consumes them, and a queue decouples the
+ * two. Starting from this rather than from a bare while-loop in app_main
+ * saves the rewrite later.
+ *
+ * No wiring, no dependencies — runs unchanged on every target.
+ */
+#include <stdio.h>
+#include <inttypes.h>
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+static const char *TAG = "{{PROJECT_NAME}}";
+
+#define QUEUE_LENGTH   8
+#define PRODUCE_MS     500
+
+typedef struct {
+    uint32_t seq;
+    uint32_t uptime_ms;
+} sample_t;
+
+static QueueHandle_t s_queue;
+
+static void producer_task(void *arg)
+{
+    uint32_t seq = 0;
+    while (1) {
+        sample_t s = {
+            .seq = seq++,
+            .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000),
+        };
+        /* Never block forever on a full queue: dropping a sample and saying so
+         * is better than stalling the producer silently. */
+        if (xQueueSend(s_queue, &s, pdMS_TO_TICKS(10)) != pdTRUE) {
+            ESP_LOGW(TAG, "queue full, dropped sample %" PRIu32, s.seq);
+        }
+        vTaskDelay(pdMS_TO_TICKS(PRODUCE_MS));
+    }
+}
+
+static void consumer_task(void *arg)
+{
+    sample_t s;
+    while (1) {
+        if (xQueueReceive(s_queue, &s, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TAG, "sample %" PRIu32 " at %" PRIu32 " ms", s.seq, s.uptime_ms);
+        }
+    }
+}
+
+void app_main(void)
+{
+    s_queue = xQueueCreate(QUEUE_LENGTH, sizeof(sample_t));
+    if (s_queue == NULL) {
+        ESP_LOGE(TAG, "could not create the queue");
+        return;
+    }
+
+    xTaskCreate(consumer_task, "consumer", 3072, NULL, 5, NULL);
+    xTaskCreate(producer_task, "producer", 3072, NULL, 5, NULL);
+}

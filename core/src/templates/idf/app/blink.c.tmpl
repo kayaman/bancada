@@ -1,0 +1,36 @@
+/*
+ * {{PROJECT_NAME}} — blink a plain GPIO.
+ *
+ * The one-wire hello world. Uses the plain GPIO driver rather than an
+ * addressable-LED component, so it compiles on every target with no
+ * dependencies to fetch.
+ *
+{{BLINK_NOTE}}
+ */
+#include <stdio.h>
+
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#define BLINK_GPIO   {{BLINK_GPIO}}
+#define BLINK_PERIOD_MS 1000
+
+static const char *TAG = "{{PROJECT_NAME}}";
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "blinking GPIO %d every %d ms", BLINK_GPIO, BLINK_PERIOD_MS);
+
+    gpio_reset_pin(BLINK_GPIO);
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+
+    int level = 0;
+    while (1) {
+        gpio_set_level(BLINK_GPIO, level);
+        ESP_LOGI(TAG, "led %s", level ? "on" : "off");
+        level = !level;
+        vTaskDelay(pdMS_TO_TICKS(BLINK_PERIOD_MS));
+    }
+}

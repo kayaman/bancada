@@ -554,6 +554,42 @@ describe("build, upload and monitor", () => {
     expect(called()).toEqual(["project_info", { sketchDir: "/s" }]);
   });
 
+  it("createIdfProject passes every field, nulling the omitted ones", async () => {
+    await api.createIdfProject("/parent", "blink_node");
+    expect(called()).toEqual([
+      "create_idf_project",
+      {
+        parent: "/parent",
+        name: "blink_node",
+        template: null,
+        target: null,
+        board: null,
+      },
+    ]);
+  });
+
+  it("createIdfProject sends the target and devkit through", async () => {
+    await api.createIdfProject(
+      "/p",
+      "node",
+      "blink",
+      "esp32c6",
+      "esp32-c6-devkitc-1",
+    );
+    expect(called()[1]).toMatchObject({
+      template: "blink",
+      target: "esp32c6",
+      board: "esp32-c6-devkitc-1",
+    });
+  });
+
+  it("listIdfTemplates and knownIdfTargets take no arguments", async () => {
+    await api.listIdfTemplates();
+    expect(called()).toEqual(["list_idf_templates"]);
+    await api.knownIdfTargets();
+    expect(called()).toEqual(["known_idf_targets"]);
+  });
+
   it("boardCandidates asks by fqbn", async () => {
     await api.boardCandidates("esp32:esp32:esp32s3");
     expect(called()).toEqual([

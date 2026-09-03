@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **105** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **108** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 5 tools | the AI Assistant's tools |
@@ -33,7 +33,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (105)
+## 2. Commands (108)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -73,8 +73,24 @@ options stripped**, so it cannot be used to read a profile's pins back.
 The middle three stream to `build://line` — they are long-running and share the
 build console with compiles.
 
-### Projects — 4
-`create_project` · `list_sketch_templates` · `clone_project` · `rename_project`
+### Projects — 7
+`create_project` · `list_sketch_templates` · `clone_project` · `rename_project` ·
+`create_idf_project` · `list_idf_templates` · `known_idf_targets`
+
+`create_idf_project` is a **sibling** of `create_project`, not a mode of it. The two
+share a parent directory and a name and nothing else: different name rules (a CMake
+project name may not start with a digit; an Arduino sketch name may), different files,
+different notion of a target. It writes the tree itself rather than shelling out to
+`idf.py create-project`, so **creating an ESP-IDF project needs no ESP-IDF install** —
+a first project is exactly when a user is least likely to have a working one. The
+chosen chip goes into `sdkconfig.defaults` as `CONFIG_IDF_TARGET` (the mechanism IDF
+provides for stating a target before the first configure) rather than through
+`idf.py set-target`, which would need that install. `known_idf_targets` reads core's
+own table for the same reason, and is distinct from `list_idf_targets`, which asks an
+installed `idf.py` and is authoritative once there is one.
+
+It scaffolds into a dot-prefixed staging directory and renames it into place, so a
+failure part-way leaves nothing rather than a half-tree `detect_kind` would accept.
 
 `create_project` runs `sketch new` → `write_main_ino` → `profile create` →
 `profile lib add` per library → `ensure_under_git`. **Library and git failures

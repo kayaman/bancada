@@ -1,0 +1,52 @@
+/*
+ * {{PROJECT_NAME}} — what chip am I running on?
+ *
+ * Prints the SoC's identity, its features, its flash size and the free heap,
+ * then repeats the heap line so a leak shows up as a falling number. No
+ * wiring: this compiles and runs unchanged on every ESP-IDF target.
+ */
+#include <stdio.h>
+#include <inttypes.h>
+
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_system.h"
+#include "esp_idf_version.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static void print_chip_info(void)
+{
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+
+    printf("ESP-IDF %s\n", esp_get_idf_version());
+    printf("cores: %d, revision: v%d.%d\n",
+           chip.cores,
+           chip.revision / 100,
+           chip.revision % 100);
+
+    printf("features:");
+    if (chip.features & CHIP_FEATURE_WIFI_BGN) printf(" WiFi");
+    if (chip.features & CHIP_FEATURE_BT)       printf(" BT");
+    if (chip.features & CHIP_FEATURE_BLE)      printf(" BLE");
+    if (chip.features & CHIP_FEATURE_IEEE802154) printf(" 802.15.4");
+    if (chip.features & CHIP_FEATURE_EMB_FLASH) printf(" embedded-flash");
+    if (chip.features & CHIP_FEATURE_EMB_PSRAM) printf(" embedded-psram");
+    printf("\n");
+
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        printf("flash: %" PRIu32 " MB\n", flash_size / (1024 * 1024));
+    }
+}
+
+void app_main(void)
+{
+    print_chip_info();
+
+    while (1) {
+        printf("free heap: %" PRIu32 " bytes\n", esp_get_free_heap_size());
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}

@@ -706,6 +706,56 @@ export const createProject = (
     board: board ?? null,
   });
 
+/** Which toolchain a *new* project will be built with. The open project's
+ *  kind is `ProjectKind`, decided from the directory; this is the choice made
+ *  before a directory exists. */
+export type NewProjectPlatform = "arduino" | "idf";
+
+/** A starter an ESP-IDF project can begin from. Same shape as
+ *  `SketchTemplate` so the two pickers render through one component. */
+export interface IdfTemplate {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface CreatedIdfProject {
+  dir: string;
+  name: string;
+  /** The chip written into sdkconfig.defaults as CONFIG_IDF_TARGET. */
+  target: string | null;
+  /** The devkit recorded in sdkconfig.defaults, as a comment marker. */
+  board: string | null;
+  /** Paths written, relative to `dir`, in creation order. */
+  files: string[];
+  under_git: boolean;
+  git_error: string | null;
+}
+
+/** Scaffold an ESP-IDF project: CMake tree, a starter, git. Needs no ESP-IDF
+ *  install — only building it does. */
+export const createIdfProject = (
+  parent: string,
+  name: string,
+  template: string | null = null,
+  target: string | null = null,
+  board: string | null = null,
+) =>
+  invoke<CreatedIdfProject>("create_idf_project", {
+    parent,
+    name,
+    template: template ?? null,
+    target: target ?? null,
+    board: board ?? null,
+  });
+
+export const listIdfTemplates = () =>
+  invoke<IdfTemplate[]>("list_idf_templates");
+
+/** The chips a new ESP-IDF project may target, from core's own table.
+ *  Distinct from `listIdfTargets`, which asks an installed `idf.py`. */
+export const knownIdfTargets = () => invoke<string[]>("known_idf_targets");
+
 /** The devkits Bancada models for an FQBN's chip. Empty is a real answer —
  *  render it as "no board profile", never as clean wiring. */
 export const boardCandidates = (fqbn: string) =>

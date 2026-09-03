@@ -3544,3 +3544,12 @@ body {
   white-space: nowrap;
   cursor: help;
 }
+
+/* The platform choice reuses the starter cards' shape — it is the same kind
+   of decision (pick one of a few, each with a sentence explaining it), and a
+   second visual vocabulary for it would say the two differ when they don't. */
+.np-platform {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}

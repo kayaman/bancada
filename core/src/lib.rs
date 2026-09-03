@@ -24,6 +24,7 @@ pub mod ghlib;
 pub mod git;
 pub mod idf;
 pub mod idfenv;
+pub mod idfproject;
 pub mod library;
 pub mod mcp;
 pub mod mqtt;

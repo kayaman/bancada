@@ -17,12 +17,12 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  105 invoke commands · 7 events · 3 Channels
+          src/api.ts:  108 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
 ├────────────────────────────────────────────────────────────────────┤
-│ core (bancada-core) — 30 modules of pure Rust, no UI deps:         │
+│ core (bancada-core) — 31 modules of pure Rust, no UI deps:         │
 │   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
       subprocesses: arduino-cli · idf.py · esptool · git · gh · claude
@@ -159,13 +159,21 @@ scaffolded library, a fetched library and a newly created project actually
 - **Duplicate project** — copies a project under a new name into a fresh git
   repository, retitling the main `.ino` and repointing local library paths.
   Never copies the source's history
-- **New Project** — name it, pick a board from the installed platforms (the
-  attached board is preselected), optionally tick registry libraries, and get a
-  sketch with a `sketch.yaml` profile that compiles immediately. Driven entirely
-  by `arduino-cli sketch new` + `profile create` + `profile lib add`, so the
+- **New Project** — choose the **platform** first, Arduino or ESP-IDF, because
+  the two produce different projects and there is no useful common denominator.
+  **Arduino:** name it, pick a board from the installed platforms (the attached
+  board is preselected), optionally tick registry libraries, and get a sketch
+  with a `sketch.yaml` profile that compiles immediately — driven entirely by
+  `arduino-cli sketch new` + `profile create` + `profile lib add`, so the
   platform version is resolved from what is installed and library dependencies
-  are resolved by the engine. The location defaults to the sketchbook and then
-  remembers wherever you last created one
+  are resolved by the engine. **ESP-IDF:** pick the target chip and a starter,
+  and get a CMake project with a `main` component. That tree is written
+  directly rather than by `idf.py create-project`, so **you can create an
+  ESP-IDF project without ESP-IDF installed** — a first project is exactly when
+  you are least likely to have a working one, and the first *build* is the
+  right place to say so. Either way the location defaults to the sketchbook and
+  then remembers wherever you last created one, and a chosen devkit is recorded
+  in the project so its pinout follows it
 - **Starter sketches** — every new project begins as one of seven, not an
   empty file: **Blink**, **Waveforms** (three software-generated traces, no
   wiring — the fastest way to see the Scope draw), **Analog plot** (one ADC
@@ -385,7 +393,7 @@ and everything that is *not* enforced — is documented in
 
 ```
 bancada/
-├── core/            # bancada-core: 30 modules of pure Rust (no Tauri, unit-tested)
+├── core/            # bancada-core: 31 modules of pure Rust (no Tauri, unit-tested)
 ├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
 ├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope

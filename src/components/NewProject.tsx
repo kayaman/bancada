@@ -3,16 +3,22 @@ import { open } from "@tauri-apps/plugin-dialog";
 import BoardPicker from "./BoardPicker";
 import {
   boardCandidates,
+  boardCatalog,
+  createIdfProject,
   createProject,
   defaultProjectParent,
+  knownIdfTargets,
   listAllBoards,
+  listIdfTemplates,
   listSketchTemplates,
   loadSettings,
   searchLibraries,
   setLastProjectParent,
   type Board,
   type BoardOption,
+  type IdfTemplate,
   type IndexedLibrary,
+  type NewProjectPlatform,
   type SketchTemplate,
 } from "../api";
 
@@ -43,7 +49,17 @@ export default function NewProject({
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [templates, setTemplates] = useState<SketchTemplate[]>([]);
   const [template, setTemplate] = useState("blink");
-  const [devkits, setDevkits] = useState<Board[]>([]);
+  // Which toolchain this project will be built with. Chosen, not detected —
+  // `ProjectKind` answers that for a directory that already exists, and this
+  // is the decision made before one does.
+  const [platform, setPlatform] = useState<NewProjectPlatform>("arduino");
+  const [idfTemplates, setIdfTemplates] = useState<IdfTemplate[]>([]);
+  const [idfTemplate, setIdfTemplate] = useState("hello");
+  const [idfTargets, setIdfTargets] = useState<string[]>([]);
+  const [idfTarget, setIdfTarget] = useState("");
+  /** Every modelled devkit, for filtering by target on the ESP-IDF side. */
+  const [allBoards, setAllBoards] = useState<Board[]>([]);
+  const [arduinoDevkits, setArduinoDevkits] = useState<Board[]>([]);
   // "" means "not listed" — an explicit choice, not an unanswered question.
   // The project is then created with no board recorded, and `project_board`
   // infers one from the FQBN if it can, labelled as the guess it is.
@@ -88,27 +104,68 @@ export default function NewProject({
   // exactly like a chip with no modelled devkit — creation never depends on it.
   useEffect(() => {
     if (!fqbn) {
-      setDevkits([]);
-      setBoard("");
+      setArduinoDevkits([]);
       return;
     }
     let cancelled = false;
     boardCandidates(fqbn)
       .then((bs) => {
-        if (cancelled) return;
-        setDevkits(bs);
-        setBoard(bs.length === 1 ? bs[0].id : "");
+        if (!cancelled) setArduinoDevkits(bs);
       })
       .catch(() => {
-        if (!cancelled) {
-          setDevkits([]);
-          setBoard("");
-        }
+        if (!cancelled) setArduinoDevkits([]);
       });
     return () => {
       cancelled = true;
     };
   }, [fqbn]);
+
+  /** The chip the attached board runs, when Bancada can name it. Derived from
+   *  the Arduino candidate list — those boards were resolved through the FQBN
+   *  fold in Rust, so this reuses that answer rather than re-folding here. */
+  const detectedTarget = arduinoDevkits[0]?.target ?? "";
+
+  // The ESP-IDF half of the form. All three calls are pure reads of core's own
+  // tables — deliberately *not* `idf.py --list-targets`, because creating a
+  // project must not require a working install. A missing toolchain is the
+  // first build's problem to report, not the wizard's.
+  useEffect(() => {
+    if (platform !== "idf") return;
+    let cancelled = false;
+    Promise.all([
+      listIdfTemplates().catch(() => [] as IdfTemplate[]),
+      knownIdfTargets().catch(() => [] as string[]),
+      boardCatalog().then((c) => c.boards).catch(() => [] as Board[]),
+    ]).then(([tmpls, targets, boards]) => {
+      if (cancelled) return;
+      setIdfTemplates(tmpls);
+      setIdfTargets(targets);
+      setAllBoards(boards);
+      // Preselect the chip of the attached board when we can name it, so the
+      // common case — a board is plugged in — needs no choice at all.
+      setIdfTarget((t) => t || detectedTarget || targets[0] || "");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [platform, detectedTarget]);
+
+  // The devkits offered, from whichever side of the form is showing. On the
+  // ESP-IDF side the chip is already in hand, so this is a filter rather than
+  // the FQBN fold `board_candidates` performs.
+  const devkits =
+    platform === "idf"
+      ? allBoards.filter((b) => b.target === idfTarget)
+      : arduinoDevkits;
+
+  // A lone candidate is preselected: with one option, asking would be a
+  // question whose answer is foregone. Runs on every change of the list, so
+  // switching platform or target re-decides rather than stranding a board
+  // belonging to the other chip.
+  useEffect(() => {
+    setBoard(devkits.length === 1 ? devkits[0].id : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devkits.map((b) => b.id).join(",")]);
 
   const effectiveProfile = profile.trim() || profileFor(fqbn);
   const dest = parent && name.trim() ? `${parent}/${name.trim()}` : "";
@@ -143,9 +200,30 @@ export default function NewProject({
     // `working` guards the same hazard DuplicateProject and RenameProject
     // guard: Enter in the name field bypasses the disabled button, so two
     // quick presses would fire two createProject calls at the same path.
-    if (working || !name.trim() || !parent || !fqbn) return;
+    if (!canCreate) return;
     setWorking(true);
     try {
+      if (platform === "idf") {
+        const res = await createIdfProject(
+          parent,
+          name.trim(),
+          idfTemplate,
+          idfTarget || null,
+          board || null,
+        );
+        setLastProjectParent(parent).catch(() => {});
+        // Same non-fatal boundary as the Arduino side: the project exists and
+        // builds without git, so name what fell short rather than hiding it
+        // behind a plain success.
+        notify(
+          res.git_error
+            ? `Created ${res.dir}, but not put under git: ${res.git_error}`
+            : `✓ Created ${res.dir} (ESP-IDF${res.target ? `, ${res.target}` : ""})`,
+          Boolean(res.git_error),
+        );
+        onCreated(res.dir);
+        return;
+      }
       // Pin explicitly rather than leaving versions floating.
       const libraries = Object.entries(picked).map(([n, v]) => `${n}@${v}`);
       const res = await createProject(
@@ -189,6 +267,15 @@ export default function NewProject({
 
   const pickedCount = Object.keys(picked).length;
 
+  // ESP-IDF needs no board platform installed, so it must not inherit the
+  // Arduino side's FQBN requirement — that gate would make the whole point of
+  // the ESP-IDF path (a project without arduino-cli's world) unreachable.
+  const canCreate =
+    !working &&
+    Boolean(name.trim()) &&
+    Boolean(parent) &&
+    (platform === "idf" ? Boolean(idfTarget) : Boolean(fqbn));
+
   return (
     <div className="new-project">
       <div className="np-head">
@@ -200,23 +287,54 @@ export default function NewProject({
         <button
           className="btn small primary"
           onClick={create}
-          disabled={working || !name.trim() || !parent || !fqbn}
+          disabled={!canCreate}
         >
           Create project
         </button>
       </div>
 
       <div className="np-body">
+        <div className="field">
+          Platform
+          <div className="np-platform" role="radiogroup" aria-label="Platform">
+            {(
+              [
+                ["arduino", "Arduino", "arduino-cli · a sketch with a pinned profile"],
+                ["idf", "ESP-IDF", "idf.py · a CMake project with a main component"],
+              ] as const
+            ).map(([id, label, hint]) => (
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                aria-checked={platform === id}
+                className={`np-tmpl-card${platform === id ? " selected" : ""}`}
+                onClick={() => setPlatform(id)}
+                disabled={working}
+              >
+                <span className="np-tmpl-label">{label}</span>
+                <span className="np-tmpl-desc">{hint}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         <label className="field">
           Name
           <input
             className="input"
-            placeholder="BlinkNode"
+            placeholder={platform === "idf" ? "blink_node" : "BlinkNode"}
             value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && create()}
           />
         </label>
+        {platform === "idf" && (
+          <div className="scope-dim">
+            becomes <code>project({name.trim() || "name"})</code> — letters,
+            digits, <code>_</code> and <code>-</code>, not starting with a digit
+          </div>
+        )}
 
         <label className="field">
           Location
@@ -234,23 +352,53 @@ export default function NewProject({
 
         {dest && <div className="lib-dest">{dest}</div>}
 
-        <label className="field">
-          Board
-          <BoardPicker
-            boards={boards}
-            value={fqbn}
-            onChange={setFqbn}
-            title="Board for the project's profile"
-          />
-        </label>
-        {detectedFqbn && fqbn === detectedFqbn && (
-          <div className="scope-dim">preselected from the attached board</div>
+        {platform === "arduino" && (
+          <>
+            <label className="field">
+              Board
+              <BoardPicker
+                boards={boards}
+                value={fqbn}
+                onChange={setFqbn}
+                title="Board for the project's profile"
+              />
+            </label>
+            {detectedFqbn && fqbn === detectedFqbn && (
+              <div className="scope-dim">preselected from the attached board</div>
+            )}
+            {boards.length === 0 && (
+              <div className="empty-hint">
+                No installed platforms found — install a core first (a board
+                platform is required, because the profile pins its version).
+              </div>
+            )}
+          </>
         )}
-        {boards.length === 0 && (
-          <div className="empty-hint">
-            No installed platforms found — install a core first (a board platform
-            is required, because the profile pins its version).
-          </div>
+
+        {platform === "idf" && (
+          <>
+            <label className="field">
+              Target chip
+              <select
+                className="select"
+                value={idfTarget}
+                onChange={(e) => setIdfTarget(e.target.value)}
+                disabled={working}
+                title="Written to sdkconfig.defaults as CONFIG_IDF_TARGET"
+              >
+                {idfTargets.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="scope-dim">
+              written to <code>sdkconfig.defaults</code> as{" "}
+              <code>CONFIG_IDF_TARGET</code> — the first build picks it up. No
+              ESP-IDF install is needed to create the project, only to build it.
+            </div>
+          </>
         )}
 
         {/* Only rendered when there is something to choose. A chip with no
@@ -285,14 +433,37 @@ export default function NewProject({
             no board recorded — pin warnings will be unavailable until one is set
           </div>
         )}
-        {fqbn && devkits.length === 0 && (
-          <div className="scope-dim">
-            Bancada carries no pinout for this chip — the project builds
-            normally, there are simply no pin warnings for it
+        {(platform === "idf" ? Boolean(idfTarget) : Boolean(fqbn)) &&
+          devkits.length === 0 && (
+            <div className="scope-dim">
+              Bancada carries no pinout for this chip — the project builds
+              normally, there are simply no pin warnings for it
+            </div>
+          )}
+
+        {platform === "idf" && idfTemplates.length > 0 && (
+          <div className="field">
+            Starter
+            <div className="np-tmpl-cards" role="radiogroup" aria-label="Starter template">
+              {idfTemplates.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={idfTemplate === t.id}
+                  className={`np-tmpl-card${idfTemplate === t.id ? " selected" : ""}`}
+                  onClick={() => setIdfTemplate(t.id)}
+                  disabled={working}
+                >
+                  <span className="np-tmpl-label">{t.label}</span>
+                  <span className="np-tmpl-desc">{t.description}</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
-        {templates.length > 0 && (
+        {platform === "arduino" && templates.length > 0 && (
           <div className="field">
             Starter
             <div className="np-tmpl-cards" role="radiogroup" aria-label="Starter template">
@@ -314,22 +485,33 @@ export default function NewProject({
           </div>
         )}
 
-        <label className="field">
-          Profile name
-          <input
-            className="input"
-            placeholder={profileFor(fqbn) || "derived from the board"}
-            value={profile}
-            onChange={(e) => setProfile(e.target.value)}
-          />
-        </label>
-        {fqbn && (
-          <div className="scope-dim">
-            sketch.yaml will pin <code>{fqbn}</code> as profile{" "}
-            <code>{effectiveProfile}</code>, with the installed platform version
-          </div>
+        {/* Profiles and the registry are arduino-cli's world. An ESP-IDF
+            project has neither: its dependencies are components, resolved by
+            the IDF Component Manager from its own registry, which is a
+            different subsystem and deliberately out of scope here. Rendering
+            these disabled would be a lie about what the form can do. */}
+        {platform === "arduino" && (
+          <>
+            <label className="field">
+              Profile name
+              <input
+                className="input"
+                placeholder={profileFor(fqbn) || "derived from the board"}
+                value={profile}
+                onChange={(e) => setProfile(e.target.value)}
+              />
+            </label>
+            {fqbn && (
+              <div className="scope-dim">
+                sketch.yaml will pin <code>{fqbn}</code> as profile{" "}
+                <code>{effectiveProfile}</code>, with the installed platform
+                version
+              </div>
+            )}
+          </>
         )}
 
+        {platform === "arduino" && (
         <div className="np-libs">
           <div className="np-row">
             <input
@@ -367,6 +549,7 @@ export default function NewProject({
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

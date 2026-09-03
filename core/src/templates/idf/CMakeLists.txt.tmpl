@@ -1,0 +1,7 @@
+# The two lines below are the whole of an ESP-IDF top-level CMakeLists.txt:
+# include IDF's project.cmake, then name the project. Everything else —
+# component discovery, the bootloader, the partition table — follows from it.
+cmake_minimum_required(VERSION 3.16)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project({{PROJECT_NAME}})

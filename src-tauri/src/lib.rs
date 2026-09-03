@@ -1175,6 +1175,103 @@ fn list_sketch_templates() -> Vec<bancada_core::project::SketchTemplate> {
     bancada_core::project::TEMPLATES.to_vec()
 }
 
+/// The starter templates an ESP-IDF project can begin from, Hello first.
+#[tauri::command]
+fn list_idf_templates() -> Vec<bancada_core::idfproject::IdfTemplateInfo> {
+    bancada_core::idfproject::idf_templates()
+}
+
+/// The chips a new ESP-IDF project may target.
+///
+/// **Not** `idf.py --list-targets`, which `list_idf_targets` already offers.
+/// That command needs a working install, and creating a project deliberately
+/// does not — so the wizard offers the chips `core` knows about and the first
+/// build is where a missing toolchain is reported. The two lists agree in
+/// practice; where they differ, the install is authoritative and says so at
+/// build time.
+#[tauri::command]
+fn known_idf_targets() -> Vec<&'static str> {
+    bancada_core::targets::KNOWN_TARGETS
+        .iter()
+        .map(|t| t.id)
+        .collect()
+}
+
+/// Create an ESP-IDF project: the CMake tree, a starter, and git.
+///
+/// A sibling of [`create_project`] rather than a mode of it. The two share a
+/// parent directory and a name and nothing else — different validation rules
+/// (a CMake project name may not start with a digit; an Arduino sketch name
+/// may), different files, different notion of a target. Folding them into one
+/// command would mean a body that is two bodies behind a flag, and a return
+/// type whose half the caller must ignore.
+#[tauri::command]
+async fn create_idf_project(
+    parent: String,
+    name: String,
+    template: Option<String>,
+    target: Option<String>,
+    board: Option<String>,
+) -> Result<CreatedIdfProject, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let parent_path = Path::new(&parent);
+        if parent_path.exists() && !parent_path.is_dir() {
+            return Err(format!("{parent} is not a directory"));
+        }
+
+        let tmpl = match template.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => bancada_core::idfproject::IdfTemplate::default(),
+            Some(id) => bancada_core::idfproject::IdfTemplate::from_id(id)
+                .ok_or_else(|| format!("unknown ESP-IDF template `{id}`"))?,
+        };
+        let board = match board.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(id) => Some(
+                bancada_core::boardprofile::Board::from_id(id)
+                    .ok_or_else(|| format!("unknown board `{id}`"))?,
+            ),
+        };
+        let target = target.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        let scaffold = bancada_core::idfproject::scaffold_idf_project(
+            parent_path,
+            &name,
+            tmpl,
+            target,
+            board,
+        )
+        .map_err(err_str)?;
+
+        // Same non-fatal boundary as the Arduino side: the project exists and
+        // builds without git, so report the failure rather than abandoning a
+        // directory the user can already see.
+        let mut git_error = None;
+        let under_git = match bancada_core::git::ensure_under_git(Path::new(&scaffold.dir)) {
+            Ok(_) => true,
+            Err(e) => {
+                git_error = Some(e.to_string());
+                false
+            }
+        };
+
+        Ok(CreatedIdfProject {
+            scaffold,
+            under_git,
+            git_error,
+        })
+    })
+    .await
+    .map_err(err_str)?
+}
+
+#[derive(serde::Serialize)]
+struct CreatedIdfProject {
+    #[serde(flatten)]
+    scaffold: bancada_core::idfproject::IdfScaffold,
+    under_git: bool,
+    git_error: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct ClonedProject {
     dir: String,
@@ -5381,6 +5478,9 @@ pub fn run() {
             board_details,
             create_project,
             list_sketch_templates,
+            list_idf_templates,
+            known_idf_targets,
+            create_idf_project,
             clone_project,
             gh_list_versions,
             gh_manifest,
