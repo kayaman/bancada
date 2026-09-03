@@ -187,6 +187,189 @@ pub fn profile_name_for_fqbn(fqbn: &str) -> String {
     }
 }
 
+/// The chip an Arduino FQBN builds for.
+///
+/// This is the bridge between the two paradigms. [`crate::boardprofile`] is
+/// keyed by **chip target** — `idf.py` has no board concept, so the table it
+/// came from could only be — while an Arduino project is keyed by **FQBN**.
+/// Both must reach the same board data, or the pin advice would differ
+/// depending on which toolchain happens to build the project, which is worse
+/// than having none.
+///
+/// It is a fold rather than a parse, because the esp32 core spells its board
+/// segment two different ways: as the bare chip (`esp32:esp32:esp32s3`) and as
+/// a board whose name merely *starts* with it
+/// (`esp32:esp32:esp32doit-devkit-v1`). So the answer is the **longest** known
+/// target id the folded segment begins with — `esp32s3` beats its own prefix
+/// `esp32`, which is the difference between the right pin table and a
+/// plausible wrong one.
+///
+/// `None` for an FQBN naming no ESP chip (`arduino:avr:uno`). That is the
+/// honest answer, and callers must render it as "no profile for this board"
+/// rather than as clean wiring.
+pub fn target_for_fqbn(fqbn: &str) -> Option<&'static crate::targets::Target> {
+    let board = fqbn.split(':').nth(2)?.trim();
+    let folded = crate::targets::normalize_id(board);
+    crate::targets::KNOWN_TARGETS
+        .iter()
+        .filter(|t| folded.starts_with(t.id))
+        .max_by_key(|t| t.id.len())
+}
+
+/// The boards Bancada knows that are built around an FQBN's chip.
+///
+/// Empty for a chip with no modelled devkit and for a non-ESP board alike —
+/// the caller cannot tell the two apart and does not need to, because the
+/// rendering is the same: there is no board profile, so say so.
+pub fn board_candidates_for_fqbn(fqbn: &str) -> Vec<&'static crate::boardprofile::Board> {
+    match target_for_fqbn(fqbn) {
+        Some(t) => crate::boardprofile::boards_for_target(t.id),
+        None => Vec::new(),
+    }
+}
+
+/// The file a project of this kind records its board in.
+///
+/// Two files because the two paradigms have nothing in common to write to.
+/// An ESP-IDF project has no manifest, and the record must survive
+/// `idf.py fullclean` (which regenerates `sdkconfig`, never
+/// `sdkconfig.defaults`) and travel with the repo. An Arduino sketch has no
+/// `sdkconfig` at all, but already carries `bancada.yaml`.
+fn board_record_file(dir: &Path, kind: ProjectKind) -> PathBuf {
+    match kind {
+        ProjectKind::Idf => dir.join("sdkconfig.defaults"),
+        // An `Unknown` directory is a folder someone opened, not a project.
+        // It gets the manifest too, so that recording a board before the
+        // sketch exists is not a special case.
+        ProjectKind::Arduino | ProjectKind::Unknown => {
+            dir.join(crate::ghlib::MANIFEST_NAME)
+        }
+    }
+}
+
+/// The board a project records for itself, if it records one Bancada knows.
+///
+/// `None` covers three different situations on purpose — no record, an
+/// unreadable file, and a recorded id with no data behind it. The rendering is
+/// the same for all three (there is no board profile, say so), and the one
+/// thing that must never happen is answering with a *different* board than the
+/// project named. An id travels in the repo and may come from a newer Bancada
+/// or be a typo; either way, inventing a match would give confidently wrong
+/// pin advice.
+pub fn recorded_board(dir: &Path) -> Option<&'static crate::boardprofile::Board> {
+    let kind = detect_kind(dir);
+    let path = board_record_file(dir, kind);
+    let text = std::fs::read_to_string(&path).ok()?;
+
+    let id = match kind {
+        ProjectKind::Idf => crate::boardprofile::read_marker(&text)?,
+        ProjectKind::Arduino | ProjectKind::Unknown => {
+            serde_yaml::from_str::<crate::ghlib::Manifest>(&text)
+                .ok()?
+                .board?
+        }
+    };
+    crate::boardprofile::Board::from_id(&id)
+}
+
+/// Record `board_id` as the project's board, leaving the rest of the file
+/// alone.
+///
+/// Both writes are edits rather than rewrites: the marker is set in place in
+/// whatever `sdkconfig.defaults` already says, and the manifest is loaded and
+/// saved so library pins survive. The id is not validated here — callers pass
+/// one from [`crate::boardprofile::KNOWN_BOARDS`], and a project that outlives
+/// this build's table is exactly the case [`recorded_board`] already handles.
+pub fn record_board(dir: &Path, board_id: &str) -> Result<()> {
+    match detect_kind(dir) {
+        ProjectKind::Idf => {
+            let path = board_record_file(dir, ProjectKind::Idf);
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            std::fs::write(&path, crate::boardprofile::set_marker(&existing, board_id))?;
+        }
+        kind => {
+            let mut manifest = crate::ghlib::Manifest::load(dir)?;
+            manifest.board = Some(board_id.to_string());
+            manifest.save(dir)?;
+            let _ = kind;
+        }
+    }
+    Ok(())
+}
+
+/// What Bancada can say about a project's board.
+///
+/// Four answers, because the UI says something different for each and must not
+/// collapse them. The split that matters is [`Recorded`](BoardChoice::Recorded)
+/// versus [`Inferred`](BoardChoice::Inferred): both carry a board and both
+/// yield pin advice, but one is a fact the project states about itself and the
+/// other is Bancada's guess from the chip. The board model's founding rule is
+/// that a deterministic answer and a plausible one must not look alike, so they
+/// are different variants rather than a board plus a boolean nobody renders.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum BoardChoice {
+    /// The project names a board and this build has its data.
+    Recorded(&'static crate::boardprofile::Board),
+    /// The chip has exactly one modelled devkit, so that is almost certainly
+    /// what is on the bench — but nobody said so. Usable, and labelled.
+    Inferred(&'static crate::boardprofile::Board),
+    /// Bancada knows the chip and has several candidate devkits, and guessing
+    /// between them would be a coin toss. Never empty, never of length one.
+    Unchosen {
+        candidates: Vec<&'static crate::boardprofile::Board>,
+    },
+    /// No board data applies — a non-ESP board, or an ESP chip with no
+    /// modelled devkit. The UI says so plainly rather than implying the
+    /// wiring is clean.
+    NoProfile,
+}
+
+impl BoardChoice {
+    /// The board to give pin advice for, if there is one.
+    ///
+    /// Deliberately flattens `Recorded` and `Inferred`: every consumer that
+    /// wants a pinout wants it either way, and only the *presentation* cares
+    /// which. Consumers that must distinguish them match on the variant.
+    pub fn board(&self) -> Option<&'static crate::boardprofile::Board> {
+        match self {
+            BoardChoice::Recorded(b) | BoardChoice::Inferred(b) => Some(b),
+            BoardChoice::Unchosen { .. } | BoardChoice::NoProfile => None,
+        }
+    }
+}
+
+/// Decide which of the three answers applies.
+///
+/// `candidates` comes from [`board_candidates_for_fqbn`] for an Arduino
+/// project or [`crate::boardprofile::boards_for_target`] for an ESP-IDF one —
+/// the two paradigms differ in how they name a chip, and nowhere else. This
+/// function is the *policy* and holds no paradigm knowledge at all.
+pub fn resolve_board(
+    dir: &Path,
+    candidates: &[&'static crate::boardprofile::Board],
+) -> BoardChoice {
+    if let Some(board) = recorded_board(dir) {
+        return BoardChoice::Recorded(board);
+    }
+    if candidates.is_empty() {
+        return BoardChoice::NoProfile;
+    }
+
+    // One modelled devkit for the chip: adopt it, but as a guess. Today every
+    // target in KNOWN_BOARDS has exactly one, so this is the branch New
+    // Project actually takes — a wizard that demanded a choice with one option
+    // would be asking a question whose answer is foregone. Nothing is written:
+    // resolving a board must never mutate the project, so the guess lasts only
+    // as long as the answer does, and recording it stays an explicit act.
+    match candidates {
+        [only] => BoardChoice::Inferred(only),
+        many => BoardChoice::Unchosen {
+            candidates: many.to_vec(),
+        },
+    }
+}
+
 /// Where a new project goes by default: `~/Projects` when the user has
 /// one, otherwise the home directory itself.
 ///
@@ -557,6 +740,161 @@ mod tests {
         }
     }
 
+    fn board(id: &str) -> &'static crate::boardprofile::Board {
+        crate::boardprofile::Board::from_id(id).expect(id)
+    }
+
+    #[test]
+    fn a_recorded_board_wins_over_every_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        record_board(dir, "esp32-c6-devkitc-1").unwrap();
+
+        // Candidates for a different chip entirely: what the project says
+        // about itself is the authority, not what the FQBN suggests.
+        let choice = resolve_board(dir, &[board("esp32-s3-devkitc-1")]);
+        assert_eq!(choice, BoardChoice::Recorded(board("esp32-c6-devkitc-1")));
+    }
+
+    #[test]
+    fn a_chip_with_no_modelled_devkit_has_no_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+
+        assert_eq!(resolve_board(dir, &[]), BoardChoice::NoProfile);
+    }
+
+    #[test]
+    fn a_lone_candidate_is_inferred_not_recorded() {
+        // Adopted so the pin advice works with no ceremony, but flagged: the
+        // user may own a different S3 devkit, and presenting a guess as a
+        // recorded fact is the one outcome the board model must not produce.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+
+        let choice = resolve_board(dir, &[board("esp32-s3-devkitc-1")]);
+        assert_eq!(choice, BoardChoice::Inferred(board("esp32-s3-devkitc-1")));
+    }
+
+    #[test]
+    fn inferring_a_board_does_not_write_it_to_the_project() {
+        // The whole point of Inferred: nothing was decided, so nothing is
+        // persisted. Opening a project must never mutate it.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+
+        let _ = resolve_board(dir, &[board("esp32-s3-devkitc-1")]);
+        assert!(recorded_board(dir).is_none());
+        assert!(!dir.join("bancada.yaml").exists());
+    }
+
+    #[test]
+    fn several_candidates_are_left_for_a_human_to_choose() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+
+        let two = [board("esp32-s3-devkitc-1"), board("esp32-c6-devkitc-1")];
+        assert_eq!(
+            resolve_board(dir, &two),
+            BoardChoice::Unchosen {
+                candidates: two.to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn an_idf_project_remembers_its_board_in_sdkconfig_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("CMakeLists.txt"), "project(demo)\n").unwrap();
+        std::fs::write(
+            dir.join("sdkconfig.defaults"),
+            "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y\n# bancada.board = esp32-c6-devkitc-1\n",
+        )
+        .unwrap();
+
+        assert_eq!(recorded_board(dir).unwrap().id, "esp32-c6-devkitc-1");
+    }
+
+    #[test]
+    fn an_arduino_project_remembers_its_board_in_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        std::fs::write(
+            dir.join("bancada.yaml"),
+            "version: 1\nboard: esp32-s3-devkitc-1\nlibraries: []\n",
+        )
+        .unwrap();
+
+        assert_eq!(recorded_board(dir).unwrap().id, "esp32-s3-devkitc-1");
+    }
+
+    #[test]
+    fn a_project_that_names_no_board_records_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        assert!(recorded_board(dir).is_none());
+
+        // A manifest that predates the field still loads, and still says none.
+        std::fs::write(dir.join("bancada.yaml"), "version: 1\nlibraries: []\n").unwrap();
+        assert!(recorded_board(dir).is_none());
+    }
+
+    #[test]
+    fn a_recorded_board_bancada_does_not_know_is_not_invented() {
+        // The id travels in the repo and may name a board a newer Bancada
+        // added, or a typo. Either way there is no data behind it, and
+        // answering with a *different* board would be the worst outcome.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        std::fs::write(
+            dir.join("bancada.yaml"),
+            "version: 1\nboard: some-board-from-2027\nlibraries: []\n",
+        )
+        .unwrap();
+
+        assert!(recorded_board(dir).is_none());
+    }
+
+    #[test]
+    fn recording_a_board_round_trips_through_both_paradigms() {
+        for (marker_file, seed) in [
+            ("sdkconfig.defaults", "CONFIG_X=y\n"),
+            ("bancada.yaml", "version: 1\nlibraries: []\n"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            if marker_file == "sdkconfig.defaults" {
+                std::fs::write(dir.join("CMakeLists.txt"), "project(demo)\n").unwrap();
+            } else {
+                std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+            }
+            std::fs::write(dir.join(marker_file), seed).unwrap();
+
+            record_board(dir, "esp32-s3-devkitc-1").unwrap();
+            assert_eq!(
+                recorded_board(dir).unwrap().id,
+                "esp32-s3-devkitc-1",
+                "{marker_file}"
+            );
+            // What was already in the file survives being written through.
+            // Line by line, not as a block: the manifest is re-serialised, so
+            // `board:` lands between the seeded keys rather than after them.
+            let text = std::fs::read_to_string(dir.join(marker_file)).unwrap();
+            for line in seed.lines().filter(|l| !l.trim().is_empty()) {
+                assert!(text.contains(line), "{marker_file} lost {line:?}:\n{text}");
+            }
+        }
+    }
+
     #[test]
     fn rejects_over_63_chars() {
         let err = validate_project_name(&"A".repeat(64))
@@ -590,6 +928,67 @@ mod tests {
         for fqbn in ["arduino:avr:uno", "esp32:esp32:esp32s3", "", "zephyr"] {
             assert!(required_profile_libs(fqbn).is_empty(), "{fqbn}");
         }
+    }
+
+    #[test]
+    fn folds_an_fqbn_to_the_chip_it_builds_for() {
+        // The esp32 core spells some board segments as the bare chip...
+        assert_eq!(target_for_fqbn("esp32:esp32:esp32s3").unwrap().id, "esp32s3");
+        assert_eq!(target_for_fqbn("esp32:esp32:esp32c6").unwrap().id, "esp32c6");
+        // ...and others as a board name that merely starts with it. The chip
+        // is the LONGEST known id the segment begins with, which is the whole
+        // reason this is not a table lookup.
+        assert_eq!(
+            target_for_fqbn("esp32:esp32:esp32doit-devkit-v1").unwrap().id,
+            "esp32"
+        );
+    }
+
+    #[test]
+    fn the_longest_target_wins_over_its_own_prefix() {
+        // `esp32s3` begins with `esp32`; answering `esp32` here would hand the
+        // user an S3 board's pins from the wrong chip's table.
+        assert_eq!(target_for_fqbn("esp32:esp32:esp32s3").unwrap().id, "esp32s3");
+        assert_eq!(
+            target_for_fqbn("esp32:esp32:esp32c3-devkitm-1").unwrap().id,
+            "esp32c3"
+        );
+    }
+
+    #[test]
+    fn board_options_do_not_change_the_chip() {
+        assert_eq!(
+            target_for_fqbn("esp32:esp32:esp32s3:PSRAM=opi,FlashMode=qio")
+                .unwrap()
+                .id,
+            "esp32s3"
+        );
+    }
+
+    #[test]
+    fn a_non_esp_fqbn_has_no_chip_profile() {
+        // The right answer is "no profile", not a guess. An AVR Uno has no
+        // entry in the ESP target table and must not acquire one by prefix.
+        for fqbn in ["arduino:avr:uno", "arduino:zephyr:unoq", "", "nonsense"] {
+            assert!(target_for_fqbn(fqbn).is_none(), "{fqbn}");
+        }
+    }
+
+    #[test]
+    fn an_fqbn_reaches_the_boards_built_around_its_chip() {
+        let boards = board_candidates_for_fqbn("esp32:esp32:esp32s3");
+        assert!(
+            boards.iter().any(|b| b.id == "esp32-s3-devkitc-1"),
+            "{:?}",
+            boards.iter().map(|b| b.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_board_bancada_has_no_profile_for_yields_no_candidates() {
+        // Never block on missing board data, and never imply the wiring is
+        // clean by returning something.
+        assert!(board_candidates_for_fqbn("arduino:avr:uno").is_empty());
     }
 
     #[test]

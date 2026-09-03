@@ -61,6 +61,17 @@ pub struct ManifestEntry {
 pub struct Manifest {
     #[serde(default = "manifest_version")]
     pub version: u32,
+    /// The devkit this sketch is built on, as a [`crate::boardprofile::Board`]
+    /// id. Arduino's half of the board record — an ESP-IDF project keeps the
+    /// same fact as a comment in `sdkconfig.defaults` instead, because it has
+    /// no manifest and `idf.py` would nag about an unknown `CONFIG_` key.
+    /// Read and written through [`crate::project::recorded_board`], never here.
+    ///
+    /// Optional on both sides of the wire: `default` keeps every manifest
+    /// written before this field existed loading, and `skip_serializing_if`
+    /// keeps one from growing a `board: null` it never asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
     #[serde(default)]
     pub libraries: Vec<ManifestEntry>,
 }
@@ -238,6 +249,7 @@ impl Manifest {
         if !p.exists() {
             return Ok(Self {
                 version: manifest_version(),
+                board: None,
                 libraries: Vec::new(),
             });
         }
