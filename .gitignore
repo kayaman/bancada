@@ -3,6 +3,12 @@ dist/
 target/
 src-tauri/target/
 *.log
+# …except the checked-in toolchain transcripts the parsers are tested against.
+# `idf_build_failure.log` was silently swallowed by the rule above when the
+# ESP-IDF backend landed, which left `bancada-core`'s tests unable to compile
+# from a clean checkout — the fixture is `include_str!`d, so a missing file is
+# a build error, not a skipped test.
+!core/src/testdata/*.log
 .DS_Store
 
 # Disk images downloaded into the repo root for flashing SBCs. Large enough
