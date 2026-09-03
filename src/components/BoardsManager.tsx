@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import BoardPinout from "./BoardPinout";
 import {
   addPlatformToProfile,
   installCore,
@@ -35,7 +36,7 @@ export default function BoardsManager({
   onStreamStart,
   notify,
 }: Props) {
-  const [tab, setTab] = useState<"installed" | "search">("installed");
+  const [tab, setTab] = useState<"installed" | "search" | "devkit">("installed");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CoreView[]>([]);
   const [installed, setInstalled] = useState<CoreView[]>([]);
@@ -322,6 +323,13 @@ export default function BoardsManager({
         >
           Search
         </button>
+        <button
+          className={tab === "devkit" ? "tab active" : "tab"}
+          onClick={() => setTab("devkit")}
+          title="The board this project runs on: its pinout, and what each pin carries"
+        >
+          Devkit
+        </button>
         <div className="spacer" />
         <button
           className="btn small"
@@ -362,6 +370,8 @@ export default function BoardsManager({
           </div>
         </div>
       )}
+
+      {tab === "devkit" && <BoardPinout sketchDir={sketchDir} notify={notify} />}
 
       {tab === "installed" && (
         <div className="core-list">

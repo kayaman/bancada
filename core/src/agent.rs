@@ -357,6 +357,7 @@ pub const EXPECTED_TOOLS: &[&str] = &[
     "mcp__bancada__upload",
     "mcp__bancada__serial_read",
     "mcp__bancada__serial_send",
+    "mcp__bancada__board_pinout",
 ];
 
 /// Espressif's hosted documentation server.
@@ -870,7 +871,8 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         {
             let mut allowed = String::from(
                 "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
-                 mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send",
+                 mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
+                 mcp__bancada__board_pinout",
             );
             // Appended rather than spliced, so the literal above stays
             // readable and diffable against EXPECTED_TOOLS.
@@ -1357,7 +1359,8 @@ mod tests {
         assert_eq!(
             args[allowed_idx + 1],
             "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill,mcp__bancada__verify,\
-             mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send"
+             mcp__bancada__upload,mcp__bancada__serial_read,mcp__bancada__serial_send,\
+             mcp__bancada__board_pinout"
         );
     }
 

@@ -1,9 +1,7 @@
 // {name} — starts life as Blink, the hardware hello-world: one upload
 // proves the toolchain, the serial port and the board all work.
 
-#ifndef LED_BUILTIN
-#define LED_BUILTIN 2  // most ESP32 dev boards; change if your LED is wired elsewhere
-#endif
+{led_block}
 
 const uint32_t BLINK_INTERVAL_MS = 500;
 

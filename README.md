@@ -17,12 +17,12 @@ official IDE uses, plus a few more, all resolved from `PATH`:
 │ React UI — editor, file tree, library/board/fleet managers,        │
 │ consoles, observability panels, oscilloscope, AI Assistant         │
 └──────────────────────────────┬─────────────────────────────────────┘
-          src/api.ts:  96 invoke commands · 7 events · 3 Channels
+          src/api.ts:  105 invoke commands · 7 events · 3 Channels
 ┌──────────────────────────────┴─────────────────────────────────────┐
 │ src-tauri — commands, event streaming, threads, session state,     │
 │             plus a loopback MCP server the Assistant calls into    │
 ├────────────────────────────────────────────────────────────────────┤
-│ core (bancada-core) — 26 modules of pure Rust, no UI deps:         │
+│ core (bancada-core) — 30 modules of pure Rust, no UI deps:         │
 │   parsers · validators · policy · wire formats · argv builders     │
 └──────────────────────────────┬─────────────────────────────────────┘
       subprocesses: arduino-cli · idf.py · esptool · git · gh · claude
@@ -48,6 +48,21 @@ channel the firmware prints on (so a board that flashes clean and then stays
 silent says so, instead of costing you an evening on the wiring), and the
 console baud rate (which an ESP-IDF project cannot state through a
 `Serial.begin(...)` the way a sketch does). It writes nothing back.
+
+Bancada also carries its own **board** facts — the devkit, not the platform.
+`arduino-cli` exposes nothing about pins and `idf.py` has no board concept at
+all, so neither engine can answer "which pin is the LED", "is GPIO12 safe to
+use", or "where is UART0 on this board". A small table of modelled devkits
+answers them once, for both toolchains: New Project offers the board, Blink
+comes out with the right LED pin (and, on a board whose LED is an addressable
+WS2812, the right *code* — a plain HIGH/LOW does nothing to one), the Boards
+panel shows the pinout with its caveats, and the Assistant can look a GPIO up
+before it suggests wiring to it.
+
+Where a board is not recorded, Bancada says the pinout is **inferred** rather
+than presenting a guess as a fact — and where it has no data at all, it says
+so plainly. Unknown and safe are different answers, and a bench tool that
+confuses them is worse than one that stays quiet.
 
 ## Prerequisites (openSUSE Tumbleweed)
 
@@ -370,7 +385,7 @@ and everything that is *not* enforced — is documented in
 
 ```
 bancada/
-├── core/            # bancada-core: 22 modules of pure Rust (no Tauri, unit-tested)
+├── core/            # bancada-core: 30 modules of pure Rust (no Tauri, unit-tested)
 ├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
 ├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope

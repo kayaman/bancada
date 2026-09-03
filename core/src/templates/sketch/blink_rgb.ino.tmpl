@@ -1,0 +1,22 @@
+// {name} — starts life as Blink, the hardware hello-world: one upload
+// proves the toolchain, the serial port and the board all work.
+//
+// {board} carries an addressable WS2812 rather than a plain LED, so this
+// drives it with the core's rgbLedWrite(). A plain HIGH/LOW toggle on this
+// pin does nothing at all — the classic "my new board is dead" evening.
+
+const uint8_t RGB_LED_PIN = {led_pin};  // {board}'s onboard WS2812
+const uint32_t BLINK_INTERVAL_MS = 500;
+
+void setup() {
+  Serial.begin(115200);
+}
+
+void loop() {
+  rgbLedWrite(RGB_LED_PIN, 0, 32, 0);  // dim green — full brightness is harsh
+  Serial.println("blink: on");
+  delay(BLINK_INTERVAL_MS);
+  rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
+  Serial.println("blink: off");
+  delay(BLINK_INTERVAL_MS);
+}

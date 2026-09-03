@@ -4,10 +4,10 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **100** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **105** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
-| Loopback MCP | agent → Rust, HTTP JSON-RPC | 4 tools | the AI Assistant's tools |
+| Loopback MCP | agent → Rust, HTTP JSON-RPC | 5 tools | the AI Assistant's tools |
 
 An ESP-IDF session is additionally given Espressif's hosted documentation server — one retrieval-only tool, no credentials of ours, inert until the user authorises it. See [agent-safety §3](agent-safety.md).
 
@@ -33,7 +33,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (100)
+## 2. Commands (105)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -79,7 +79,7 @@ build console with compiles.
 `create_project` runs `sketch new` → `write_main_ino` → `profile create` →
 `profile lib add` per library → `ensure_under_git`. **Library and git failures
 are non-fatal** and are reported in the returned
-`CreatedProject { library_errors, under_git, git_error }` — a project with a
+`CreatedProject { library_errors, under_git, git_error, board_error }` — a project with a
 failed optional library is still a project.
 
 `rename_project` moves the folder *and* its main `.ino`, which the explorer's
@@ -108,10 +108,35 @@ collecting per-entry errors rather than aborting on the first.
 
 | Command | Returns |
 |---|---|
-| `project_info` | `{ kind: "arduino" \| "idf" \| "unknown", idf_target, idf_console }` — classified in Rust from the directory. The frontend renders this and never computes its own copy, so the Verify button and the toolbar cannot disagree. `idf_console` carries the two `sdkconfig` values Bancada reads — the console channel and its baud — and is `null` when the file names no channel, which suppresses both consumers rather than guessing. |
+| `project_info` | `{ kind: "arduino" \| "idf" \| "unknown", idf_target, idf_console, board }` — classified in Rust from the directory. The frontend renders this and never computes its own copy, so the Verify button and the toolbar cannot disagree. `idf_console` carries the two `sdkconfig` values Bancada reads — the console channel and its baud — and is `null` when the file names no channel, which suppresses both consumers rather than guessing. `board` is a `BoardChoice` — see the Boards section below. |
 | `idf_probe` | `{ ok, version?, idf_path?, error?, shadowed? }`. A struct, not a thrown string: absent, present-but-broken and usable are three different answers and the UI says something different for each. Called lazily on first ESP-IDF project open — **never at startup**. |
 | `list_idf_targets` | The chips this install supports, from `idf.py --list-targets`. Never hardcoded, for the same reason boards come from `board listall`. |
 | `set_idf_target` | **Destructive.** Deletes `build/` and regenerates `sdkconfig`. Checkpoints to git first when it can, takes the build gate, and is confirmed in the UI before it is called. Not an MCP tool — see [agent-safety §3](agent-safety.md). |
+
+### Boards (the devkit, not the platform) — 4
+
+The one subsystem that spans both paradigms. `boardprofile`'s table is keyed by
+**chip target**, because `idf.py` has no board concept; an Arduino project
+reaches it through `project::target_for_fqbn`, which folds an FQBN's board
+segment to the longest known target id it starts with. Everything below is a
+pure read of that table except `set_project_board`.
+
+| Command | Returns |
+|---|---|
+| `board_candidates` | The devkits modelled for an FQBN's chip. New Project needs this *before* a directory exists, which is why it does not go through `project_info`. `[]` is a real answer and renders as "no board profile", never as clean wiring. |
+| `board_catalog` | `{ boards, caveats }` — every modelled board plus the caveat glossary, in one round trip so a badge and its explanation cannot arrive out of step. |
+| `set_project_board` | Records the board **in the project**: the `# bancada.board =` comment in `sdkconfig.defaults` for ESP-IDF (a comment, not a `CONFIG_` key, because `kconfgen` nags about unknown symbols on every reconfigure), the `board:` key in `bancada.yaml` for Arduino. The only way an inferred board becomes a recorded one — resolving never writes. |
+| `check_board_pin` | `PinVerdict`: `not-broken-out` \| `free` \| `caution { caveats }`. An unknown board id is an **error**, not a `free` verdict: silence and "this pin is fine" must not look alike. |
+
+`BoardChoice` is a tagged union with four states, and the split that matters is
+`recorded` versus `inferred`. Both carry a board and both yield pin advice, but
+one is a fact the project states about itself and the other is Bancada's guess
+from the chip — so they are separate states rather than a board plus a boolean
+nobody renders. `unchosen` (several candidate devkits, none named) and
+`no-profile` (no data at all) are the other two. A Rust test asserts the
+serialised shape against the union hand-written in `src/api.ts`, because
+nothing else forces the two to agree and a rename would otherwise reach the UI
+as an `undefined` field rather than an error.
 
 ### Build and flash — 2
 `compile_sketch` · `upload_sketch`

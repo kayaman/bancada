@@ -39,6 +39,8 @@ Tauri layer is uniformly `.map_err(err_str)`.
 | `esptool.rs` | 316 | MAC address and chip type. Probes `esptool` then `esptool.py`. Keeps raw output for the UI's "details" view. |
 | `types.rs` | 701 | The serde structs for everything `arduino-cli --json` returns — `DetectedPort`, `Port`, `IndexedLibrary`, `InstalledLibrary`, `Platform`, `BoardOption` — plus the streaming shapes `OutputLine { stream, line }` and `RunResult`. |
 | `boards.rs` | 383 | Core/platform identity: `parse_core_id`, `fqbn_platform_id`, install-status derivation, version sorting, and the `sketch.yaml` platform-dependency strings. |
+| `boardprofile.rs` | 1313 | The **devkit**, as opposed to `boards.rs`'s platform: headers and silkscreen labels, the onboard LED and its kind (a WS2812 needs different code from a plain LED, not a different pin number), the BOOT button, USB ports, and a closed `Caveat` vocabulary with label and advice. `check_pin` is the whole pin-safety policy and the only thing the GUI, the CLI and the assistant's `board_pinout` call. Keyed by chip target because `idf.py` has no board concept; `docs/boards/*.md` is rendered from this table by `render_markdown`, and a test asserts the checked-in pages match byte for byte. Vendored from `bancada-idf`. |
+| `targets.rs` | 322 | The ESP chip vocabulary and human-spelling folding — `ESP32-S3`, `s3`, `esp32_s3` all become `esp32s3`. `idf.py --list-targets` stays the authority on what an install can build; this is for reading what a person or an FQBN wrote. |
 
 ### Sketch and project model
 

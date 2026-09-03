@@ -178,7 +178,7 @@ describe("create library", () => {
 });
 
 describe("new project", () => {
-  it("createProject passes every field, nulling omitted profile and template", async () => {
+  it("createProject passes every field, nulling omitted profile, template and board", async () => {
     await api.createProject("/parent", "Blink", "arduino:avr:uno", null, []);
     expect(called()).toEqual([
       "create_project",
@@ -189,8 +189,25 @@ describe("new project", () => {
         profile: null,
         libraries: [],
         template: null,
+        board: null,
       },
     ]);
+  });
+
+  it("createProject sends the chosen devkit through", async () => {
+    // "Not listed" in the wizard is an empty string, which must reach Rust as
+    // null — a recorded board and no board are different states, and an empty
+    // id would be neither.
+    await api.createProject(
+      "/parent",
+      "Node",
+      "esp32:esp32:esp32s3",
+      null,
+      [],
+      "blink",
+      "esp32-s3-devkitc-1",
+    );
+    expect(called()[1]).toMatchObject({ board: "esp32-s3-devkitc-1" });
   });
 
   it("createProject forwards the chosen starter template", async () => {
@@ -535,6 +552,44 @@ describe("build, upload and monitor", () => {
   it("projectInfo asks about one directory", async () => {
     await api.projectInfo("/s");
     expect(called()).toEqual(["project_info", { sketchDir: "/s" }]);
+  });
+
+  it("boardCandidates asks by fqbn", async () => {
+    await api.boardCandidates("esp32:esp32:esp32s3");
+    expect(called()).toEqual([
+      "board_candidates",
+      { fqbn: "esp32:esp32:esp32s3" },
+    ]);
+  });
+
+  it("boardCatalog takes no arguments", async () => {
+    await api.boardCatalog();
+    expect(called()).toEqual(["board_catalog"]);
+  });
+
+  it("setProjectBoard names the directory and the board", async () => {
+    await api.setProjectBoard("/s", "esp32-s3-devkitc-1");
+    expect(called()).toEqual([
+      "set_project_board",
+      { sketchDir: "/s", boardId: "esp32-s3-devkitc-1" },
+    ]);
+  });
+
+  it("checkBoardPin names the board and the gpio", async () => {
+    await api.checkBoardPin("esp32-c6-devkitc-1", 8);
+    expect(called()).toEqual([
+      "check_board_pin",
+      { boardId: "esp32-c6-devkitc-1", gpio: 8 },
+    ]);
+  });
+
+  it("boardOf flattens recorded and inferred, and nothing else", () => {
+    const b = { id: "x" } as unknown as api.Board;
+    expect(api.boardOf({ state: "recorded", board: b })).toBe(b);
+    expect(api.boardOf({ state: "inferred", board: b })).toBe(b);
+    expect(api.boardOf({ state: "unchosen", candidates: [b] })).toBeNull();
+    expect(api.boardOf({ state: "no-profile" })).toBeNull();
+    expect(api.boardOf(null)).toBeNull();
   });
 
   it("idfProbe and listIdfTargets take no arguments", async () => {

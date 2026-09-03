@@ -17,6 +17,10 @@ use crate::{clone, library, Error, Result};
 const MAX_NAME_LEN: usize = 63;
 
 const TMPL_BLINK: &str = include_str!("templates/sketch/blink.ino.tmpl");
+/// Blink for a board whose onboard LED is an addressable WS2812. Not a
+/// `SketchTemplate` of its own: the user picks "Blink", and which of the two
+/// they get is a fact about their board, not a choice to put in front of them.
+const TMPL_BLINK_RGB: &str = include_str!("templates/sketch/blink_rgb.ino.tmpl");
 const TMPL_I2C_SCAN: &str = include_str!("templates/sketch/i2c_scan.ino.tmpl");
 const TMPL_WIFI_SCAN: &str = include_str!("templates/sketch/wifi_scan.ino.tmpl");
 const TMPL_BOARD_INFO: &str = include_str!("templates/sketch/board_info.ino.tmpl");
@@ -310,10 +314,19 @@ pub fn record_board(dir: &Path, board_id: &str) -> Result<()> {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum BoardChoice {
     /// The project names a board and this build has its data.
-    Recorded(&'static crate::boardprofile::Board),
+    ///
+    /// A named field rather than a newtype: internally-tagged serde merges a
+    /// newtype variant's fields in beside the tag, which would spread the
+    /// board across the same object as `state` and make the IPC contract read
+    /// as a bag of loose keys.
+    Recorded {
+        board: &'static crate::boardprofile::Board,
+    },
     /// The chip has exactly one modelled devkit, so that is almost certainly
     /// what is on the bench — but nobody said so. Usable, and labelled.
-    Inferred(&'static crate::boardprofile::Board),
+    Inferred {
+        board: &'static crate::boardprofile::Board,
+    },
     /// Bancada knows the chip and has several candidate devkits, and guessing
     /// between them would be a coin toss. Never empty, never of length one.
     Unchosen {
@@ -333,7 +346,7 @@ impl BoardChoice {
     /// which. Consumers that must distinguish them match on the variant.
     pub fn board(&self) -> Option<&'static crate::boardprofile::Board> {
         match self {
-            BoardChoice::Recorded(b) | BoardChoice::Inferred(b) => Some(b),
+            BoardChoice::Recorded { board } | BoardChoice::Inferred { board } => Some(board),
             BoardChoice::Unchosen { .. } | BoardChoice::NoProfile => None,
         }
     }
@@ -350,7 +363,7 @@ pub fn resolve_board(
     candidates: &[&'static crate::boardprofile::Board],
 ) -> BoardChoice {
     if let Some(board) = recorded_board(dir) {
-        return BoardChoice::Recorded(board);
+        return BoardChoice::Recorded { board };
     }
     if candidates.is_empty() {
         return BoardChoice::NoProfile;
@@ -363,11 +376,57 @@ pub fn resolve_board(
     // resolving a board must never mutate the project, so the guess lasts only
     // as long as the answer does, and recording it stays an explicit act.
     match candidates {
-        [only] => BoardChoice::Inferred(only),
+        [only] => BoardChoice::Inferred { board: only },
         many => BoardChoice::Unchosen {
             candidates: many.to_vec(),
         },
     }
+}
+
+/// The board a project is on, decided from the directory alone.
+///
+/// This is the one entry point the app uses. Everything paradigm-specific is
+/// here and nowhere else: an Arduino sketch names its chip through its default
+/// profile's FQBN, an ESP-IDF project through `CONFIG_IDF_TARGET`, and the two
+/// meet at [`resolve_board`]. The same discipline [`detect_kind`] follows —
+/// one answer, so the Board tab and the pin warnings cannot disagree.
+pub fn project_board(dir: &Path) -> BoardChoice {
+    let candidates = match detect_kind(dir) {
+        ProjectKind::Arduino => fqbn_of_sketch(dir)
+            .map(|f| board_candidates_for_fqbn(&f))
+            .unwrap_or_default(),
+        ProjectKind::Idf => idf_target_of(dir)
+            .map(|t| crate::boardprofile::boards_for_target(&t))
+            .unwrap_or_default(),
+        // Nothing to build, so nothing to be on. A recorded board still wins
+        // below — a folder can hold a marker before it holds a project.
+        ProjectKind::Unknown => Vec::new(),
+    };
+    resolve_board(dir, &candidates)
+}
+
+/// The FQBN a sketch builds with: its default profile's, or its only
+/// profile's when no default is named.
+fn fqbn_of_sketch(dir: &Path) -> Option<String> {
+    let yaml = crate::sketch::SketchProject::open(dir).ok()?.load_yaml().ok()?;
+    let profile = match &yaml.default_profile {
+        Some(name) => yaml.profiles.get(name)?,
+        None if yaml.profiles.len() == 1 => yaml.profiles.values().next()?,
+        // Several profiles and no default: which chip the project is "on" has
+        // no answer, and picking one arbitrarily would be a guess wearing a
+        // fact's clothes.
+        None => return None,
+    };
+    Some(profile.fqbn.clone())
+}
+
+/// The chip an ESP-IDF project is configured for, from `sdkconfig` — or,
+/// before a first build has resolved one, from `sdkconfig.defaults`.
+pub fn idf_target_of(dir: &Path) -> Option<String> {
+    ["sdkconfig", "sdkconfig.defaults"].iter().find_map(|name| {
+        let text = std::fs::read_to_string(dir.join(name)).ok()?;
+        crate::idf::parse_sdkconfig_target(&text)
+    })
 }
 
 /// Where a new project goes by default: `~/Projects` when the user has
@@ -387,17 +446,76 @@ pub fn default_project_parent(home: &Path) -> PathBuf {
 /// Render the template with `id` for a project called `name`. `None` for an
 /// id no template carries — the command layer turns that into a user error.
 pub fn sketch_from_template(id: &str, name: &str) -> Option<String> {
-    TEMPLATES
-        .iter()
-        .find(|t| t.id == id)
-        .map(|t| t.tmpl.replace("{name}", name))
+    sketch_from_template_for(id, name, None)
+}
+
+/// Render the template with `id`, using what the board model knows about
+/// `board` where the starter has something to say about it.
+///
+/// Only Blink differs today, and it differs in two ways rather than one. The
+/// pin is the easy half. The harder half is [`LedKind`]: an ESP32-S3-DevKitC-1
+/// and a C6-DevKitC-1 carry an addressable WS2812, where `digitalWrite` does
+/// precisely nothing — a board that flashes clean and then sits dark, which is
+/// exactly the evening the board model exists to prevent. So a WS2812 board
+/// gets a different sketch, not a different constant.
+///
+/// `None` for the board keeps the portable fallback, guard and all: with no
+/// data, a `#ifndef LED_BUILTIN` the user can override is the honest shape.
+///
+/// [`LedKind`]: crate::boardprofile::LedKind
+pub fn sketch_from_template_for(
+    id: &str,
+    name: &str,
+    board: Option<&crate::boardprofile::Board>,
+) -> Option<String> {
+    use crate::boardprofile::LedKind;
+
+    let t = TEMPLATES.iter().find(|t| t.id == id)?;
+
+    // A WS2812 board replaces Blink outright; everything else renders its own
+    // template and only fills in the LED block.
+    if id == "blink" {
+        if let Some(led) = board.and_then(|b| b.led) {
+            let b = board.expect("led implies a board");
+            if led.kind == LedKind::Ws2812 {
+                return Some(
+                    TMPL_BLINK_RGB
+                        .replace("{name}", name)
+                        .replace("{board}", b.name)
+                        .replace("{led_pin}", &led.gpio.to_string()),
+                );
+            }
+            return Some(t.tmpl.replace("{name}", name).replace(
+                "{led_block}",
+                &format!(
+                    "#define LED_BUILTIN {}  // {}'s onboard LED",
+                    led.gpio, b.name
+                ),
+            ));
+        }
+    }
+
+    Some(t.tmpl.replace("{name}", name).replace(
+        "{led_block}",
+        "#ifndef LED_BUILTIN\n#define LED_BUILTIN 2  // most ESP32 dev boards; change if your LED is wired elsewhere\n#endif",
+    ))
 }
 
 /// Replace the main `.ino` that `arduino-cli sketch new` stubbed out with the
 /// chosen starter. Callers guarantee `dir` was created by us moments ago, so
 /// this never clobbers user content.
 pub fn write_main_ino(dir: &Path, name: &str, template_id: &str) -> Result<()> {
-    let sketch = sketch_from_template(template_id, name).ok_or_else(|| {
+    write_main_ino_for(dir, name, template_id, None)
+}
+
+/// [`write_main_ino`], with the board whose facts the starter should use.
+pub fn write_main_ino_for(
+    dir: &Path,
+    name: &str,
+    template_id: &str,
+    board: Option<&crate::boardprofile::Board>,
+) -> Result<()> {
+    let sketch = sketch_from_template_for(template_id, name, board).ok_or_else(|| {
         Error::Other(format!(
             "unknown sketch template `{template_id}` — expected one of {}",
             TEMPLATES
@@ -745,6 +863,155 @@ mod tests {
     }
 
     #[test]
+    fn blink_without_a_board_keeps_the_portable_fallback() {
+        let s = sketch_from_template_for("blink", "Demo", None).unwrap();
+        assert!(s.contains("#ifndef LED_BUILTIN"), "{s}");
+        assert!(s.contains("digitalWrite"), "{s}");
+    }
+
+    #[test]
+    fn blink_on_a_plain_led_board_names_the_pin_it_knows() {
+        let doit = board("esp32-doit-devkit-v1");
+        let s = sketch_from_template_for("blink", "Demo", Some(doit)).unwrap();
+        // No guard: the pin is a fact about this board, not a guess to be
+        // overridden, and the comment says which board said so.
+        assert!(!s.contains("#ifndef LED_BUILTIN"), "{s}");
+        assert!(s.contains(&format!("#define LED_BUILTIN {}", doit.led.unwrap().gpio)));
+        assert!(s.contains(doit.name), "{s}");
+    }
+
+    #[test]
+    fn blink_on_a_ws2812_board_drives_the_rgb_led_instead() {
+        // The whole reason LedKind exists: digitalWrite does nothing to an
+        // addressable LED, so this is different code, not a different pin.
+        let s3 = board("esp32-s3-devkitc-1");
+        let s = sketch_from_template_for("blink", "Demo", Some(s3)).unwrap();
+        assert!(s.contains("rgbLedWrite"), "{s}");
+        assert!(!s.contains("digitalWrite"), "{s}");
+        assert!(s.contains(&s3.led.unwrap().gpio.to_string()), "{s}");
+    }
+
+    #[test]
+    fn a_board_does_not_change_a_template_that_is_not_blink() {
+        let s3 = board("esp32-s3-devkitc-1");
+        assert_eq!(
+            sketch_from_template_for("i2c-scan", "Demo", Some(s3)),
+            sketch_from_template("i2c-scan", "Demo")
+        );
+    }
+
+    #[test]
+    fn the_name_is_still_substituted_on_every_board_path() {
+        for b in [None, Some(board("esp32-doit-devkit-v1")), Some(board("esp32-s3-devkitc-1"))] {
+            let s = sketch_from_template_for("blink", "MyNode", b).unwrap();
+            assert!(s.contains("MyNode"), "{s}");
+            assert!(!s.contains("{name}"), "{s}");
+        }
+    }
+
+    #[test]
+    fn board_choice_serialises_to_the_shape_the_frontend_declares() {
+        // src/api.ts hand-writes this union. Nothing else forces the two to
+        // agree, and a silent rename here would reach the UI as an undefined
+        // field rather than an error, so the shape is asserted rather than
+        // described. Keep in step with `BoardChoice` in api.ts.
+        let b = board("esp32-s3-devkitc-1");
+
+        let json = serde_json::to_value(BoardChoice::Recorded { board: b }).unwrap();
+        assert_eq!(json["state"], "recorded");
+        assert_eq!(json["board"]["id"], "esp32-s3-devkitc-1");
+
+        let json = serde_json::to_value(BoardChoice::Inferred { board: b }).unwrap();
+        assert_eq!(json["state"], "inferred");
+        assert_eq!(json["board"]["id"], "esp32-s3-devkitc-1");
+
+        let json = serde_json::to_value(BoardChoice::Unchosen {
+            candidates: vec![b],
+        })
+        .unwrap();
+        assert_eq!(json["state"], "unchosen");
+        assert_eq!(json["candidates"][0]["id"], "esp32-s3-devkitc-1");
+
+        let json = serde_json::to_value(BoardChoice::NoProfile).unwrap();
+        assert_eq!(json["state"], "no-profile");
+        // A unit variant must not acquire a payload key the union lacks.
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_caveat_id_the_frontend_lists_is_one_the_glossary_emits() {
+        // The other half of the same contract: api.ts's `Caveat` union.
+        let ids: Vec<String> = crate::boardprofile::caveat_glossary()
+            .iter()
+            .map(|c| serde_json::to_value(c.id).unwrap().as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "strapping",
+                "input-only",
+                "flash-or-psram",
+                "usb-serial-jtag",
+                "uart0-console",
+                "jtag",
+                "adc2-wifi-conflict",
+                "onboard-led",
+                "boot-button",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_arduino_project_finds_its_board_through_its_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        std::fs::write(
+            dir.join("sketch.yaml"),
+            "default_profile: esp32s3\nprofiles:\n  esp32s3:\n    fqbn: esp32:esp32:esp32s3\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            project_board(dir).board().map(|b| b.id),
+            Some("esp32-s3-devkitc-1")
+        );
+    }
+
+    #[test]
+    fn an_idf_project_finds_its_board_through_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("CMakeLists.txt"), "project(demo)\n").unwrap();
+        std::fs::write(dir.join("sdkconfig"), "CONFIG_IDF_TARGET=\"esp32c6\"\n").unwrap();
+
+        assert_eq!(
+            project_board(dir).board().map(|b| b.id),
+            Some("esp32-c6-devkitc-1")
+        );
+    }
+
+    #[test]
+    fn a_folder_that_is_neither_paradigm_has_no_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(project_board(tmp.path()), BoardChoice::NoProfile);
+    }
+
+    #[test]
+    fn an_arduino_project_on_a_non_esp_board_has_no_board_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
+        std::fs::write(
+            dir.join("sketch.yaml"),
+            "default_profile: uno\nprofiles:\n  uno:\n    fqbn: arduino:avr:uno\n",
+        )
+        .unwrap();
+
+        assert_eq!(project_board(dir), BoardChoice::NoProfile);
+    }
+
+    #[test]
     fn a_recorded_board_wins_over_every_candidate() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
@@ -754,7 +1021,7 @@ mod tests {
         // Candidates for a different chip entirely: what the project says
         // about itself is the authority, not what the FQBN suggests.
         let choice = resolve_board(dir, &[board("esp32-s3-devkitc-1")]);
-        assert_eq!(choice, BoardChoice::Recorded(board("esp32-c6-devkitc-1")));
+        assert_eq!(choice, BoardChoice::Recorded { board: board("esp32-c6-devkitc-1") });
     }
 
     #[test]
@@ -776,7 +1043,7 @@ mod tests {
         std::fs::write(dir.join("Demo.ino"), "void setup(){}\n").unwrap();
 
         let choice = resolve_board(dir, &[board("esp32-s3-devkitc-1")]);
-        assert_eq!(choice, BoardChoice::Inferred(board("esp32-s3-devkitc-1")));
+        assert_eq!(choice, BoardChoice::Inferred { board: board("esp32-s3-devkitc-1") });
     }
 
     #[test]

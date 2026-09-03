@@ -3462,3 +3462,85 @@ body {
   font-size: var(--fs-small);
   white-space: nowrap;
 }
+
+/* ---------- Board pinout (Boards ▸ Devkit) ---------- */
+
+/* A reference table, so it is dense on purpose: the point is to find one pin
+   quickly, not to read the page. Scrolls inside itself rather than growing
+   the panel — a 44-pin board is taller than the side panel ever is. */
+.board-pinout {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.bp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Inferred is a different claim from recorded, so it gets a different colour
+   rather than a quieter shade of the same one. --warn is the app's existing
+   "true, but know this" channel; see .target-warning. */
+.bp-inferred {
+  color: var(--warn);
+  font-size: var(--fs-small);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.bp-header-name {
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+  margin-top: 4px;
+}
+
+.bp-pins {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+}
+
+.bp-pins td {
+  border-bottom: 1px solid var(--border);
+  padding: 2px 4px;
+  vertical-align: top;
+}
+
+.bp-label {
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.bp-gpio {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.bp-fns {
+  color: var(--text-dim);
+}
+
+.bp-caveats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+/* Every caveat is a reason for care, never a prohibition — check_pin returns
+   NotBrokenOut for the pins you genuinely cannot use, and those carry no
+   badge at all. One colour for all of them keeps that distinction honest. */
+.bp-caveat {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+  cursor: help;
+}

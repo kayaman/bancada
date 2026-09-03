@@ -180,6 +180,93 @@ export interface IdfConsole {
   baudrate: number | null;
 }
 
+/** Something to know before using a pin. A closed set, so this renders as a
+ *  badge and never as parsed prose. */
+export type Caveat =
+  | "strapping"
+  | "input-only"
+  | "flash-or-psram"
+  | "usb-serial-jtag"
+  | "uart0-console"
+  | "jtag"
+  | "adc2-wifi-conflict"
+  | "onboard-led"
+  | "boot-button";
+
+/** A caveat with the words to explain it — sent once with the catalog so a
+ *  badge needs no lookup of its own. */
+export interface CaveatInfo {
+  id: Caveat;
+  label: string;
+  advice: string;
+}
+
+/** One physical pin position. `gpio` is null for power, ground, reset and
+ *  no-connect rows. */
+export interface HeaderPin {
+  label: string;
+  gpio: number | null;
+  functions: string[];
+  caveats: Caveat[];
+}
+
+export interface Header {
+  name: string;
+  side: "left" | "right";
+  pins: HeaderPin[];
+}
+
+/** A devkit Bancada carries facts about. Keyed by chip target, because
+ *  `idf.py` has no board concept — an Arduino FQBN reaches it through
+ *  `project::target_for_fqbn`. */
+export interface Board {
+  id: string;
+  name: string;
+  vendor: string;
+  target: string;
+  revision: string;
+  module: string;
+  usb: {
+    label: string;
+    kind: { kind: "bridge"; chip: string } | { kind: "native" };
+    gpios: number[];
+  }[];
+  /** A WS2812 is not a plain LED — a bare digital toggle does nothing to it,
+   *  which is why the kind travels with the pin. */
+  led: { gpio: number; kind: "plain" | "ws2812" } | null;
+  boot_button: number | null;
+  headers: Header[];
+  sources: string[];
+  notes: string[];
+}
+
+/** What the board model says about one GPIO. `not-broken-out` and `free` are
+ *  deliberately different answers: "you cannot wire to it" is not "it is
+ *  fine". */
+export type PinVerdict =
+  | { kind: "not-broken-out" }
+  | { kind: "free" }
+  | { kind: "caution"; caveats: Caveat[] };
+
+/** What Bancada can say about a project's board.
+ *
+ *  `recorded` and `inferred` both carry a board and both yield pin advice, but
+ *  one is a fact the project states about itself and the other is a guess from
+ *  the chip. They are separate states — not a board plus a flag — because the
+ *  board model's rule is that a deterministic answer and a plausible one must
+ *  never be rendered alike. */
+export type BoardChoice =
+  | { state: "recorded"; board: Board }
+  | { state: "inferred"; board: Board }
+  | { state: "unchosen"; candidates: Board[] }
+  | { state: "no-profile" };
+
+/** The board to give pin advice for, if any — flattens recorded and inferred,
+ *  which every consumer that wants a pinout wants either way. Callers that
+ *  must *present* the two differently match on `state` instead. */
+export const boardOf = (c: BoardChoice | null | undefined): Board | null =>
+  c && (c.state === "recorded" || c.state === "inferred") ? c.board : null;
+
 export interface ProjectInfo {
   kind: ProjectKind;
   /** `CONFIG_IDF_TARGET` from sdkconfig. `null` when no target has been set
@@ -188,6 +275,8 @@ export interface ProjectInfo {
   /** `null` when unknown — which suppresses both the console warning and the
    *  baud hint rather than guessing at a configuration we did not read. */
   idf_console: IdfConsole | null;
+  /** Which devkit the project is on, resolved in Rust for both paradigms. */
+  board: BoardChoice;
 }
 
 /** Is ESP-IDF usable, and if not, why? A struct rather than a thrown string
@@ -351,6 +440,9 @@ export interface CreatedProject {
   under_git: boolean;
   /** Why `git init` did not happen, when it was attempted and failed. */
   git_error: string | null;
+  /** Why the chosen board was not recorded. Non-fatal: the project builds,
+   *  and the board is still inferred from the FQBN. */
+  board_error: string | null;
 }
 
 export interface ScopeCaps {
@@ -602,6 +694,7 @@ export const createProject = (
   profile: string | null,
   libraries: string[],
   template: string | null = null,
+  board: string | null = null,
 ) =>
   invoke<CreatedProject>("create_project", {
     parent,
@@ -610,7 +703,27 @@ export const createProject = (
     profile: profile ?? null,
     libraries,
     template: template ?? null,
+    board: board ?? null,
   });
+
+/** The devkits Bancada models for an FQBN's chip. Empty is a real answer —
+ *  render it as "no board profile", never as clean wiring. */
+export const boardCandidates = (fqbn: string) =>
+  invoke<Board[]>("board_candidates", { fqbn });
+
+/** Every modelled board plus the caveat glossary, in one round trip so the
+ *  two cannot arrive out of step. */
+export const boardCatalog = () =>
+  invoke<{ boards: Board[]; caveats: CaveatInfo[] }>("board_catalog");
+
+/** Record which devkit a project is on — the only way an inferred board
+ *  becomes a recorded one. */
+export const setProjectBoard = (sketchDir: string, boardId: string) =>
+  invoke<void>("set_project_board", { sketchDir, boardId });
+
+/** What the board model says about one GPIO. */
+export const checkBoardPin = (boardId: string, gpio: number) =>
+  invoke<PinVerdict>("check_board_pin", { boardId, gpio });
 
 export interface ClonedProject {
   dir: string;

@@ -131,7 +131,7 @@ signal at all**.
 ```rust
 BUILTIN_TOOLS  = "Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Skill"
 
-expected_tools(false) = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send}
+expected_tools(false) = BUILTIN_TOOLS + mcp__bancada__{verify, upload, serial_read, serial_send, board_pinout}
 expected_tools(true)  = the above + mcp__espressif-docs__search_espressif_sources
 ```
 
@@ -218,6 +218,15 @@ recorded, not accidental.
 - `serial_read` / `serial_send` drive the app's own monitor under the same
   single-owner discipline as the UI.
 - None of them can touch the scope.
+- `board_pinout` is the one read-only tool, and the only one that takes an
+  argument. It touches no hardware, no subprocess and no file — it reads a
+  static table — so there is nothing to bind at spawn time and nothing to get
+  wrong. The **board is still not a parameter**: it is resolved from the
+  session's project exactly as the GUI resolves it, so the assistant cannot
+  reason about a board the user is not holding. It answers "no board profile"
+  as an explicit sentence rather than an empty success, because an agent that
+  reads silence as "no caveats" gives precisely the confidently-wrong pin
+  advice the board model exists to prevent.
 
 ### ESP-IDF: the same structure, one new refusal
 

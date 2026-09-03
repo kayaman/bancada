@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import BoardPicker from "./BoardPicker";
 import {
+  boardCandidates,
   createProject,
   defaultProjectParent,
   listAllBoards,
@@ -9,6 +10,7 @@ import {
   loadSettings,
   searchLibraries,
   setLastProjectParent,
+  type Board,
   type BoardOption,
   type IndexedLibrary,
   type SketchTemplate,
@@ -41,6 +43,11 @@ export default function NewProject({
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [templates, setTemplates] = useState<SketchTemplate[]>([]);
   const [template, setTemplate] = useState("blink");
+  const [devkits, setDevkits] = useState<Board[]>([]);
+  // "" means "not listed" — an explicit choice, not an unanswered question.
+  // The project is then created with no board recorded, and `project_board`
+  // infers one from the FQBN if it can, labelled as the guess it is.
+  const [board, setBoard] = useState("");
   const [working, setWorking] = useState(false);
 
   // Default the location to wherever the last project went, falling back to
@@ -72,6 +79,36 @@ export default function NewProject({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The devkits Bancada carries pin data for on the chosen board's chip.
+  // Resolved in Rust — the FQBN→chip fold is not something the UI should own
+  // a second copy of. A lone candidate is preselected: with one option, asking
+  // would be a question whose answer is foregone, and the user can still say
+  // "not listed". A failure here leaves the list empty, which the form treats
+  // exactly like a chip with no modelled devkit — creation never depends on it.
+  useEffect(() => {
+    if (!fqbn) {
+      setDevkits([]);
+      setBoard("");
+      return;
+    }
+    let cancelled = false;
+    boardCandidates(fqbn)
+      .then((bs) => {
+        if (cancelled) return;
+        setDevkits(bs);
+        setBoard(bs.length === 1 ? bs[0].id : "");
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDevkits([]);
+          setBoard("");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fqbn]);
 
   const effectiveProfile = profile.trim() || profileFor(fqbn);
   const dest = parent && name.trim() ? `${parent}/${name.trim()}` : "";
@@ -118,6 +155,7 @@ export default function NewProject({
         profile.trim() || null,
         libraries,
         template,
+        board || null,
       );
       // Remembering the parent is a convenience; never fail creation over it.
       setLastProjectParent(parent).catch(() => {});
@@ -131,6 +169,9 @@ export default function NewProject({
       }
       if (res.git_error) {
         warnings.push(`not put under git: ${res.git_error}`);
+      }
+      if (res.board_error) {
+        warnings.push(`board not recorded: ${res.board_error}`);
       }
       notify(
         warnings.length
@@ -209,6 +250,45 @@ export default function NewProject({
           <div className="empty-hint">
             No installed platforms found — install a core first (a board platform
             is required, because the profile pins its version).
+          </div>
+        )}
+
+        {/* Only rendered when there is something to choose. A chip with no
+            modelled devkit gets the one-line note below instead of an empty
+            control — a select with nothing in it reads as a bug. */}
+        {devkits.length > 0 && (
+          <label className="field">
+            Devkit
+            <select
+              className="select"
+              value={board}
+              onChange={(e) => setBoard(e.target.value)}
+              disabled={working}
+              title="Which board this chip is on — decides the LED pin and the pin-safety warnings"
+            >
+              {devkits.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+              <option value="">Not listed</option>
+            </select>
+          </label>
+        )}
+        {devkits.length > 0 && board && (
+          <div className="scope-dim">
+            pin warnings and the onboard LED come from this board's pinout
+          </div>
+        )}
+        {devkits.length > 0 && !board && (
+          <div className="scope-dim">
+            no board recorded — pin warnings will be unavailable until one is set
+          </div>
+        )}
+        {fqbn && devkits.length === 0 && (
+          <div className="scope-dim">
+            Bancada carries no pinout for this chip — the project builds
+            normally, there are simply no pin warnings for it
           </div>
         )}
 

@@ -163,6 +163,50 @@ pub fn serial_send_tool_def() -> ToolDef {
     }
 }
 
+/// The `board_pinout` tool definition: what Bancada knows about the project's
+/// board, and whether a pin is safe to use.
+///
+/// Read-only and pure — the one tool here that touches no hardware, no
+/// subprocess and no file. That is why it takes an argument at all, unlike
+/// [`verify_tool_def`] and friends: there is nothing to bind at spawn time
+/// and nothing to get wrong, so asking about a specific GPIO is free.
+///
+/// The board itself is **not** a parameter. It is resolved from the session's
+/// project the same way the GUI resolves it, so the assistant cannot reason
+/// about a board the user is not holding — the failure mode that makes pin
+/// advice worse than none.
+pub fn board_pinout_tool_def() -> ToolDef {
+    ToolDef {
+        name: "board_pinout".to_string(),
+        description: "Look up the current project's development board: its \
+            headers, the silkscreen label and alternate functions of each \
+            pin, the onboard LED (and whether it is a plain LED or an \
+            addressable WS2812, which need different code), the BOOT button, \
+            and the USB ports. Pass a `gpio` to get the pin-safety verdict \
+            for one GPIO instead: whether it is broken out at all, and any \
+            caveats — strapping pin, input-only, used by flash or PSRAM, \
+            shared with the USB-Serial/JTAG or the UART0 console, or an ADC2 \
+            pin that cannot be read while Wi-Fi is on. Returns an explicit \
+            'no board profile' when Bancada carries no data for this board, \
+            which means unknown, NOT that the pin is safe. The board is the \
+            one the open project records or implies; you cannot ask about a \
+            different one."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "gpio": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255,
+                    "description": "A GPIO number to check. Omit for the whole board."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
 // ---------- JSON-RPC wire types ----------
 
 /// A JSON-RPC 2.0 request. `id` is kept as a raw [`Value`] because the spec

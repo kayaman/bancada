@@ -303,15 +303,12 @@ fn err_str(e: impl std::fmt::Display) -> String {
 /// under it and released here, never across the flash itself.
 /// The chip a project is configured for, from `sdkconfig` (or, before a first
 /// build, `sdkconfig.defaults`).
+///
+/// A one-line delegate: `project::project_board` needs the same fact to reach
+/// the board table, and two copies of "which chip is this" would be exactly
+/// the drift `detect_kind` exists to prevent.
 fn idf_target_of(dir: &std::path::Path) -> Option<String> {
-    for name in ["sdkconfig", "sdkconfig.defaults"] {
-        if let Ok(text) = std::fs::read_to_string(dir.join(name)) {
-            if let Some(t) = bancada_core::idf::parse_sdkconfig_target(&text) {
-                return Some(t);
-            }
-        }
-    }
-    None
+    bancada_core::project::idf_target_of(dir)
 }
 
 /// Where a project's console output goes, from `sdkconfig`.
@@ -1030,6 +1027,9 @@ struct CreatedProject {
     /// Why `git init` did not happen, when it was attempted and failed.
     /// Non-fatal: the sketch exists and builds either way.
     git_error: Option<String>,
+    /// Why the chosen board was not recorded. Non-fatal for the same reason:
+    /// the project builds, and the board is still inferred from the FQBN.
+    board_error: Option<String>,
 }
 
 /// Create a sketch, give it a profile for `fqbn`, and pin the requested
@@ -1043,6 +1043,7 @@ async fn create_project(
     profile: Option<String>,
     libraries: Vec<String>,
     template: Option<String>,
+    board: Option<String>,
 ) -> Result<CreatedProject, String> {
     let cli = state.cli.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1076,7 +1077,24 @@ async fn create_project(
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| "blink".to_string());
-        bancada_core::project::write_main_ino(&dir, &name, &template).map_err(err_str)?;
+        // The starter is rendered for the chosen devkit when there is one, so
+        // a WS2812 board gets a Blink that actually lights up. Falls back to
+        // the board the FQBN implies — an inferred board is still the right
+        // LED pin, and a sketch is easier to correct than a dark board is to
+        // diagnose.
+        let starter_board = board
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(bancada_core::boardprofile::Board::from_id)
+            .or_else(|| {
+                match bancada_core::project::board_candidates_for_fqbn(&fqbn).as_slice() {
+                    [only] => Some(*only),
+                    _ => None,
+                }
+            });
+        bancada_core::project::write_main_ino_for(&dir, &name, &template, starter_board)
+            .map_err(err_str)?;
         cli.profile_create(&dir, &profile, &fqbn, true)
             .map_err(err_str)?;
 
@@ -1110,6 +1128,19 @@ async fn create_project(
             }
         }
 
+        // Record the board, when one was chosen. Non-fatal on the same
+        // boundary as the libraries: a project whose manifest lacks a `board:`
+        // key still builds, and `project_board` will infer the same devkit
+        // from the FQBN anyway — it just won't call it a recorded fact.
+        let mut board_error = None;
+        if let Some(id) = board.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if bancada_core::boardprofile::Board::from_id(id).is_none() {
+                board_error = Some(format!("unknown board `{id}`"));
+            } else if let Err(e) = bancada_core::project::record_board(&dir, id) {
+                board_error = Some(e.to_string());
+            }
+        }
+
         // Put the project under git so the Assistant's auto-applied edits have
         // something to undo against. Skipped when the parent is already a work
         // tree — initialising there would nest a second repository inside one
@@ -1131,6 +1162,7 @@ async fn create_project(
             library_errors,
             under_git,
             git_error,
+            board_error,
         })
     })
     .await
@@ -1523,6 +1555,10 @@ struct ProjectInfo {
     /// FQBN and its `Serial.begin(...)`, neither of which an ESP-IDF project
     /// has. `None` when unknown, which suppresses both rather than guessing.
     idf_console: Option<bancada_core::idf::IdfConsole>,
+    /// Which devkit the project is on, and how firmly we know it. Resolved in
+    /// core from the directory alone, for both paradigms — see
+    /// [`bancada_core::project::project_board`].
+    board: bancada_core::project::BoardChoice,
 }
 
 /// Classify the open project.
@@ -1537,8 +1573,66 @@ fn project_info(sketch_dir: String) -> ProjectInfo {
     ProjectInfo {
         idf_target: if idf { idf_target_of(dir) } else { None },
         idf_console: if idf { idf_console_of(dir) } else { None },
+        board: bancada_core::project::project_board(dir),
         kind,
     }
+}
+
+/// The devkits Bancada models for an FQBN's chip.
+///
+/// New Project needs this *before* a project exists, so it cannot go through
+/// [`project_info`], which reads a directory. Empty is a real answer and the
+/// caller renders it as "no board profile", never as clean wiring.
+#[tauri::command]
+fn board_candidates(fqbn: String) -> Vec<&'static bancada_core::boardprofile::Board> {
+    bancada_core::project::board_candidates_for_fqbn(&fqbn)
+}
+
+/// Record which devkit an existing project is on.
+///
+/// Writes the `# bancada.board =` marker for an ESP-IDF project and the
+/// `board:` key in `bancada.yaml` for an Arduino one — the paradigm is decided
+/// in core, not here. Turns an inferred board into a recorded one, which is
+/// the only way that transition ever happens: resolving never writes.
+#[tauri::command]
+fn set_project_board(sketch_dir: String, board_id: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&sketch_dir);
+    if bancada_core::boardprofile::Board::from_id(&board_id).is_none() {
+        return Err(format!("unknown board `{board_id}`"));
+    }
+    bancada_core::project::record_board(dir, &board_id).map_err(err_str)
+}
+
+/// Every board Bancada models, plus the caveat glossary the UI needs to
+/// explain them. One call: the Board tab renders both together and a second
+/// round trip would only let them arrive out of step.
+#[derive(serde::Serialize)]
+struct BoardCatalog {
+    boards: Vec<&'static bancada_core::boardprofile::Board>,
+    caveats: Vec<bancada_core::boardprofile::CaveatInfo>,
+}
+
+#[tauri::command]
+fn board_catalog() -> BoardCatalog {
+    BoardCatalog {
+        boards: bancada_core::boardprofile::KNOWN_BOARDS.iter().collect(),
+        caveats: bancada_core::boardprofile::caveat_glossary(),
+    }
+}
+
+/// What the board model says about one GPIO.
+///
+/// The single pin-safety entry point for the GUI, mirroring what the CLI and
+/// the assistant call. An unknown board is an error rather than a `Free`
+/// verdict: silence and "this pin is fine" must not look alike.
+#[tauri::command]
+fn check_board_pin(
+    board_id: String,
+    gpio: u8,
+) -> Result<bancada_core::boardprofile::PinVerdict, String> {
+    let board = bancada_core::boardprofile::Board::from_id(&board_id)
+        .ok_or_else(|| format!("unknown board `{board_id}`"))?;
+    Ok(bancada_core::boardprofile::check_pin(board, gpio))
 }
 
 /// Is ESP-IDF usable on this machine, and if not, why?
@@ -3909,6 +4003,7 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
         mcp::upload_tool_def(),
         mcp::serial_read_tool_def(),
         mcp::serial_send_tool_def(),
+        mcp::board_pinout_tool_def(),
     ];
 
     for mut request in server.incoming_requests() {
@@ -3981,6 +4076,7 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
                     // monitor's reader threads must own an emitter clone.
                     "serial_read" => run_serial_read(&ctx, &emit, &args),
                     "serial_send" => run_serial_send(&ctx, &args),
+                    "board_pinout" => run_board_pinout(&ctx, &args),
                     // Unreachable via `handle_request`, which rejects tools
                     // outside `tools` — belt and braces.
                     _ => (format!("unknown tool: {name}"), true),
@@ -4407,6 +4503,95 @@ fn run_serial_read(
 /// The `serial_send` tool: one line to the monitor child's stdin, newline
 /// appended — unlike `monitor_send`, which writes verbatim and leaves the
 /// line ending to the Monitor tab's selector.
+/// `board_pinout`: the board model, for the session's project.
+///
+/// Answers in Markdown rather than JSON. Every other tool here returns a
+/// status the agent acts on; this one returns *reference material* it reads,
+/// and `render_markdown` is the same rendering the checked-in `docs/boards/`
+/// pages use — so what the assistant sees and what the user can read are the
+/// same text, generated from the same table.
+///
+/// "No board profile" is returned as an explicit sentence, never as an empty
+/// success. An assistant that reads silence as "no caveats" would give exactly
+/// the confidently-wrong pin advice the board model exists to prevent.
+fn run_board_pinout(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {
+    use bancada_core::boardprofile::{check_pin, PinVerdict};
+
+    let dir = std::path::Path::new(&ctx.sketch_dir);
+    let choice = bancada_core::project::project_board(dir);
+    let Some(board) = choice.board() else {
+        return match choice {
+            bancada_core::project::BoardChoice::Unchosen { candidates } => (
+                format!(
+                    "This project's chip has several boards Bancada models and none is \
+                     recorded, so there is no pinout to give: {}. Ask the user which \
+                     board it is — do not assume one.",
+                    candidates
+                        .iter()
+                        .map(|b| b.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                false,
+            ),
+            _ => (
+                "Bancada carries no board profile for this project. That means the \
+                 pinout is UNKNOWN, not that any pin is safe — say so rather than \
+                 guessing, and check the board's own documentation."
+                    .to_string(),
+                false,
+            ),
+        };
+    };
+
+    // An inferred board is a guess from the chip, and the assistant must be
+    // able to tell the user so. Prefixed rather than dropped: the pinout is
+    // still the most likely one and withholding it helps nobody.
+    let caveat = match choice {
+        bancada_core::project::BoardChoice::Inferred { .. } => format!(
+            "NOTE: no board is recorded for this project. `{}` is inferred from the \
+             chip — it is the only board Bancada models for it. Say so before relying \
+             on a pin number, and suggest the user confirm the board.\n\n",
+            board.name
+        ),
+        _ => String::new(),
+    };
+
+    match args.get("gpio").and_then(|v| v.as_u64()) {
+        None => (format!("{caveat}{}", bancada_core::boardprofile::render_markdown(board)), false),
+        Some(n) if n > u8::MAX as u64 => (
+            format!("{n} is not a GPIO number on {}", board.name),
+            true,
+        ),
+        Some(n) => {
+            let gpio = n as u8;
+            let verdict = match check_pin(board, gpio) {
+                PinVerdict::NotBrokenOut => format!(
+                    "GPIO{gpio} is not broken out on {} — there is no header pin for \
+                     it, so it cannot be wired to. This is not the same as 'unused'.",
+                    board.name
+                ),
+                PinVerdict::Free => format!(
+                    "GPIO{gpio} is broken out on {} with no caveats.",
+                    board.name
+                ),
+                PinVerdict::Caution { caveats } => {
+                    let lines = caveats
+                        .iter()
+                        .map(|c| format!("- **{}**: {}", c.label(), c.advice()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!(
+                        "GPIO{gpio} on {} is usable but carries caveats:\n{lines}",
+                        board.name
+                    )
+                }
+            };
+            (format!("{caveat}{verdict}"), false)
+        }
+    }
+}
+
 fn run_serial_send(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {
     let Some(data) = args.get("data").and_then(|v| v.as_str()) else {
         return (
@@ -5203,6 +5388,10 @@ pub fn run() {
             gh_restore,
             compile_sketch,
             project_info,
+            board_candidates,
+            board_catalog,
+            set_project_board,
+            check_board_pin,
             idf_probe,
             list_idf_targets,
             set_idf_target,
@@ -5788,7 +5977,30 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["verify", "upload", "serial_read", "serial_send"]);
+        assert_eq!(
+            names,
+            [
+                "verify",
+                "upload",
+                "serial_read",
+                "serial_send",
+                "board_pinout"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn board_pinout_says_unknown_rather_than_safe_without_a_profile() {
+        // The one answer this tool must never give by omission. A directory
+        // with no board data returns a sentence saying so, as a *success* —
+        // an error would read to the agent as a broken tool worth retrying,
+        // and an empty success would read as "no caveats".
+        let dir = tempfile::tempdir().unwrap();
+        let l = start_listener(stub_cli(&dir, "exit 0"), "/nowhere", gate());
+        let (is_error, text) = call_tool(&l, "board_pinout", serde_json::json!({}));
+        assert!(!is_error, "{text}");
+        assert!(text.contains("UNKNOWN"), "{text}");
     }
 
     #[cfg(unix)]
