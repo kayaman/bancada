@@ -24,6 +24,7 @@ import remarkGfm from "remark-gfm";
 import { diffForToolInput, type DiffLine } from "../agent/diff";
 import { alarmConsequence } from "../agent/alarmCopy";
 import { parseVerifyResult } from "../agent/verifyResult";
+import { mcpCallSubject, parseMcpName } from "../agent/mcpTool";
 import {
   agentActivity,
   agentActivityParts,
@@ -471,7 +472,10 @@ function AlarmView({ alarm }: { alarm: AgentAlarm }) {
 
 // ---------- message / tool rendering ----------
 
-function MessageView({
+/** One transcript row. Exported for tests — the tool cards carry real
+ *  rendering decisions (which card wins, what shows collapsed) and testing
+ *  them through the whole panel would need a live store. */
+export function MessageView({
   msg,
   openBottomTab,
   onOpenTurn,
@@ -683,6 +687,42 @@ function ToolCard({
           <div className="agent-tool-summary">{truncate(msg.result, 400)}</div>
         )}
       </div>
+    );
+  }
+
+  // Every remaining MCP tool, ours and other servers' alike. Reached only
+  // after the specific cards above, so `verify`/`upload`/serial keep theirs;
+  // what lands here is `board_pinout` and anything a third-party server
+  // offers — Espressif's documentation search being the first of those.
+  //
+  // A run of doc searches is the case this exists for: collapsed, each one
+  // shows the server, the tool and *what was asked*, so five of them read as
+  // a legible sequence instead of five identical `mcp__…` lines you have to
+  // expand one by one to tell apart.
+  const mcp = parseMcpName(msg.name);
+  if (mcp) {
+    const subject = mcpCallSubject(msg.input);
+    return (
+      <details className="agent-tool agent-tool-mcp">
+        <summary>
+          <span
+            className={
+              msg.status === "error" ? "agent-tool-icon fail" : "agent-tool-icon"
+            }
+          >
+            {msg.status === "running" ? "⟳" : msg.status === "error" ? "✗" : "✓"}
+          </span>{" "}
+          <span className="agent-mcp-server">{mcp.server}</span>
+          <span className="agent-mcp-tool">{mcp.tool}</span>
+          {subject && <span className="agent-mcp-subject">{subject}</span>}
+        </summary>
+        {/* The input still shows in full when expanded — the summary is a
+            reading aid, not a replacement for what was actually sent. */}
+        <pre className="agent-tool-detail">{prettyJson(msg.input)}</pre>
+        {msg.result && (
+          <pre className="agent-tool-detail">{truncate(msg.result, 4000)}</pre>
+        )}
+      </details>
     );
   }
 

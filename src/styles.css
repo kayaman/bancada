@@ -3553,3 +3553,44 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
+
+/* ---------- MCP tool calls in the Assistant log ---------- */
+
+/* Collapsed, one of these must answer "which server, which tool, about what"
+   without being expanded — a run of documentation searches is unreadable if
+   telling them apart costs a click each. The three spans are sized so the
+   subject is what survives a narrow panel, since it is the only part that
+   differs between consecutive calls. */
+.agent-tool-mcp > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.agent-mcp-server {
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.agent-mcp-tool {
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  flex: none;
+}
+
+/* The one part allowed to shrink — same reasoning as the activity line's
+   seam: the identity of the call must survive, its subject may ellipsise. */
+.agent-mcp-subject {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}

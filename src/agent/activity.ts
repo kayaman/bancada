@@ -18,6 +18,7 @@
 
 import type { AgentMessage, AgentStatus } from "./agentStore";
 import { formatElapsed } from "../statusLine";
+import { shortToolName } from "./mcpTool";
 
 /**
  * How long the CLI may say nothing before the line admits it. Not a verdict
@@ -76,8 +77,11 @@ function toolHint(input: unknown): string {
   if (typeof input !== "object" || input === null) return "";
   const i = input as Record<string, unknown>;
   // Ordered by how much the field narrows down "what is it touching": a path
-  // or a command beats a pattern beats a port.
-  for (const key of ["file_path", "command", "pattern", "url", "port"]) {
+  // or a command beats a pattern beats a port. `query` sits with them because
+  // for a documentation search it is the entire subject — without it the line
+  // reads "⚙ search_espressif_sources" for every one of a run of them, which
+  // says the assistant is busy but not what it is busy *with*.
+  for (const key of ["file_path", "command", "query", "pattern", "url", "port"]) {
     const v = i[key];
     if (typeof v === "string" && v !== "") return v;
   }
@@ -128,7 +132,10 @@ export function agentActivity(a: ActivityInput): AgentActivity {
     : a.verifyRunning
       ? "🔨 verify (compiling)"
       : tool
-        ? `⚙ ${tool.name}${toolHint(tool.input) ? ` ${toolHint(tool.input)}` : ""}`
+        ? // The short name for an MCP tool: `mcp__espressif-docs__search_…`
+          // spends the line's whole width on a prefix that is the same for
+          // every call, crowding out the hint that actually differs.
+          `⚙ ${shortToolName(tool.name)}${toolHint(tool.input) ? ` ${toolHint(tool.input)}` : ""}`
         : a.streaming
           ? "✍ writing"
           : "thinking";

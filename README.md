@@ -42,6 +42,14 @@ and stops there. `menuconfig`, the component manager and the partition-table
 editor stay where they are; `sdkconfig.defaults` is a text file and your editor
 is right here.
 
+New Project creates either kind. The ESP-IDF tree is written directly rather
+than by `idf.py create-project`, so **you can create an ESP-IDF project without
+ESP-IDF installed** — a first project is exactly when you are least likely to
+have a working one. Building is where a missing toolchain is reported, which is
+the right place for it. An opt-in test builds all four starters against a real
+install (`BANCADA_IDF_LIVE=1`), because "the files are written" and "ESP-IDF
+agrees they are a project" are different claims.
+
 Bancada *reads* exactly two values out of `sdkconfig`, and only because they
 answer questions it already asks of every Arduino project: which console
 channel the firmware prints on (so a board that flashes clean and then stays
@@ -138,6 +146,8 @@ a board, so a plain `cargo test` skips them:
 cargo test -p bancada-core --test gh_fetch            -- --ignored  # network + git
 cargo test -p bancada-core --test scaffold_compiles   -- --ignored  # installed core
 cargo test -p bancada-core --test new_project_builds  -- --ignored  # installed core
+BANCADA_IDF_LIVE=1 cargo test -p bancada-core --test idf_scaffold_builds  # ESP-IDF
+BANCADA_IDF_LIVE=1 cargo test -p bancada-core --test idf_builds           # ESP-IDF
 npm run coverage:full                                              # coverage incl. those
 ```
 

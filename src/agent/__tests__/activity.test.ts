@@ -128,7 +128,23 @@ describe("agentActivity — what it is doing", () => {
         tool("mcp__bancada__serial_read", "running", { port: "/dev/ttyACM0" }),
       ],
     });
-    expect(a.detail).toBe("⚙ mcp__bancada__serial_read /dev/ttyACM0");
+    // Short name, not the wire name: the `mcp__bancada__` prefix is identical
+    // on every one of these and spends the line's width saying nothing, while
+    // the port — the part that differs — is what gets ellipsised away.
+    expect(a.detail).toBe("⚙ serial_read /dev/ttyACM0");
+  });
+
+  it("names a documentation search by what it searched for", () => {
+    const a = agentActivity({
+      ...base,
+      messages: [
+        tool("mcp__espressif-docs__search_espressif_sources", "running", {
+          query: "I2C pull-ups",
+          language: "en",
+        }),
+      ],
+    });
+    expect(a.detail).toBe("⚙ search_espressif_sources I2C pull-ups");
   });
 
   it("falls back to the bare tool name when there is no hint", () => {
