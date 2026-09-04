@@ -3,10 +3,13 @@ import { chatList, renameProject } from "../api";
 import type { RepoState } from "../api";
 import { reasonOf } from "../check";
 import { checkProjectName, renamePlan } from "../projectRename";
+import type { ProjectKind } from "../api";
 
 interface Props {
   /** Directory of the currently open project. Renaming needs one open. */
   sketchDir: string;
+  /** Which paradigm's rules apply — the backend forks on the same answer. */
+  kind: ProjectKind;
   gitState: RepoState | null;
   onRenamed: (dir: string) => void;
   onCancel: () => void;
@@ -24,6 +27,7 @@ interface Props {
  */
 export default function RenameProject({
   sketchDir,
+  kind,
   gitState,
   onRenamed,
   onCancel,
@@ -49,8 +53,8 @@ export default function RenameProject({
     };
   }, [sketchDir]);
 
-  const check = checkProjectName(name, sketchDir);
-  const plan = check.ok ? renamePlan(sketchDir, name) : null;
+  const check = checkProjectName(name, sketchDir, kind);
+  const plan = check.ok ? renamePlan(sketchDir, name, kind) : null;
   const reason = reasonOf(check);
   // Shown inline only once something has been typed — scolding an untouched
   // field is noise. The disabled button still gets the full reason, because a
@@ -125,7 +129,9 @@ export default function RenameProject({
               <div className="lib-dest">{plan.destDir}</div>
             </div>
             <div className="np-note">
-              {plan.newIno} (renamed from {plan.oldIno})
+              {plan.cmakeName
+                ? `${plan.cmakeName} in CMakeLists.txt — no source file is renamed`
+                : `${plan.newIno} (renamed from ${plan.oldIno})`}
             </div>
             <div className="np-note">
               Also moves:

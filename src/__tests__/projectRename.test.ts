@@ -97,3 +97,51 @@ describe("renamePlan", () => {
     });
   });
 });
+
+describe("ESP-IDF projects rename by different rules", () => {
+  // The backend forks on detect_kind, so the pane has to as well — a name it
+  // accepts and the backend refuses is a round trip ending in an error the
+  // user could have been shown instantly.
+  it("refuses a leading digit, which Arduino allows", () => {
+    expect(checkProjectName("2fast", cur, "arduino").ok).toBe(true);
+    const idf = checkProjectName("2fast", cur, "idf");
+    expect(idf.ok).toBe(false);
+    expect(idf.ok === false && idf.reason).toMatch(/digit/);
+  });
+
+  it("refuses a dot, which is legal in a sketch folder", () => {
+    expect(checkProjectName("my.app", cur, "arduino").ok).toBe(true);
+    expect(checkProjectName("my.app", cur, "idf").ok).toBe(false);
+  });
+
+  it("still accepts the names both paradigms allow", () => {
+    for (const n of ["blink_node", "sensor-node", "app2"]) {
+      expect(checkProjectName(n, cur, "idf").ok, n).toBe(true);
+      expect(checkProjectName(n, cur, "arduino").ok, n).toBe(true);
+    }
+  });
+
+  it("allows the 64th character ESP-IDF permits", () => {
+    // MAX_NAME_LEN is 64 for CMake, 63 for arduino-lint.
+    const n = "a".repeat(64);
+    expect(checkProjectName(n, cur, "idf").ok).toBe(true);
+    expect(checkProjectName(n, cur, "arduino").ok).toBe(false);
+  });
+
+  it("describes the CMake name rather than a .ino that does not move", () => {
+    // The pane used to promise "old.ino → new.ino" for every project. For an
+    // ESP-IDF one no source is renamed at all; what changes is the project()
+    // call, and showing the wrong thing is worse than showing less.
+    const plan = renamePlan("/p/old", "new", "idf");
+    expect(plan.destDir).toBe("/p/new");
+    expect(plan.oldIno).toBeUndefined();
+    expect(plan.cmakeName).toBe("project(new)");
+  });
+
+  it("still describes the .ino move for a sketch", () => {
+    const plan = renamePlan("/p/old", "new", "arduino");
+    expect(plan.oldIno).toBe("old.ino");
+    expect(plan.newIno).toBe("new.ino");
+    expect(plan.cmakeName).toBeUndefined();
+  });
+});

@@ -3242,6 +3242,7 @@ export default function App() {
           ) : renamingProject && sketchDir ? (
             <RenameProject
               sketchDir={sketchDir}
+              kind={projectKind}
               gitState={gitState}
               onRenamed={async (dir) => {
                 setRenamingProject(false);

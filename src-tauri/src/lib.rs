@@ -1289,16 +1289,45 @@ async fn clone_project(
     new_name: String,
 ) -> Result<ClonedProject, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let made = bancada_core::clone::clone_project(
-            Path::new(&src_dir),
-            Path::new(&dest_parent),
-            &new_name,
-        )
-        .map_err(err_str)?;
+        let src = Path::new(&src_dir);
+        let parent = Path::new(&dest_parent);
+        // Same fork as `rename_project`, for the same reason: an ESP-IDF
+        // project's identity lives in `project(<name>)`, not in a main `.ino`.
+        let (dir, name, mut warnings) =
+            match bancada_core::project::detect_kind(src) {
+                bancada_core::project::ProjectKind::Idf => {
+                    let made =
+                        bancada_core::idfproject::duplicate_idf_project(src, parent, &new_name)
+                            .map_err(err_str)?;
+                    (made.dir, made.name, made.warnings)
+                }
+                _ => {
+                    let made = bancada_core::clone::clone_project(src, parent, &new_name)
+                        .map_err(err_str)?;
+                    (made.dir, made.name, made.warnings)
+                }
+            };
+
+        // `clone::clone_project` runs its own `git init` inside staging, so
+        // this is a no-op on the Arduino path — `ensure_under_git` returns
+        // early when the directory is already under a work tree. It exists
+        // for the ESP-IDF path, which copies files and nothing else, and
+        // would otherwise hand back a project with no undo for the
+        // Assistant's auto-applied edits.
+        //
+        // Note the two are not identical: `clone_project` initialises
+        // unconditionally, while this skips when the destination already sits
+        // inside someone's repository — the rule `create_project` follows, to
+        // avoid nesting a second repo in one the user already keeps. Worth
+        // knowing if a duplicate into a work tree comes back without one.
+        if let Err(e) = bancada_core::git::ensure_under_git(&dir) {
+            warnings.push(format!("not put under git: {e}"));
+        }
+
         Ok(ClonedProject {
-            dir: made.dir.to_string_lossy().into_owned(),
-            name: made.name,
-            warnings: made.warnings,
+            dir: dir.to_string_lossy().into_owned(),
+            name,
+            warnings,
         })
     })
     .await
@@ -1355,7 +1384,18 @@ async fn rename_project(
     let old_dir = sketch_dir.clone();
     let made = tauri::async_runtime::spawn_blocking(move || {
         let _gate = try_build_gate(&gate)?;
-        bancada_core::project::rename_project(Path::new(&sketch_dir), &new_name).map_err(err_str)
+        // Dispatched on the same detection the toolbar and the Verify button
+        // use, so a project renames by the rules of the paradigm it actually
+        // is. Everything downstream — chats, usage, fleet, recents — is keyed
+        // by path and is paradigm-independent, so only this call forks.
+        let dir = Path::new(&sketch_dir);
+        match bancada_core::project::detect_kind(dir) {
+            bancada_core::project::ProjectKind::Idf => {
+                bancada_core::idfproject::rename_idf_project(dir, &new_name)
+            }
+            _ => bancada_core::project::rename_project(dir, &new_name),
+        }
+        .map_err(err_str)
     })
     .await
     .map_err(err_str)??;

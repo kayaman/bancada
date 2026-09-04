@@ -301,6 +301,141 @@ fn write_tree(
     Ok(files.iter().map(|(rel, _)| rel.clone()).collect())
 }
 
+/// Rewrite `project(<name>)` in a `CMakeLists.txt`'s text.
+///
+/// Surgical, like the `sdkconfig` marker: only the name inside the call
+/// changes, so a rename produces a one-line diff and every comment the user
+/// added survives.
+fn rewrite_project_name(text: &str, new_name: &str) -> Option<String> {
+    let start = text.find("project(")?;
+    let open = start + "project(".len();
+    let close = text[open..].find(')')? + open;
+    Some(format!("{}{}{}", &text[..open], new_name, &text[close..]))
+}
+
+/// Rename an ESP-IDF project: its directory and its CMake name, together.
+///
+/// They are one identity, the same way an Arduino sketch's folder and its
+/// main `.ino` basename are — the build names `<name>.elf` from `project()`,
+/// so moving only the directory leaves a project whose output is named after
+/// its old self.
+///
+/// **The rewrite happens before the move**, which is the same discipline
+/// [`crate::project::rename_project`] follows for the opposite reason: there,
+/// every in-directory edit precedes the one irreversible step. Here there are
+/// only two steps, and putting the fallible one first means a failure leaves
+/// the project exactly where it was.
+///
+/// The `main/<name>.c` source is deliberately **not** renamed. Unlike Arduino,
+/// where `arduino-cli` only recognises `Foo/Foo.ino` as a sketch, ESP-IDF
+/// names its sources in `main/CMakeLists.txt` and does not care what they are
+/// called — renaming one would mean editing that file for no gain.
+pub fn rename_idf_project(dir: &Path, new_name: &str) -> Result<crate::project::RenamedProject> {
+    let name = validate_idf_name(new_name)?;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| Error::Other("the project has no parent directory".into()))?;
+    let dest = parent.join(&name);
+    if dest.symlink_metadata().is_ok() {
+        return Err(Error::Other(format!(
+            "{} already exists — choose another name",
+            dest.display()
+        )));
+    }
+
+    let cmake = dir.join(CMAKELISTS);
+    let text = std::fs::read_to_string(&cmake)?;
+    let rewritten = rewrite_project_name(&text, &name).ok_or_else(|| {
+        Error::Other(format!(
+            "{} has no project(<name>) call — it is not an ESP-IDF project",
+            cmake.display()
+        ))
+    })?;
+    std::fs::write(&cmake, rewritten)?;
+
+    if let Err(e) = std::fs::rename(dir, &dest) {
+        // Put the name back rather than leaving a project that claims to be
+        // something the directory is not.
+        let _ = std::fs::write(&cmake, &text);
+        return Err(e.into());
+    }
+
+    Ok(crate::project::RenamedProject {
+        dir: dest,
+        name,
+        warnings: Vec::new(),
+    })
+}
+
+/// Copy an ESP-IDF project to `dest_parent/new_name`.
+///
+/// `build/` and the generated `sdkconfig` are deliberately not copied: both
+/// are CMake output naming the *source* project inside, so carrying them
+/// across gives the duplicate stale artefacts under the wrong name.
+/// `sdkconfig.defaults` **is** copied — it is hand-written, committed, and
+/// carries the target and the board marker, which is exactly what should
+/// survive. `.git` is skipped for the same reason the Arduino clone skips it:
+/// a copy gets a fresh repository, never the original's history.
+pub fn duplicate_idf_project(
+    src_dir: &Path,
+    dest_parent: &Path,
+    new_name: &str,
+) -> Result<crate::project::RenamedProject> {
+    let name = validate_idf_name(new_name)?;
+    let dest = dest_parent.join(&name);
+    if dest.symlink_metadata().is_ok() {
+        return Err(Error::Other(format!(
+            "{} already exists — choose another name or location",
+            dest.display()
+        )));
+    }
+    // Read the source's CMakeLists before copying, so a project that is not
+    // one fails before anything is written.
+    let text = std::fs::read_to_string(src_dir.join(CMAKELISTS))?;
+    let rewritten = rewrite_project_name(&text, &name).ok_or_else(|| {
+        Error::Other(format!(
+            "{} has no project(<name>) call — it is not an ESP-IDF project",
+            src_dir.join(CMAKELISTS).display()
+        ))
+    })?;
+
+    std::fs::create_dir_all(dest_parent)?;
+    if let Err(e) = copy_tree(src_dir, &dest) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(e);
+    }
+    std::fs::write(dest.join(CMAKELISTS), rewritten)?;
+
+    Ok(crate::project::RenamedProject {
+        dir: dest,
+        name,
+        warnings: Vec::new(),
+    })
+}
+
+/// Entries never worth copying: CMake's output directory, the generated
+/// `sdkconfig` and its backup, and git's own directory.
+const NOT_COPIED: &[&str] = &["build", "sdkconfig", "sdkconfig.old", ".git", "managed_components"];
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if NOT_COPIED.contains(&name.to_string_lossy().as_ref()) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Substitute the one placeholder the structural templates use.
 fn render(template: &str, name: &str) -> String {
     template.replace("{{PROJECT_NAME}}", name)
@@ -376,6 +511,117 @@ mod tests {
 
     fn board(id: &str) -> &'static Board {
         Board::from_id(id).expect(id)
+    }
+
+    /// A scaffolded project to operate on.
+    fn made(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let s = scaffold_idf_project(parent, name, IdfTemplate::Hello, Some("esp32c3"), None)
+            .expect("scaffold");
+        std::path::PathBuf::from(s.dir)
+    }
+
+    #[test]
+    fn renaming_moves_the_directory_and_the_cmake_name_together() {
+        // They are one identity: the build names <name>.elf from project(),
+        // so moving only the directory leaves a project whose output is named
+        // after its old self.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = made(tmp.path(), "before");
+
+        let r = rename_idf_project(&dir, "after").expect("rename");
+
+        assert_eq!(r.name, "after");
+        assert!(!dir.exists(), "the old directory survived");
+        assert!(r.dir.join("main/before.c").is_file(), "sources are not renamed");
+        let cmake = std::fs::read_to_string(r.dir.join(CMAKELISTS)).unwrap();
+        assert!(cmake.contains("project(after)"), "{cmake}");
+        assert!(!cmake.contains("project(before)"), "{cmake}");
+    }
+
+    #[test]
+    fn a_failed_rename_moves_nothing() {
+        // The CMake rewrite happens first precisely so that a failure leaves
+        // the project where it was rather than moved and mis-named.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = made(tmp.path(), "keep");
+        std::fs::write(dir.join(CMAKELISTS), "# no project call here\n").unwrap();
+
+        let err = rename_idf_project(&dir, "moved").unwrap_err();
+        assert!(err.to_string().contains("project("), "{err}");
+        assert!(dir.exists(), "the project moved despite failing");
+        assert!(!tmp.path().join("moved").exists());
+    }
+
+    #[test]
+    fn renaming_refuses_an_occupied_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = made(tmp.path(), "one");
+        made(tmp.path(), "two");
+
+        let err = rename_idf_project(&dir, "two").unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        // And the source is untouched — including its CMake name.
+        let cmake = std::fs::read_to_string(dir.join(CMAKELISTS)).unwrap();
+        assert!(cmake.contains("project(one)"), "{cmake}");
+    }
+
+    #[test]
+    fn renaming_validates_against_the_cmake_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = made(tmp.path(), "fine");
+        assert!(rename_idf_project(&dir, "2fast").is_err());
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn duplicating_copies_the_sources_but_not_the_build_output() {
+        // build/ and the generated sdkconfig name the SOURCE project inside
+        // them; carrying them across gives the copy stale artefacts under the
+        // wrong name. sdkconfig.defaults is hand-written and must survive.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = made(tmp.path(), "orig");
+        std::fs::create_dir_all(src.join("build")).unwrap();
+        std::fs::write(src.join("build/orig.elf"), "stale").unwrap();
+        std::fs::write(src.join("sdkconfig"), "CONFIG_IDF_TARGET=\"esp32c3\"\n").unwrap();
+
+        let d = duplicate_idf_project(&src, tmp.path(), "copy").expect("duplicate");
+
+        assert!(d.dir.join("main/orig.c").is_file());
+        assert!(d.dir.join(SDKCONFIG_DEFAULTS).is_file(), "defaults must survive");
+        assert!(!d.dir.join("build").exists(), "build/ was copied");
+        assert!(!d.dir.join("sdkconfig").exists(), "generated sdkconfig was copied");
+
+        let cmake = std::fs::read_to_string(d.dir.join(CMAKELISTS)).unwrap();
+        assert!(cmake.contains("project(copy)"), "{cmake}");
+        // The source is untouched.
+        let orig = std::fs::read_to_string(src.join(CMAKELISTS)).unwrap();
+        assert!(orig.contains("project(orig)"), "{orig}");
+    }
+
+    #[test]
+    fn duplicating_never_carries_the_sources_history() {
+        // Same rule as the Arduino clone: a copy gets a fresh repository, not
+        // the original's commits.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = made(tmp.path(), "orig");
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let d = duplicate_idf_project(&src, tmp.path(), "copy").expect("duplicate");
+        assert!(!d.dir.join(".git").exists());
+    }
+
+    #[test]
+    fn a_rewritten_project_call_changes_only_the_name() {
+        // Surgical, like the sdkconfig marker: a rename should be a one-line
+        // diff with every comment intact.
+        let text = "# a comment\ncmake_minimum_required(VERSION 3.16)\nproject(old)\n# trailing\n";
+        let out = rewrite_project_name(text, "new").unwrap();
+        assert_eq!(
+            out,
+            "# a comment\ncmake_minimum_required(VERSION 3.16)\nproject(new)\n# trailing\n"
+        );
+        assert!(rewrite_project_name("no call at all\n", "new").is_none());
     }
 
     #[test]
