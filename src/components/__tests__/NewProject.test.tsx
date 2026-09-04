@@ -5,6 +5,7 @@ import NewProject from "../NewProject";
 
 const createProject = vi.fn();
 const createIdfProject = vi.fn();
+const setLastProjectPlatform = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
@@ -38,7 +39,12 @@ vi.mock("../../api", async () => {
         { id: "hello", label: "Hello", description: "chip info" },
         { id: "blink", label: "Blink", description: "toggle a gpio" },
       ]),
-    knownIdfTargets: vi.fn().mockResolvedValue(["esp32", "esp32s3", "esp32c6"]),
+    knownIdfTargets: vi.fn().mockResolvedValue([
+      { id: "esp32", name: "ESP32", native_usb: false },
+      { id: "esp32s3", name: "ESP32-S3", native_usb: true },
+      { id: "esp32c6", name: "ESP32-C6", native_usb: true },
+    ]),
+    setLastProjectPlatform: (...a: unknown[]) => setLastProjectPlatform(...a),
     boardCatalog: vi.fn().mockResolvedValue({ boards: [S3], caveats: [] }),
     boardCandidates: vi.fn().mockResolvedValue([]),
     setLastProjectParent: vi.fn().mockResolvedValue(undefined),
@@ -64,6 +70,7 @@ const pickIdf = () => fireEvent.click(screen.getByRole("radio", { name: /ESP-IDF
 
 beforeEach(() => {
   createProject.mockReset();
+  setLastProjectPlatform.mockClear();
   createIdfProject.mockReset().mockResolvedValue({
     dir: "/home/p/node",
     name: "node",
@@ -146,5 +153,48 @@ describe("NewProject platform choice", () => {
       (screen.getByRole("button", { name: "Create project" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false);
+  });
+  it("names chips the way Espressif does, not the way tools spell them", () => {
+    // "ESP32-S3" is how the silkscreen, the datasheet and every forum post
+    // write it; `esp32s3` is a spelling only the toolchain uses.
+    setup();
+    pickIdf();
+    return waitFor(() => {
+      expect(screen.getByRole("option", { name: "ESP32-S3" })).toBeTruthy();
+      expect(screen.queryByRole("option", { name: "esp32s3" })).toBeNull();
+    });
+  });
+
+  it("still sends the tool spelling, not the pretty one", async () => {
+    setup();
+    pickIdf();
+    await screen.findByText("Target chip");
+    fireEvent.change(screen.getByTitle(/CONFIG_IDF_TARGET/), {
+      target: { value: "esp32c6" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("blink_node"), {
+      target: { value: "node" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    await waitFor(() =>
+      expect(createIdfProject).toHaveBeenCalledWith(
+        expect.anything(),
+        "node",
+        expect.anything(),
+        "esp32c6",
+        null,
+      ),
+    );
+  });
+
+  it("remembers the platform so a run of ESP-IDF projects need not re-pick it", async () => {
+    setup();
+    pickIdf();
+    await screen.findByText("Target chip");
+    fireEvent.change(screen.getByPlaceholderText("blink_node"), {
+      target: { value: "node" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    await waitFor(() => expect(setLastProjectPlatform).toHaveBeenCalledWith("idf"));
   });
 });

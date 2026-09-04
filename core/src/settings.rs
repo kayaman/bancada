@@ -22,6 +22,14 @@ pub struct AppSettings {
     /// defaulting to the sketchbook.
     #[serde(default)]
     pub last_new_project_parent: Option<String>,
+    /// Which platform the last new project used — `"arduino"` or `"idf"`.
+    ///
+    /// Same reasoning as the parent directory above: someone working through a
+    /// run of ESP-IDF projects should not re-pick the platform every time. Not
+    /// an enum, because an unrecognised value from a newer build must degrade
+    /// to the default rather than fail the whole settings load.
+    #[serde(default)]
+    pub last_new_project_platform: Option<String>,
     /// Recently opened project directories, most-recent-first, deduped,
     /// capped at [`MAX_RECENT`].
     #[serde(default)]
@@ -39,6 +47,16 @@ impl AppSettings {
 
     pub fn set_last_project_parent(&mut self, dir: String) {
         self.last_new_project_parent = Some(dir);
+    }
+
+    /// Remember the platform, ignoring anything that is not one of the two.
+    /// A settings write must never fail a creation, and the same holds for a
+    /// value it cannot make sense of: keep the previous answer rather than
+    /// storing a string the next launch would have to guess at.
+    pub fn set_last_project_platform(&mut self, platform: &str) {
+        if matches!(platform, "arduino" | "idf") {
+            self.last_new_project_platform = Some(platform.to_string());
+        }
     }
 
     pub fn push_recent(&mut self, dir: String) {
@@ -98,6 +116,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_remembered_platform_accepts_only_the_two_that_exist() {
+        let mut s = AppSettings::default();
+        assert_eq!(s.last_new_project_platform, None);
+
+        s.set_last_project_platform("idf");
+        assert_eq!(s.last_new_project_platform.as_deref(), Some("idf"));
+
+        s.set_last_project_platform("arduino");
+        assert_eq!(s.last_new_project_platform.as_deref(), Some("arduino"));
+    }
+
+    #[test]
+    fn an_unrecognised_platform_keeps_the_previous_answer() {
+        // Storing a value the next launch would have to guess at is worse than
+        // storing nothing — the wizard would silently fall back to Arduino
+        // while the settings file claimed something else.
+        let mut s = AppSettings::default();
+        s.set_last_project_platform("idf");
+        for bad in ["", "IDF", "platformio", "esp-idf"] {
+            s.set_last_project_platform(bad);
+            assert_eq!(s.last_new_project_platform.as_deref(), Some("idf"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_platform_existed_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("settings.json");
+        std::fs::write(&p, r#"{"last_new_project_parent":"/home/u/Projects"}"#).unwrap();
+
+        let s = load(&p);
+        assert_eq!(s.last_new_project_parent.as_deref(), Some("/home/u/Projects"));
+        assert_eq!(s.last_new_project_platform, None);
+    }
+
+    #[test]
     fn roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("settings.json");
@@ -105,6 +159,7 @@ mod tests {
             last_sketch_dir: Some("/home/me/sketch".into()),
             last_open_file: Some("src/x.cpp".into()),
             last_new_project_parent: Some("/home/me/Projects".into()),
+            last_new_project_platform: Some("idf".into()),
             recent_projects: vec!["/home/me/sketch".into(), "/home/me/other".into()],
         };
         save(&p, &s).unwrap();
@@ -180,6 +235,7 @@ mod tests {
             last_sketch_dir: Some("/sketch".into()),
             last_open_file: Some("x.cpp".into()),
             last_new_project_parent: Some("/parent".into()),
+            last_new_project_platform: None,
             recent_projects: vec!["/r".into()],
         };
 

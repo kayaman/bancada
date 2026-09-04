@@ -590,6 +590,11 @@ describe("build, upload and monitor", () => {
     expect(called()).toEqual(["known_idf_targets"]);
   });
 
+  it("setLastProjectPlatform names the platform", async () => {
+    await api.setLastProjectPlatform("idf");
+    expect(called()).toEqual(["set_last_project_platform", { platform: "idf" }]);
+  });
+
   it("boardCandidates asks by fqbn", async () => {
     await api.boardCandidates("esp32:esp32:esp32s3");
     expect(called()).toEqual([

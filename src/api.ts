@@ -302,6 +302,9 @@ export interface AppSettings {
   last_sketch_dir?: string | null;
   last_open_file?: string | null;
   last_new_project_parent?: string | null;
+  /** "arduino" | "idf" — a string, not a union, because an unrecognised value
+   *  from a newer build must degrade to the default rather than fail the load. */
+  last_new_project_platform?: string | null;
   /** Most-recently-opened first; the backend caps and dedupes the list. */
   recent_projects?: string[];
 }
@@ -754,7 +757,23 @@ export const listIdfTemplates = () =>
 
 /** The chips a new ESP-IDF project may target, from core's own table.
  *  Distinct from `listIdfTargets`, which asks an installed `idf.py`. */
-export const knownIdfTargets = () => invoke<string[]>("known_idf_targets");
+export const knownIdfTargets = () => invoke<IdfTargetOption[]>("known_idf_targets");
+
+/** A chip as the wizard offers it. `id` is what tools accept and what lands in
+ *  sdkconfig.defaults; `name` is Espressif's own spelling — "ESP32-S3" is how
+ *  the silkscreen and the datasheet write it, and `esp32s3` is a spelling only
+ *  tools use. */
+export interface IdfTargetOption {
+  id: string;
+  name: string;
+  /** Has a built-in USB-Serial/JTAG peripheral, so no bridge chip is needed. */
+  native_usb: boolean;
+}
+
+/** Remember which platform the last new project used. A convenience — never
+ *  allowed to fail a creation. */
+export const setLastProjectPlatform = (platform: string) =>
+  invoke<void>("set_last_project_platform", { platform });
 
 /** The devkits Bancada models for an FQBN's chip. Empty is a real answer —
  *  render it as "no board profile", never as clean wiring. */

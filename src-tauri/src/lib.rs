@@ -1190,11 +1190,30 @@ fn list_idf_templates() -> Vec<bancada_core::idfproject::IdfTemplateInfo> {
 /// practice; where they differ, the install is authoritative and says so at
 /// build time.
 #[tauri::command]
-fn known_idf_targets() -> Vec<&'static str> {
+fn known_idf_targets() -> Vec<IdfTargetOption> {
     bancada_core::targets::KNOWN_TARGETS
         .iter()
-        .map(|t| t.id)
+        .map(|t| IdfTargetOption {
+            id: t.id,
+            name: t.name,
+            native_usb: t.native_usb,
+        })
         .collect()
+}
+
+/// A chip as the wizard offers it.
+///
+/// `id` is what goes into `sdkconfig.defaults`; `name` is Espressif's own
+/// spelling, which is what a person reading a picker is looking for —
+/// "ESP32-S3" is how the silkscreen, the datasheet and every forum post write
+/// it, and `esp32s3` is a spelling only tools use.
+#[derive(serde::Serialize)]
+struct IdfTargetOption {
+    id: &'static str,
+    name: &'static str,
+    /// Whether the SoC has a built-in USB-Serial/JTAG peripheral, so the
+    /// wizard can say the board needs no bridge chip to be flashed.
+    native_usb: bool,
 }
 
 /// Create an ESP-IDF project: the CMake tree, a starter, and git.
@@ -2769,6 +2788,14 @@ fn set_last_sketch(app: AppHandle, dir: String, open_file: Option<String>) -> Re
 #[tauri::command]
 fn set_last_project_parent(app: AppHandle, dir: String) -> Result<(), String> {
     update_settings(&app, |s| s.set_last_project_parent(dir))
+}
+
+/// Remember which platform the last new project used, so a run of ESP-IDF
+/// projects does not mean re-picking it every time. Same contract as the
+/// parent directory: a convenience, never allowed to fail a creation.
+#[tauri::command]
+fn set_last_project_platform(app: AppHandle, platform: String) -> Result<(), String> {
+    update_settings(&app, |s| s.set_last_project_platform(&platform))
 }
 
 #[tauri::command]
@@ -5562,6 +5589,7 @@ pub fn run() {
             read_theme_file,
             set_last_sketch,
             set_last_project_parent,
+            set_last_project_platform,
             push_recent_project,
             remove_recent_project,
             read_board_mac,

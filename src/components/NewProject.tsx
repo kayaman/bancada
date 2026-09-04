@@ -14,8 +14,10 @@ import {
   loadSettings,
   searchLibraries,
   setLastProjectParent,
+  setLastProjectPlatform,
   type Board,
   type BoardOption,
+  type IdfTargetOption,
   type IdfTemplate,
   type IndexedLibrary,
   type NewProjectPlatform,
@@ -55,7 +57,7 @@ export default function NewProject({
   const [platform, setPlatform] = useState<NewProjectPlatform>("arduino");
   const [idfTemplates, setIdfTemplates] = useState<IdfTemplate[]>([]);
   const [idfTemplate, setIdfTemplate] = useState("hello");
-  const [idfTargets, setIdfTargets] = useState<string[]>([]);
+  const [idfTargets, setIdfTargets] = useState<IdfTargetOption[]>([]);
   const [idfTarget, setIdfTarget] = useState("");
   /** Every modelled devkit, for filtering by target on the ESP-IDF side. */
   const [allBoards, setAllBoards] = useState<Board[]>([]);
@@ -77,6 +79,10 @@ export default function NewProject({
       ]);
       if (cancelled) return;
       setParent(settings.last_new_project_parent || fallback);
+      // Someone working through a run of ESP-IDF projects should not re-pick
+      // the platform every time. Anything unrecognised falls through to the
+      // Arduino default rather than being trusted.
+      if (settings.last_new_project_platform === "idf") setPlatform("idf");
     })();
     listAllBoards()
       .then((b) => {
@@ -134,7 +140,7 @@ export default function NewProject({
     let cancelled = false;
     Promise.all([
       listIdfTemplates().catch(() => [] as IdfTemplate[]),
-      knownIdfTargets().catch(() => [] as string[]),
+      knownIdfTargets().catch(() => [] as IdfTargetOption[]),
       boardCatalog().then((c) => c.boards).catch(() => [] as Board[]),
     ]).then(([tmpls, targets, boards]) => {
       if (cancelled) return;
@@ -143,7 +149,7 @@ export default function NewProject({
       setAllBoards(boards);
       // Preselect the chip of the attached board when we can name it, so the
       // common case — a board is plugged in — needs no choice at all.
-      setIdfTarget((t) => t || detectedTarget || targets[0] || "");
+      setIdfTarget((t) => t || detectedTarget || targets[0]?.id || "");
     });
     return () => {
       cancelled = true;
@@ -212,6 +218,7 @@ export default function NewProject({
           board || null,
         );
         setLastProjectParent(parent).catch(() => {});
+        setLastProjectPlatform("idf").catch(() => {});
         // Same non-fatal boundary as the Arduino side: the project exists and
         // builds without git, so name what fell short rather than hiding it
         // behind a plain success.
@@ -235,8 +242,9 @@ export default function NewProject({
         template,
         board || null,
       );
-      // Remembering the parent is a convenience; never fail creation over it.
+      // Remembering these is a convenience; never fail creation over them.
       setLastProjectParent(parent).catch(() => {});
+      setLastProjectPlatform("arduino").catch(() => {});
       // Both are non-fatal: the sketch exists and builds either way, so say
       // what fell short rather than hiding it behind a plain success.
       const warnings: string[] = [];
@@ -387,8 +395,8 @@ export default function NewProject({
                 title="Written to sdkconfig.defaults as CONFIG_IDF_TARGET"
               >
                 {idfTargets.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
+                  <option key={t.id} value={t.id}>
+                    {t.name}
                   </option>
                 ))}
               </select>

@@ -4,7 +4,7 @@ Everything that crosses the Rust ↔ webview boundary. Four mechanisms:
 
 | Mechanism | Direction | Count | Use |
 |---|---|---|---|
-| `invoke` commands | frontend → Rust, request/response | **108** | everything transactional |
+| `invoke` commands | frontend → Rust, request/response | **109** | everything transactional |
 | Tauri events | Rust → frontend, broadcast | **7** | line streams, hotplug, agent |
 | `Channel<T>` | Rust → frontend, per-session | **3** | high-rate or per-panel streams |
 | Loopback MCP | agent → Rust, HTTP JSON-RPC | 5 tools | the AI Assistant's tools |
@@ -33,7 +33,7 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (108)
+## 2. Commands (109)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
@@ -87,7 +87,10 @@ chosen chip goes into `sdkconfig.defaults` as `CONFIG_IDF_TARGET` (the mechanism
 provides for stating a target before the first configure) rather than through
 `idf.py set-target`, which would need that install. `known_idf_targets` reads core's
 own table for the same reason, and is distinct from `list_idf_targets`, which asks an
-installed `idf.py` and is authoritative once there is one.
+installed `idf.py` and is authoritative once there is one. It returns `{ id, name,
+native_usb }` rather than bare ids: `id` is what tools accept and what lands in
+`sdkconfig.defaults`, while `name` is Espressif's own spelling — "ESP32-S3" is how the
+silkscreen and the datasheet write it, and `esp32s3` is a spelling only tools use.
 
 It scaffolds into a dot-prefixed staging directory and renames it into place, so a
 failure part-way leaves nothing rather than a half-tree `detect_kind` would accept.
