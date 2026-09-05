@@ -999,7 +999,7 @@ export default function App() {
       .then((v) => notify(`arduino-cli ${v} detected.`))
       .catch(() =>
         notify(
-          "arduino-cli not found on PATH — install it to enable builds.",
+          "arduino-cli not found on PATH — Arduino builds and board identification are unavailable until it is installed.",
           true,
         ),
       );

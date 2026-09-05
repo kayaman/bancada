@@ -1233,7 +1233,12 @@ mod tests {
         run(&[
             "-C",
             sketch.to_str().unwrap(),
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=",
             "commit",
+            "--no-verify",
             "-m",
             "add tracked file",
         ])
@@ -1340,7 +1345,20 @@ mod tests {
         // left staged) so only `térmica.ino`'s later edit shows up as dirty.
         run(&["-C", d, "add", "-f", "configuração/secrets.h"]).unwrap();
         run(&["-C", d, "add", "térmica.ino"]).unwrap();
-        run(&["-C", d, "commit", "--quiet", "-m", "base"]).unwrap();
+        run(&[
+            "-C",
+            d,
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            "base",
+        ])
+        .unwrap();
 
         std::fs::write(dir.join("térmica.ino"), "void setup() { }\n").unwrap();
 
@@ -1655,7 +1673,20 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         std::fs::write(dir.join(name), content).unwrap();
         let d = dir.to_str().unwrap();
         run(&["-C", d, "add", "-A"]).unwrap();
-        run(&["-C", d, "commit", "--quiet", "-m", msg]).unwrap();
+        run(&[
+            "-C",
+            d,
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=",
+            "commit",
+            "--no-verify",
+            "--quiet",
+            "-m",
+            msg,
+        ])
+        .unwrap();
     }
 
     /// Two clones of one file:// remote — the two-machine bench story. The
@@ -1694,6 +1725,18 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         .unwrap();
         run(&["-C", a.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
         run(&["-C", a.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
+        // Local config beats this machine's global one: sync's rebase
+        // re-creates commits, and a global `commit.gpgsign=true` with no
+        // key here would sign-fail a test that is about divergence.
+        run(&[
+            "-C",
+            a.to_str().unwrap(),
+            "config",
+            "commit.gpgsign",
+            "false",
+        ])
+        .unwrap();
+        run(&["-C", a.to_str().unwrap(), "config", "core.hooksPath", ""]).unwrap();
         commit_file(&a, "seed.ino", "void setup() {}\n", "seed");
         run(&[
             "-C",
@@ -1715,6 +1758,15 @@ u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt\0\
         .unwrap();
         run(&["-C", b.to_str().unwrap(), "config", "user.name", "T"]).unwrap();
         run(&["-C", b.to_str().unwrap(), "config", "user.email", "t@t"]).unwrap();
+        run(&[
+            "-C",
+            b.to_str().unwrap(),
+            "config",
+            "commit.gpgsign",
+            "false",
+        ])
+        .unwrap();
+        run(&["-C", b.to_str().unwrap(), "config", "core.hooksPath", ""]).unwrap();
         (a, b)
     }
 

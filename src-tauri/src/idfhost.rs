@@ -2,8 +2,9 @@
 //! environment it publishes.
 //!
 //! The pure half lives in [`bancada_core::idfenv`]; what is here is the part
-//! that must know about *this machine* (the installer registry under `$HOME`)
-//! and about *this process* (a cache with a lifetime).
+//! that must know about *this machine* (the installer registry and
+//! `install.sh`'s record file under `$HOME`) and about *this process* (a cache
+//! with a lifetime).
 //!
 //! ## Lock discipline
 //!
@@ -80,59 +81,71 @@ impl IdfProbe {
     }
 }
 
-/// Where the ESP-IDF installer records what it installed.
+/// Where ESP-IDF installations are recorded on this machine: the installer's
+/// `eim_idf.json`, and `install.sh`'s `idf-env.json` under `IDF_TOOLS_PATH`.
 ///
-/// `BANCADA_IDF_REGISTRY` overrides it, which is what the live tests use.
-/// The ambient `IDF_PATH` is deliberately **not** consulted: a windowed app
-/// launched from a desktop file has no shell environment, and on a machine
-/// with more than one IDF tree the exported one is as likely to be a
+/// `BANCADA_IDF_REGISTRY` overrides the installer file and
+/// `BANCADA_IDF_TOOLS_PATH` the tools directory, which is what the live tests
+/// use. The ambient `IDF_PATH` is deliberately **not** consulted: a windowed
+/// app launched from a desktop file has no shell environment, and on a
+/// machine with more than one IDF tree the exported one is as likely to be a
 /// half-installed checkout as the working install.
-pub fn registry_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("BANCADA_IDF_REGISTRY") {
-        return PathBuf::from(p);
-    }
+pub fn registry_paths() -> idfenv::RegistryPaths {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".espressif/tools/eim_idf.json")
+    let mut paths = idfenv::RegistryPaths::under_home(Path::new(&home));
+    if let Some(p) = std::env::var_os("BANCADA_IDF_REGISTRY") {
+        paths.installer = PathBuf::from(p);
+    }
+    if let Some(p) = std::env::var_os("BANCADA_IDF_TOOLS_PATH") {
+        paths.tools_dir = PathBuf::from(p);
+    }
+    paths
+}
+
+/// Identity of both record files at once. `None` for one that is absent —
+/// which is itself a state worth keying on, since creating the file is how
+/// an install appears.
+type RegistryStamp = (Option<FileStamp>, Option<FileStamp>);
+
+fn registry_stamp(paths: &idfenv::RegistryPaths) -> RegistryStamp {
+    (stamp(&paths.installer), stamp(&paths.idf_env()))
 }
 
 /// Resolved ESP-IDF, cached against the files it was derived from.
 #[derive(Debug, Default)]
 pub struct IdfEnvCache {
-    /// Keyed on the registry file.
-    install: Option<(FileStamp, Result<idfenv::IdfInstall, String>)>,
-    /// Keyed on the activation script.
+    /// Keyed on both record files.
+    install: Option<(RegistryStamp, Result<idfenv::IdfInstall, String>)>,
+    /// Keyed on the activation script (or `idf_tools.py`, for a manual install).
     activated: Option<(FileStamp, Result<IdfCli, String>)>,
     targets: Option<Vec<String>>,
 }
 
 impl IdfEnvCache {
-    /// The chosen installation, re-reading the registry only when it changed.
+    /// The chosen installation, re-reading the records only when one changed.
     ///
     /// Negative results are cached under the same key, so a machine with no
     /// ESP-IDF does not respawn anything on every poll — but they expire the
-    /// moment the file does change, so installing ESP-IDF takes effect without
+    /// moment a file does change, so installing ESP-IDF takes effect without
     /// restarting Bancada.
     fn install(&mut self) -> Result<idfenv::IdfInstall, String> {
-        let path = registry_path();
-        let Some(now) = stamp(&path) else {
-            let e = IdfEnvError::NoRegistry { path };
+        let paths = registry_paths();
+        let now = registry_stamp(&paths);
+        if now == (None, None) {
             self.install = None;
-            return Err(e.to_string());
-        };
+            return Err(IdfEnvError::NotInstalled {
+                manual: paths.idf_env(),
+                installer: paths.installer,
+            }
+            .to_string());
+        }
         if let Some((seen, cached)) = &self.install {
             if *seen == now {
                 return cached.clone();
             }
         }
         let resolved = (|| {
-            let json = std::fs::read_to_string(&path).map_err(|source| {
-                IdfEnvError::RegistryUnreadable {
-                    path: path.clone(),
-                    source,
-                }
-                .to_string()
-            })?;
-            let reg = idfenv::parse_registry(&json, &path).map_err(|e| e.to_string())?;
+            let reg = idfenv::discover(&paths).map_err(|e| e.to_string())?;
             let prefer = std::env::var("BANCADA_IDF_VERSION").ok();
             let install =
                 idfenv::select_install(&reg, prefer.as_deref()).map_err(|e| e.to_string())?;
@@ -165,7 +178,10 @@ impl IdfEnvCache {
         let inherited = std::env::var("PATH").unwrap_or_default();
         let built = idfenv::activate(&install, &inherited)
             .map_err(|e| e.to_string())
-            .map(|env| IdfCli::new(install.python.clone(), install.path.clone(), env));
+            .map(|env| {
+                let python = idfenv::venv_python(&env, &install.python);
+                IdfCli::new(python, install.path.clone(), env)
+            });
         self.activated = Some((now, built.clone()));
         self.targets = None;
         built

@@ -1,0 +1,16 @@
+{
+    "idfInstalled": {
+        "/home/u/esp/esp-idf-v6.1": {
+            "version": "6.1",
+            "path": "/home/u/esp/esp-idf",
+            "features": [
+                "core"
+            ],
+            "targets": [
+                "esp32c6",
+                "esp32s3",
+                "esp32"
+            ]
+        }
+    }
+}

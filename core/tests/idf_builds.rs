@@ -14,23 +14,28 @@ fn enabled() -> bool {
     std::env::var("BANCADA_IDF_LIVE").as_deref() == Ok("1")
 }
 
+/// The same two record files the app consults, with the same overrides.
+fn registry_paths() -> idfenv::RegistryPaths {
+    let home = std::env::var("HOME").expect("HOME");
+    let mut paths = idfenv::RegistryPaths::under_home(std::path::Path::new(&home));
+    if let Some(p) = std::env::var_os("BANCADA_IDF_REGISTRY") {
+        paths.installer = PathBuf::from(p);
+    }
+    if let Some(p) = std::env::var_os("BANCADA_IDF_TOOLS_PATH") {
+        paths.tools_dir = PathBuf::from(p);
+    }
+    paths
+}
+
 fn resolve() -> (idf::IdfCli, PathBuf) {
-    let reg_path = std::env::var_os("BANCADA_IDF_REGISTRY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap()).join(".espressif/tools/eim_idf.json")
-        });
-    let json = std::fs::read_to_string(&reg_path).expect("read registry");
-    let reg = idfenv::parse_registry(&json, &reg_path).expect("parse registry");
+    let reg = idfenv::discover(&registry_paths()).expect("discover an install");
     let prefer = std::env::var("BANCADA_IDF_VERSION").ok();
     let install = idfenv::select_install(&reg, prefer.as_deref()).expect("select");
-    let env = idfenv::activate(install, &std::env::var("PATH").unwrap_or_default())
-        .expect("activate");
+    let env =
+        idfenv::activate(install, &std::env::var("PATH").unwrap_or_default()).expect("activate");
+    let python = idfenv::venv_python(&env, &install.python);
     let idf_path = install.path.clone();
-    (
-        idf::IdfCli::new(install.python.clone(), idf_path.clone(), env),
-        idf_path,
-    )
+    (idf::IdfCli::new(python, idf_path.clone(), env), idf_path)
 }
 
 #[test]
@@ -91,10 +96,11 @@ fn a_broken_build_yields_an_excerpt_the_agent_can_act_on() {
     copy_dir(&idf_path.join("examples/get-started/hello_world"), &work);
 
     let mut log = Vec::new();
-    assert!(cli
-        .set_target(&work, "esp32c3", |l| log.push(l.line))
-        .expect("set-target ran")
-        .success);
+    assert!(
+        cli.set_target(&work, "esp32c3", |l| log.push(l.line))
+            .expect("set-target ran")
+            .success
+    );
 
     // Introduce an ordinary compile error.
     let main_c = work.join("main/hello_world_main.c");
@@ -127,10 +133,15 @@ fn a_broken_build_yields_an_excerpt_the_agent_can_act_on() {
         "the excerpt must name the offending symbol:\n{text}"
     );
     assert!(
-        !excerpt.iter().any(|l| l.starts_with("[") && l.contains("] Building")),
+        !excerpt
+            .iter()
+            .any(|l| l.starts_with("[") && l.contains("] Building")),
         "ninja progress leaked into the excerpt"
     );
-    assert!(bytes < 8_000, "excerpt was {bytes} bytes; too noisy to be useful");
+    assert!(
+        bytes < 8_000,
+        "excerpt was {bytes} bytes; too noisy to be useful"
+    );
 
     let _ = std::fs::remove_dir_all(&work);
 }
@@ -154,10 +165,11 @@ fn a_real_sdkconfig_reports_its_console_channel() {
     // 1. Stock. ESP-IDF defaults to a UART primary *with* the USB Serial/JTAG
     //    secondary, which is precisely why a UART console is not evidence of
     //    silence on its own.
-    assert!(cli
-        .set_target(&work, "esp32c3", |l| log.push(l.line))
-        .expect("set-target")
-        .success);
+    assert!(
+        cli.set_target(&work, "esp32c3", |l| log.push(l.line))
+            .expect("set-target")
+            .success
+    );
     let stock = parse_sdkconfig_console(&read(&work)).expect("stock console");
     assert_eq!(stock.channel, IdfConsoleChannel::Uart);
     assert!(
@@ -175,10 +187,11 @@ fn a_real_sdkconfig_reports_its_console_channel() {
     .unwrap();
     std::fs::remove_file(work.join("sdkconfig")).unwrap();
     log.clear();
-    assert!(cli
-        .set_target(&work, "esp32c3", |l| log.push(l.line))
-        .expect("set-target")
-        .success);
+    assert!(
+        cli.set_target(&work, "esp32c3", |l| log.push(l.line))
+            .expect("set-target")
+            .success
+    );
     let jtag = parse_sdkconfig_console(&read(&work)).expect("jtag console");
     assert_eq!(jtag.channel, IdfConsoleChannel::UsbSerialJtag);
     assert_eq!(jtag.baudrate, None);

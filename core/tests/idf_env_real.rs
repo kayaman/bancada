@@ -12,13 +12,17 @@ use std::path::{Path, PathBuf};
 
 use bancada_core::idfenv;
 
-fn registry_path() -> PathBuf {
-    std::env::var_os("BANCADA_IDF_REGISTRY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").expect("HOME"))
-                .join(".espressif/tools/eim_idf.json")
-        })
+/// The same two record files the app consults, with the same overrides.
+fn registry_paths() -> idfenv::RegistryPaths {
+    let home = std::env::var("HOME").expect("HOME");
+    let mut paths = idfenv::RegistryPaths::under_home(Path::new(&home));
+    if let Some(p) = std::env::var_os("BANCADA_IDF_REGISTRY") {
+        paths.installer = PathBuf::from(p);
+    }
+    if let Some(p) = std::env::var_os("BANCADA_IDF_TOOLS_PATH") {
+        paths.tools_dir = PathBuf::from(p);
+    }
+    paths
 }
 
 fn enabled() -> bool {
@@ -36,14 +40,24 @@ fn a_real_install_activates_and_yields_a_usable_toolchain() {
         eprintln!("skipped: set BANCADA_IDF_LIVE=1 to run");
         return;
     }
-    let reg_path = registry_path();
+    let paths = registry_paths();
+    // Whichever record file this machine has is the one that must not move.
+    let reg_path = if paths.installer.exists() {
+        paths.installer.clone()
+    } else {
+        paths.idf_env()
+    };
     let before = stamp(&reg_path);
 
-    let json = std::fs::read_to_string(&reg_path).expect("read registry");
-    let reg = idfenv::parse_registry(&json, &reg_path).expect("parse registry");
+    let reg = idfenv::discover(&paths).expect("discover an install");
     let prefer = std::env::var("BANCADA_IDF_VERSION").ok();
     let install = idfenv::select_install(&reg, prefer.as_deref()).expect("select install");
-    eprintln!("using ESP-IDF {} at {}", install.name, install.path.display());
+    eprintln!(
+        "using ESP-IDF {} ({:?}) at {}",
+        install.name,
+        install.source,
+        install.path.display()
+    );
 
     idfenv::validate_install(install).expect("install is complete");
 
@@ -67,6 +81,16 @@ fn a_real_install_activates_and_yields_a_usable_toolchain() {
     for dir in inherited.split(':').filter(|d| !d.is_empty()).take(3) {
         assert!(path.contains(dir), "inherited PATH entry {dir} was lost");
     }
+    // …and a manual install's `$PATH` placeholder must not survive as a
+    // directory literally named that.
+    assert!(
+        !path.split(':').any(|d| d == "$PATH"),
+        "placeholder leaked: {path}"
+    );
+
+    // The interpreter idf.py will run under must be real.
+    let python = idfenv::venv_python(&env, &install.python);
+    assert!(python.exists(), "no interpreter at {}", python.display());
 
     // A cross-compiler must actually be reachable — this is what proves the
     // env map is sufficient, not merely well-formed.
@@ -78,6 +102,8 @@ fn a_real_install_activates_and_yields_a_usable_toolchain() {
 
     // The whole reason we use `-e` instead of sourcing: sourcing would run the
     // script's trailing `eim select` and rewrite the registry we just read.
+    // (`idf_tools.py export` has no such side effect, but the invariant is
+    // the same for both.)
     assert_eq!(
         stamp(&reg_path),
         before,
@@ -86,9 +112,12 @@ fn a_real_install_activates_and_yields_a_usable_toolchain() {
 }
 
 #[test]
-fn a_bogus_registry_path_reports_that_esp_idf_is_not_installed() {
+fn a_home_with_no_records_reports_that_esp_idf_is_not_installed() {
     // Runs unconditionally: it needs no install.
-    let p = PathBuf::from("/nonexistent/eim_idf.json");
-    let err = std::fs::read_to_string(&p).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    let paths = idfenv::RegistryPaths::under_home(Path::new("/nonexistent/home"));
+    let err = idfenv::discover(&paths).unwrap_err();
+    assert!(
+        matches!(err, idfenv::IdfEnvError::NotInstalled { .. }),
+        "{err}"
+    );
 }

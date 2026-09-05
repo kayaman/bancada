@@ -23,19 +23,27 @@ fn enabled() -> bool {
     std::env::var("BANCADA_IDF_LIVE").as_deref() == Ok("1")
 }
 
+/// The same two record files the app consults, with the same overrides.
+fn registry_paths() -> idfenv::RegistryPaths {
+    let home = std::env::var("HOME").expect("HOME");
+    let mut paths = idfenv::RegistryPaths::under_home(std::path::Path::new(&home));
+    if let Some(p) = std::env::var_os("BANCADA_IDF_REGISTRY") {
+        paths.installer = PathBuf::from(p);
+    }
+    if let Some(p) = std::env::var_os("BANCADA_IDF_TOOLS_PATH") {
+        paths.tools_dir = PathBuf::from(p);
+    }
+    paths
+}
+
 fn resolve() -> idf::IdfCli {
-    let reg_path = std::env::var_os("BANCADA_IDF_REGISTRY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var("HOME").unwrap()).join(".espressif/tools/eim_idf.json")
-        });
-    let json = std::fs::read_to_string(&reg_path).expect("read registry");
-    let reg = idfenv::parse_registry(&json, &reg_path).expect("parse registry");
+    let reg = idfenv::discover(&registry_paths()).expect("discover an install");
     let prefer = std::env::var("BANCADA_IDF_VERSION").ok();
     let install = idfenv::select_install(&reg, prefer.as_deref()).expect("select");
-    let env = idfenv::activate(install, &std::env::var("PATH").unwrap_or_default())
-        .expect("activate");
-    idf::IdfCli::new(install.python.clone(), install.path.clone(), env)
+    let env =
+        idfenv::activate(install, &std::env::var("PATH").unwrap_or_default()).expect("activate");
+    let python = idfenv::venv_python(&env, &install.python);
+    idf::IdfCli::new(python, install.path.clone(), env)
 }
 
 /// The chip every starter is built for. Small and fast; the templates are

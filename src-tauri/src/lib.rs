@@ -470,9 +470,20 @@ async fn cli_version(state: State<'_, AppState>) -> Result<String, String> {
 #[tauri::command]
 async fn list_boards(state: State<'_, AppState>) -> Result<Vec<DetectedPort>, String> {
     let cli = state.cli.clone();
-    tauri::async_runtime::spawn_blocking(move || cli.board_list().map_err(err_str))
-        .await
-        .map_err(err_str)?
+    tauri::async_runtime::spawn_blocking(move || match cli.board_list() {
+        // No arduino-cli is a supported bench, not an error: an ESP-IDF-only
+        // machine still has ports to pick from. Enumerate them ourselves and
+        // leave identification empty — the startup toast has already said
+        // what is missing, and a rescan every hotplug tick must not repeat it.
+        Err(bancada_core::Error::ToolMissing(_)) => Ok(
+            bancada_core::ports::detected_from_serial(
+                &serialport::available_ports().map_err(err_str)?,
+            ),
+        ),
+        other => other.map_err(err_str),
+    })
+    .await
+    .map_err(err_str)?
 }
 
 // ---------- sketch / files ----------

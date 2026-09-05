@@ -12,7 +12,53 @@
 //! board on the new device — at any poll rate, by construction.
 
 use serialport::{SerialPortInfo, SerialPortType};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::types::{DetectedPort, Port};
+
+/// Attached ports as arduino-cli would report them, minus the identification.
+///
+/// This is the port list when `arduino-cli` is not installed — an ESP-IDF-only
+/// bench has no reason to have it, and without this the port picker stayed
+/// empty and every rescan raised a "could not find arduino-cli" toast.
+/// `matching_boards` is empty for every entry: identification is
+/// arduino-cli's job and nothing here guesses at it. The `properties` keys and
+/// value formats (`0x303A`) match arduino-cli's so [`crate::fleet`] can read a
+/// fallback port the same way it reads a real one.
+pub fn detected_from_serial(ports: &[SerialPortInfo]) -> Vec<DetectedPort> {
+    let mut out: Vec<DetectedPort> = ports
+        .iter()
+        .map(|p| {
+            let mut properties = BTreeMap::new();
+            let mut hardware_id = String::new();
+            let protocol_label = match &p.port_type {
+                SerialPortType::UsbPort(u) => {
+                    properties.insert("vid".to_string(), format!("0x{:04X}", u.vid));
+                    properties.insert("pid".to_string(), format!("0x{:04X}", u.pid));
+                    if let Some(s) = &u.serial_number {
+                        properties.insert("serialNumber".to_string(), s.clone());
+                        hardware_id = s.clone();
+                    }
+                    "Serial Port (USB)"
+                }
+                _ => "Serial Port",
+            };
+            DetectedPort {
+                port: Port {
+                    address: p.port_name.clone(),
+                    label: p.port_name.clone(),
+                    protocol: "serial".to_string(),
+                    protocol_label: protocol_label.to_string(),
+                    properties,
+                    hardware_id,
+                },
+                matching_boards: Vec::new(),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.port.address.cmp(&b.port.address));
+    out
+}
 
 /// A stable identity for one attached port: the device name plus, for USB
 /// ports, `vid:pid:serial`. A bridge without a serial number degrades to
@@ -121,6 +167,39 @@ mod tests {
         // not a change (nothing observable distinguishes them).
         let again = keyset(&[usb("/dev/ttyACM0", 0x1a86, 0x55d3, None)]);
         assert!(!ports_changed(Some(&ch343), &again));
+    }
+
+    #[test]
+    fn fallback_ports_carry_arduino_cli_shaped_usb_properties() {
+        let ports = [
+            usb("/dev/ttyUSB0", 0x10c4, 0xea60, None),
+            usb("/dev/ttyACM0", 0x303a, 0x1001, Some("44:1B:F6:CE:A3:B8")),
+        ];
+        let out = detected_from_serial(&ports);
+        // Sorted by address, so the picker is stable across polls.
+        assert_eq!(out[0].port.address, "/dev/ttyACM0");
+        assert_eq!(out[0].port.protocol, "serial");
+        assert_eq!(out[0].port.protocol_label, "Serial Port (USB)");
+        assert_eq!(out[0].port.properties["vid"], "0x303A");
+        assert_eq!(out[0].port.properties["pid"], "0x1001");
+        assert_eq!(out[0].port.properties["serialNumber"], "44:1B:F6:CE:A3:B8");
+        assert_eq!(out[0].port.hardware_id, "44:1B:F6:CE:A3:B8");
+        assert!(out[0].matching_boards.is_empty(), "nothing here identifies");
+        // A serial-less bridge has no serialNumber key at all, matching
+        // arduino-cli, so fleet's "unidentified" path is taken.
+        assert!(!out[1].port.properties.contains_key("serialNumber"));
+        assert_eq!(out[1].port.hardware_id, "");
+    }
+
+    #[test]
+    fn a_non_usb_fallback_port_has_no_usb_properties() {
+        let p = SerialPortInfo {
+            port_name: "/dev/ttyS0".to_string(),
+            port_type: SerialPortType::Unknown,
+        };
+        let out = detected_from_serial(&[p]);
+        assert_eq!(out[0].port.protocol_label, "Serial Port");
+        assert!(out[0].port.properties.is_empty());
     }
 
     #[test]
