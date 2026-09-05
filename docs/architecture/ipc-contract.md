@@ -33,12 +33,22 @@ command means adding its contract test.**
 
 ---
 
-## 2. Commands (109)
+## 2. Commands (111)
 
 Grouped by domain; the order within each group follows `generate_handler!`.
 
-### Environment and toolchain — 4
-`cli_version` · `list_boards` · `sketchbook_dir` · `default_project_parent`
+### Environment and toolchain — 6
+`cli_version` · `list_boards` · `sketchbook_dir` · `default_project_parent` ·
+`setup_probe` · `setup_install_arduino_cli`
+
+`list_boards` falls back to direct serial enumeration when `arduino-cli` is
+absent — same `DetectedPort` shape, no `matching_boards` — so an ESP-IDF-only
+bench still has a port picker. `setup_probe` returns
+`{ tools: ToolStatus[], serial: SerialStatus, path }` for the 🧰 Setup panel:
+one `--version` spawn per engine, on demand, never on a timer.
+`setup_install_arduino_cli` runs the official installer into `~/.local/bin`
+and returns `{ ok, bindir, log }`; it is the only install the app performs
+itself.
 
 ### Sketch files and explorer — 8
 `list_sketch_files` · `read_sketch_file` · `write_sketch_file` ·

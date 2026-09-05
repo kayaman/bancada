@@ -93,6 +93,7 @@ Tauri layer is uniformly `.map_err(err_str)`.
 |---|---|---|
 | `chatlog.rs` | 801 | Assistant transcripts as NDJSON under `<chats_root>/<sketch_key>/`. `sketch_key` is an fnv1a-64 hex digest plus a sanitised basename. Listing, loading, per-project totals, pruning, and `rename_key` — **both halves of the key change when a project is renamed**, so without it the transcripts stay on disk and become unreachable. |
 | `usage.rs` | 537 | Cumulative per-project cost/token/turn accounting (`usage.json`, versioned). Survives chat pruning, which is why it is separate from `chatlog`. `ProjectUsage.key` carries the map key so callers never re-hash the display path; `rename_project_key` moves an entry rather than letting a rename split it in two. |
+| `setup.rs` | 330 | First-run setup, the pure half: the catalogue of engines (`TOOLS`, with purpose and install command), `augmented_path` (why a desktop-launched app must add `~/.local/bin` itself), `find_on_path`, serial-group policy (`serial_access` — the attached device's owning group is authoritative, else `dialout`/`uucp` by what `/etc/group` defines), and the two-step arduino-cli install argv. Probing and installing live in `src-tauri/src/setup.rs`. |
 | `settings.rs` | 244 | `AppSettings` — last project and open file, last project parent, recent projects (`MAX_RECENT = 10`). `replace_recent` swaps an entry **in place**: a rename is not a visit and should not reorder the list. |
 
 All four take their paths and their clock from the caller — see
@@ -102,8 +103,11 @@ All four take their paths and their clock from the caller — see
 
 ## 2. `src-tauri` — the Tauri layer
 
-One crate, one module: `src-tauri/src/lib.rs`, 6,658 lines. `main.rs` is six
-lines and calls `bancada_lib::run()`.
+One crate, three modules: `src-tauri/src/lib.rs` (6,700 lines), `idfhost.rs`
+(ESP-IDF resolution and its cache) and `setup.rs` (toolchain probes and the
+arduino-cli installer; also `ensure_user_bins_on_path`, which `run()` calls
+before any thread exists). `main.rs` is six lines and calls
+`bancada_lib::run()`.
 
 Its first 142 lines are rustdoc, and they are the canonical prose spec for the
 event taxonomy, the agent safety model, the build gate and the MQTT contract.

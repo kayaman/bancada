@@ -159,6 +159,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 mod idfhost;
+mod setup;
 
 use bancada_core::backend::{Backend, BackendKind, BuildSpec};
 use bancada_core::boards::{self, CoreView};
@@ -1800,6 +1801,29 @@ fn check_board_pin(
     let board = bancada_core::boardprofile::Board::from_id(&board_id)
         .ok_or_else(|| format!("unknown board `{board_id}`"))?;
     Ok(bancada_core::boardprofile::check_pin(board, gpio))
+}
+
+/// Everything the Setup panel shows: each engine's state, serial-port access,
+/// and the PATH the probes used. Spawns one `--version` per tool, so it runs
+/// on demand — when the panel opens or the user asks to re-check — never on a
+/// timer.
+#[tauri::command]
+async fn setup_probe(state: State<'_, AppState>) -> Result<setup::SetupReport, String> {
+    let cli = state.cli.clone();
+    tauri::async_runtime::spawn_blocking(move || setup::report(&cli))
+        .await
+        .map_err(err_str)
+}
+
+/// Run the official arduino-cli installer into `~/.local/bin`. The only
+/// install the panel performs itself: it is the one tool Arduino work cannot
+/// start without, and its installer is a single vendor script with a documented
+/// `BINDIR`. Everything else is shown as a command to copy.
+#[tauri::command]
+async fn setup_install_arduino_cli() -> Result<setup::InstallOutcome, String> {
+    tauri::async_runtime::spawn_blocking(setup::install_arduino_cli)
+        .await
+        .map_err(err_str)?
 }
 
 /// Is ESP-IDF usable on this machine, and if not, why?
@@ -5471,6 +5495,9 @@ pub fn run() {
     if handle_agent_guard_argv() {
         return;
     }
+    // Before any thread exists: a desktop launch does not see ~/.local/bin,
+    // where per-user installers (arduino-cli's included) put their binaries.
+    setup::ensure_user_bins_on_path();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -5571,6 +5598,8 @@ pub fn run() {
             set_project_board,
             check_board_pin,
             idf_probe,
+            setup_probe,
+            setup_install_arduino_cli,
             list_idf_targets,
             set_idf_target,
             upload_sketch,

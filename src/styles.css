@@ -3594,3 +3594,114 @@ body {
   min-width: 0;
   flex: 1 1 auto;
 }
+
+/* ---------- Setup panel (first run) ---------- */
+.setup-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+}
+.setup-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-6);
+  border-bottom: 1px solid var(--border);
+}
+.setup-title {
+  font-weight: 600;
+  flex: 1;
+}
+.setup-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.setup-intro {
+  color: var(--text-dim);
+  font-size: var(--fs-body);
+  margin: 0;
+}
+.setup-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  padding: var(--sp-5) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.setup-card.ok {
+  border-left: 3px solid var(--success, #3fb950);
+}
+.setup-card.missing {
+  border-left: 3px solid var(--error);
+}
+.setup-card.optional {
+  border-left: 3px solid var(--text-dim);
+}
+.setup-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+}
+.setup-name {
+  font-weight: 600;
+}
+.setup-state {
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-state.bad {
+  color: var(--error);
+}
+.setup-purpose {
+  color: var(--text-dim);
+  font-size: var(--fs-body);
+}
+.setup-detail {
+  color: var(--error);
+  font-size: var(--fs-small);
+  white-space: pre-wrap;
+}
+.setup-cmd {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.setup-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: var(--fs-small);
+}
+.setup-log {
+  max-height: 14em;
+  overflow: auto;
+  margin: 0;
+  padding: var(--sp-3);
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: var(--fs-small);
+  white-space: pre-wrap;
+}
+.setup-path {
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+  word-break: break-all;
+}

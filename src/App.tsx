@@ -74,7 +74,7 @@ import {
   startProgress,
 } from "./buildProgress";
 import { forgetDurations, loadDurations, recordDuration } from "./buildHistory";
-import { projectButtonLabel } from "./toolbarModel";
+import { projectButtonLabel, resolveBuildTarget, type BuildTarget } from "./toolbarModel";
 import type {
   AgentEvent,
   DetectedPort,
@@ -99,6 +99,7 @@ import SerialMonitor, {
 } from "./components/SerialMonitor";
 import ScopeView from "./components/ScopeView";
 import NewProject from "./components/NewProject";
+import SetupPanel from "./components/SetupPanel";
 import DuplicateProject from "./components/DuplicateProject";
 import RenameProject from "./components/RenameProject";
 import BoardOffer from "./components/BoardOffer";
@@ -267,6 +268,8 @@ export default function App() {
   const [renamingProject, setRenamingProject] = useState(false);
   /** When true the editor area shows the usage dashboard instead. */
   const [showingUsage, setShowingUsage] = useState(false);
+  /** When true the editor area shows the first-run Setup checklist. */
+  const [showingSetup, setShowingSetup] = useState(false);
   /** When set, the one-row profile form shows under the toolbar. */
   const [profileForm, setProfileForm] = useState<ProfileFormMode | null>(null);
 
@@ -276,13 +279,14 @@ export default function App() {
    * call site, which is how the fifth pane would have been forgotten.
    */
   const showPane = (
-    pane: "new" | "duplicate" | "rename" | "usage" | null,
+    pane: "new" | "duplicate" | "rename" | "usage" | "setup" | null,
     profileMode: ProfileFormMode | null = null,
   ) => {
     setCreatingProject(pane === "new");
     setDuplicatingProject(pane === "duplicate");
     setRenamingProject(pane === "rename");
     setShowingUsage(pane === "usage");
+    setShowingSetup(pane === "setup");
     setProfileForm(profileMode);
   };
   /** Uncover the editor without touching the profile strip. `ProfileInit`
@@ -999,7 +1003,7 @@ export default function App() {
       .then((v) => notify(`arduino-cli ${v} detected.`))
       .catch(() =>
         notify(
-          "arduino-cli not found on PATH — Arduino builds and board identification are unavailable until it is installed.",
+          "arduino-cli not found on PATH — open Setup (🧰) to install it. Arduino builds and board identification are unavailable until then.",
           true,
         ),
       );
@@ -1008,7 +1012,13 @@ export default function App() {
     api
       .loadSettings()
       .then(async (s) => {
-        if (!s.last_sketch_dir) return;
+        if (!s.last_sketch_dir) {
+          // A first run with nothing to build with: open the checklist rather
+          // than leave a toast to explain itself. Never on later launches —
+          // an ESP-IDF-only bench has no arduino-cli and no use for nagging.
+          api.cliVersion().catch(() => showPane("setup"));
+          return;
+        }
         const ok = await loadSketch(s.last_sketch_dir, s.last_open_file ?? undefined);
         if (!ok) notify("Last project no longer available — open a project folder.");
       })
@@ -1712,16 +1722,22 @@ export default function App() {
     return (p ? comparableIdentity(p) : null) ?? undefined;
   };
 
-  /** Build target: sketch.yaml profile first, detected board FQBN as fallback. */
-  const resolveTarget = (): { profile?: string; fqbn?: string } | null => {
-    if (profile) return { profile };
-    const fqbn = detectedFqbn();
-    if (fqbn) return { fqbn };
-    notify(
-      "No sketch.yaml profile, and this port reports no board identity (USB bridge) — create a profile to set the board.",
-      true,
-    );
-    return null;
+  /** Build target for the open project, or null after toasting why there is
+   *  none. The decision itself lives in `resolveBuildTarget` — it depends on
+   *  the project kind, and an ESP-IDF project was being told to create a
+   *  sketch.yaml profile it could never use. */
+  const resolveTarget = (): BuildTarget | null => {
+    const r = resolveBuildTarget({
+      kind: projectKind,
+      profile,
+      detectedFqbn: detectedFqbn(),
+      idfTarget,
+    });
+    if ("error" in r) {
+      notify(r.error, true);
+      return null;
+    }
+    return r.target;
   };
 
   const verify = async () => {
@@ -3004,6 +3020,7 @@ export default function App() {
         onDuplicateProject={() => showPane("duplicate")}
         onRenameProject={() => showPane("rename")}
         onOpenUsage={() => showPane("usage")}
+        onOpenSetup={() => showPane("setup")}
         themePrefs={themePrefs}
         onThemeChange={setThemePrefs}
         importedThemes={importedThemes}
@@ -3265,6 +3282,8 @@ export default function App() {
               onCancel={() => setRenamingProject(false)}
               notify={notify}
             />
+          ) : showingSetup ? (
+            <SetupPanel onClose={showEditor} notify={notify} />
           ) : showingUsage ? (
             <UsageDashboard
               onClose={() => setShowingUsage(false)}

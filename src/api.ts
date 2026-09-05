@@ -879,6 +879,58 @@ export const idfProbe = () => invoke<IdfProbe>("idf_probe");
  *  Never hardcoded, for the same reason boards come from `board listall`. */
 export const listIdfTargets = () => invoke<string[]>("list_idf_targets");
 
+// ---------- setup (first run) ----------
+
+/** One engine's state on this machine. Mirrors `setup::ToolStatus`. */
+export interface ToolStatus {
+  id: string;
+  name: string;
+  purpose: string;
+  /** Arduino work is impossible without it. Advisory: an ESP-IDF-only bench
+   *  needs none of these, so the panel words it rather than erroring. */
+  required: boolean;
+  ok: boolean;
+  version?: string;
+  path?: string;
+  /** Why it is unusable when present but broken; absent when simply missing. */
+  detail?: string;
+  install: string;
+  docs: string;
+  /** The panel can run this install itself (arduino-cli only). */
+  installable: boolean;
+}
+
+export type SerialAccess =
+  | { state: "ok"; group: string }
+  | { state: "missing"; group: string };
+
+export interface SerialStatus {
+  access: SerialAccess;
+  /** The attached device whose owning group was consulted, if any. */
+  device?: string;
+  fix: string;
+}
+
+export interface SetupReport {
+  tools: ToolStatus[];
+  serial: SerialStatus;
+  /** The PATH the probes searched, so "not on PATH" is checkable. */
+  path: string;
+}
+
+export interface InstallOutcome {
+  ok: boolean;
+  bindir: string;
+  log: string;
+}
+
+/** Probe every engine and serial access. One `--version` spawn per tool, so
+ *  it is called when the panel opens or on ⟳ — never on a timer. */
+export const setupProbe = () => invoke<SetupReport>("setup_probe");
+/** Run the official arduino-cli installer into `~/.local/bin`. */
+export const setupInstallArduinoCli = () =>
+  invoke<InstallOutcome>("setup_install_arduino_cli");
+
 /** **Destructive.** Deletes `build/` and regenerates `sdkconfig`, discarding
  *  hand-edited configuration. The backend checkpoints to git first when it
  *  can. Confirm in the UI before calling this. */

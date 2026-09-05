@@ -34,6 +34,7 @@ pub mod project;
 pub mod scope;
 pub mod serialring;
 pub mod settings;
+pub mod setup;
 pub mod sketch;
 pub mod targets;
 pub mod types;

@@ -135,8 +135,15 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## 5. First run
 
-Launch **Bancada** from the app menu (or `bancada` in a terminal). From the
-📁 project menu, open a project or create a new one, pick a board, and
-Verify. If
-the board picker is empty, install a core (section 3); if flashing says
-the port is busy, revisit section 4.
+Launch **Bancada** from the app menu (or `bancada` in a terminal). On a
+machine with no `arduino-cli`, the **Setup** checklist (🧰 in the toolbar)
+opens by itself: it shows which of the engines in section 3 this machine
+has, the command that installs each missing one, and whether your user can
+open serial ports (section 4). arduino-cli can be installed from there with
+one click — it goes to `~/.local/bin`, which Bancada adds to its own `PATH`
+at startup so a desktop launch finds it without logging out.
+
+From the 📁 project menu, open a project or create a new one, pick a board,
+and Verify. If the board picker is empty, install a core (section 3); if
+flashing says the port is busy, revisit section 4. Open 🧰 Setup any time to
+re-check.

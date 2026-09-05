@@ -44,6 +44,8 @@ interface Props {
   onRenameProject: () => void;
   onDuplicateProject: () => void;
   onOpenUsage: () => void;
+  /** The first-run checklist: which engines this machine has. */
+  onOpenSetup: () => void;
   /** Appearance is application state, not project state — it rides here for
    *  the same reason Usage does. */
   themePrefs: ThemePrefs;
@@ -247,6 +249,14 @@ export default function Toolbar(props: Props) {
           onRemoveImported={props.onRemoveImportedTheme}
           importing={props.importingTheme}
         />
+        <button
+          className="btn icon"
+          onClick={props.onOpenSetup}
+          title="Setup: which toolchains this machine has, and how to install the rest"
+          aria-label="Setup"
+        >
+          🧰
+        </button>
         <button
           className="btn icon"
           onClick={props.onOpenUsage}
