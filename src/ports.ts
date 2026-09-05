@@ -45,7 +45,7 @@ export function fleetDisplayName(b: FleetEntry): string {
 }
 
 /**
- * A board name only when arduino-cli's match is actually about *this* board.
+ * The match, only when arduino-cli's match is actually about *this* board.
  *
  * **Mirrors `core::fleet::board_name`, deliberately.** A hidden sibling in the
  * list means the match was made on a family-wide USB vid/pid, so the non-hidden
@@ -58,11 +58,19 @@ export function fleetDisplayName(b: FleetEntry): string {
  * a *name the user reads to tell two boards apart*, being wrong is worse than
  * being silent — the Rust side has refused this for as long as the fleet has
  * existed, and the toolbar was the one place still printing it.
+ *
+ * The same question, asked of an FQBN rather than a name, is
+ * `comparableIdentity`.
  */
-export function confidentBoardName(p: DetectedPort): string | null {
+export function confidentBoard(p: DetectedPort): MatchingBoard | null {
   if (p.matching_boards.some((b) => b.is_hidden)) return null;
   const named = p.matching_boards.filter((b) => b.name !== "");
-  return named.length === 1 ? named[0].name : null;
+  return named.length === 1 ? named[0] : null;
+}
+
+/** The confident match's name, or nothing. See `confidentBoard`. */
+export function confidentBoardName(p: DetectedPort): string | null {
+  return confidentBoard(p)?.name ?? null;
 }
 
 /**
@@ -123,22 +131,46 @@ export function visibleBoard(p: DetectedPort): MatchingBoard | null {
 }
 
 /**
+ * How much of its FQBN a port can honestly be held to.
+ *
+ * A *confident* match names the board itself: the whole `vendor:arch:board`
+ * is fair game. A family match names only the family — Espressif's native-USB
+ * descriptor (303a:1001) is shared by every ESP32 with a USB peripheral, so
+ * arduino-cli answers with the hidden umbrella plus one arbitrary sibling, and
+ * that sibling's *board* segment is a coin toss. Its `vendor:arch` is not: the
+ * board on the other end really is an `esp32:esp32` board.
+ *
+ * Returning the shorter identity is what lets the caller keep the warning that
+ * matters (an esp8266 profile on an ESP32 port) without the one that never
+ * could: the sibling arduino-cli happened to pick.
+ */
+export function comparableIdentity(p: DetectedPort): string | null {
+  const visible = visibleBoard(p);
+  if (!visible) return null;
+  const depth = confidentBoard(p) ? 3 : 2;
+  return visible.fqbn.split(":").slice(0, depth).join(":");
+}
+
+/**
  * True when a profile would flash a different board than the one detected on
  * the selected port — the profile silently wins over the port, so this is the
- * only place the disagreement can be surfaced. Compares the vendor:arch:board
- * base (a profile may pin board options; `board list` never reports them), and
- * stays quiet when either side is unknown: a bare USB bridge reports no
- * identity, and that must not turn every upload into a warning.
+ * only place the disagreement can be surfaced.
+ *
+ * The comparison runs at whatever precision the detected side carries (see
+ * `comparableIdentity`), and the profile is truncated to match: a profile may
+ * pin board options that `board list` never reports, and a family-level
+ * identity must not be judged on a board segment it does not have. Stays quiet
+ * when either side is unknown — a bare USB bridge reports no identity, and
+ * that must not turn every upload into a warning.
  */
 export function flashTargetMismatch(
   profileFqbn: string | undefined,
   detectedFqbn: string | undefined,
 ): boolean {
-  const base = (f: string | undefined) =>
-    (f ?? "").trim().split(":").slice(0, 3).join(":");
-  const p = base(profileFqbn);
-  const d = base(detectedFqbn);
-  return p !== "" && d !== "" && p !== d;
+  const d = (detectedFqbn ?? "").trim();
+  if (d === "") return false;
+  const p = (profileFqbn ?? "").trim().split(":").slice(0, d.split(":").length).join(":");
+  return p !== "" && p !== d;
 }
 
 export interface PortOption {

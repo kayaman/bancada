@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  comparableIdentity,
   confidentBoardName,
   flashTargetMismatch,
   missingPortName,
@@ -297,5 +298,53 @@ describe("flashTargetMismatch", () => {
 
   it("stays quiet when the profile has no fqbn", () => {
     expect(flashTargetMismatch(undefined, "arduino:avr:uno")).toBe(false);
+  });
+});
+
+describe("comparableIdentity", () => {
+  // The bench report of 2026-09-04: a C3 SuperMini on /dev/ttyACM0 matches
+  // Espressif's shared native-USB descriptor (303a:1001), so arduino-cli
+  // answers with the hidden family umbrella plus one arbitrary sibling —
+  // "Ozobot DRVKit". Every upload warned that the profile disagreed with a
+  // board that was never on the bench.
+  const familyPort = withBoards("/dev/ttyACM0", [
+    board("esp32:esp32:esp32_family", true),
+    board("esp32:esp32:ozobot_drvkit"),
+  ]);
+
+  it("holds a family match to its vendor:arch only", () => {
+    expect(comparableIdentity(familyPort)).toBe("esp32:esp32");
+  });
+
+  it("holds a board-specific match to the whole fqbn", () => {
+    const p = withBoards("/dev/ttyACM0", [board("arduino:avr:uno")]);
+    expect(comparableIdentity(p)).toBe("arduino:avr:uno");
+  });
+
+  it("holds several named matches to vendor:arch too", () => {
+    const p = withBoards("/dev/ttyACM0", [board("a:b:one"), board("a:b:two")]);
+    expect(comparableIdentity(p)).toBe("a:b");
+  });
+
+  it("has nothing to compare for a bare bridge", () => {
+    expect(comparableIdentity(withBoards("/dev/ttyUSB0", []))).toBeNull();
+  });
+});
+
+describe("flashTargetMismatch at family precision", () => {
+  it("accepts any sibling of the family the port reports", () => {
+    // The whole point: esp32:esp32 is all the port can be held to, and
+    // makergo_c3_supermini is an esp32:esp32 board.
+    expect(
+      flashTargetMismatch("esp32:esp32:makergo_c3_supermini", "esp32:esp32"),
+    ).toBe(false);
+  });
+
+  it("still flags a profile from a different family", () => {
+    // Silence must not be the price of the fix — an esp8266 profile on an
+    // Espressif ESP32 port is exactly the mistake this toast exists for.
+    expect(
+      flashTargetMismatch("esp8266:esp8266:nodemcuv2", "esp32:esp32"),
+    ).toBe(true);
   });
 });

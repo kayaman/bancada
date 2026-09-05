@@ -9,6 +9,7 @@ import { boardOffer } from "./boardOffer";
 import { idfSilentSerialWarning, silentSerialWarning } from "./boardOptions";
 import { MAX_RECAPTURE_ATTEMPTS, recapturePlan } from "./monitorRecovery";
 import {
+  comparableIdentity,
   flashTargetMismatch,
   missingPortName,
   nextSelectedPort,
@@ -1700,6 +1701,17 @@ export default function App() {
     return p ? visibleBoard(p)?.fqbn : undefined;
   };
 
+  /** The identity the selected port can be *held to*, for the flash-target
+   *  warning below. Deliberately not `detectedFqbn`: choosing something to
+   *  compile with wants arduino-cli's best guess, telling the user their
+   *  profile is wrong wants a fact. On a shared Espressif USB descriptor the
+   *  guess is an arbitrary family member, and warning about it was a toast
+   *  that could never be right. */
+  const detectedIdentity = () => {
+    const p = ports.find((p) => p.port.address === selectedPort);
+    return (p ? comparableIdentity(p) : null) ?? undefined;
+  };
+
   /** Build target: sketch.yaml profile first, detected board FQBN as fallback. */
   const resolveTarget = (): { profile?: string; fqbn?: string } | null => {
     if (profile) return { profile };
@@ -1759,7 +1771,7 @@ export default function App() {
     const profileFqbn = target.profile
       ? sketchYaml?.profiles?.[target.profile]?.fqbn
       : undefined;
-    const detected = detectedFqbn();
+    const detected = detectedIdentity();
     // Both facts are already known here: which kind of port is selected, and
     // whether the profile turns USB CDC on. When they disagree the board
     // flashes perfectly and prints nothing — the failure that is hardest to
