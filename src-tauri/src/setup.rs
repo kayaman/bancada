@@ -35,6 +35,43 @@ pub fn ensure_user_bins_on_path() {
     }
 }
 
+/// The kernel drivers bound to the GPUs on this machine, from sysfs.
+fn drm_drivers() -> Vec<String> {
+    let Ok(cards) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = cards
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            // `card0`, not `card0-HDMI-A-1` (a connector) or `renderD128`.
+            n.starts_with("card") && !n.contains('-')
+        })
+        .filter_map(|e| std::fs::read_link(e.path().join("device").join("driver")).ok())
+        .filter_map(|l| l.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Turn WebKitGTK's DMA-BUF renderer off on GPUs where it draws garbage.
+///
+/// Must run before the webview exists, like [`ensure_user_bins_on_path`].
+/// An explicit setting in the environment — either value — is the user's
+/// and is left alone. Returns the driver that triggered the workaround, so
+/// `run()` can say so once on stderr.
+pub fn ensure_webkit_renderer_works() -> Option<String> {
+    if std::env::var_os(setup::WEBKIT_DMABUF_VAR).is_some() {
+        return None;
+    }
+    let drivers = drm_drivers();
+    let bad = setup::webkit_dmabuf_unsafe_driver(drivers.iter().map(String::as_str))?.to_string();
+    std::env::set_var(setup::WEBKIT_DMABUF_VAR, "1");
+    Some(bad)
+}
+
 /// One engine's state on this machine. Mirrors `ToolStatus` in `src/api.ts`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolStatus {

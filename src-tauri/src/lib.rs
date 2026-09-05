@@ -5498,6 +5498,15 @@ pub fn run() {
     // Before any thread exists: a desktop launch does not see ~/.local/bin,
     // where per-user installers (arduino-cli's included) put their binaries.
     setup::ensure_user_bins_on_path();
+    // Same moment, same reason: WebKitGTK's DMA-BUF renderer draws garbage on
+    // some GPU drivers (nouveau, verified), and the switch is an env var the
+    // webview reads when it is created.
+    if let Some(driver) = setup::ensure_webkit_renderer_works() {
+        eprintln!(
+            "bancada: GPU driver `{driver}` — set {}=1 (the DMA-BUF renderer draws garbage on it)",
+            bancada_core::setup::WEBKIT_DMABUF_VAR
+        );
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

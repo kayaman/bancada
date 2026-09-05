@@ -133,6 +133,18 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
+## 4b. If the window draws as garbage stripes
+
+On some GPU drivers WebKitGTK's DMA-BUF renderer paints the whole window as
+horizontal noise. Bancada detects the one driver this is verified on
+(`nouveau`) at startup and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` itself
+before the webview exists. On another driver with the same symptom, set it
+by hand — an explicit value in the environment is always respected:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 bancada
+```
+
 ## 5. First run
 
 Launch **Bancada** from the app menu (or `bancada` in a terminal). On a

@@ -142,6 +142,28 @@ pub fn version_line(stdout: &str) -> String {
         .to_string()
 }
 
+/// GPU kernel drivers under which WebKitGTK's DMA-BUF renderer is known to
+/// draw the window as horizontal garbage stripes. `nouveau` (GeForce GT 610
+/// on GNOME Wayland) is the one verified on a real bench; the fix is the
+/// documented `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which falls back to the
+/// older, slower, correct path.
+pub const WEBKIT_DMABUF_BROKEN_DRIVERS: &[&str] = &["nouveau"];
+
+/// The environment variable that turns WebKitGTK's DMA-BUF renderer off.
+pub const WEBKIT_DMABUF_VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+
+/// Given the DRM drivers bound on this machine (`/sys/class/drm/card*/device/driver`
+/// basenames), the one that makes the DMA-BUF renderer unsafe, if any.
+/// Any single offending GPU counts: on a hybrid machine WebKit may land on
+/// either, and the fallback renderer is merely slower on the good one.
+pub fn webkit_dmabuf_unsafe_driver<'a>(
+    drivers: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    drivers
+        .into_iter()
+        .find(|d| WEBKIT_DMABUF_BROKEN_DRIVERS.contains(d))
+}
+
 /// Groups that own serial devices, by distro family. `dialout` on Fedora,
 /// openSUSE and Debian; `uucp` on Arch and derivatives.
 pub const SERIAL_GROUPS: &[&str] = &["dialout", "uucp"];
@@ -366,6 +388,18 @@ mod tests {
             }
         );
         assert!(serial_fix_command("uucp").starts_with("sudo usermod -aG uucp"));
+    }
+
+    #[test]
+    fn only_a_known_bad_gpu_driver_disables_the_dmabuf_renderer() {
+        assert_eq!(webkit_dmabuf_unsafe_driver(["nouveau"]), Some("nouveau"));
+        // Hybrid box: the bad one counts even when a good one is present.
+        assert_eq!(
+            webkit_dmabuf_unsafe_driver(["i915", "nouveau"]),
+            Some("nouveau")
+        );
+        assert_eq!(webkit_dmabuf_unsafe_driver(["amdgpu", "i915"]), None);
+        assert_eq!(webkit_dmabuf_unsafe_driver([]), None);
     }
 
     const ETC_GROUP: &str =

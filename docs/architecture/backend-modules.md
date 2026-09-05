@@ -105,8 +105,8 @@ All four take their paths and their clock from the caller — see
 
 One crate, three modules: `src-tauri/src/lib.rs` (6,700 lines), `idfhost.rs`
 (ESP-IDF resolution and its cache) and `setup.rs` (toolchain probes and the
-arduino-cli installer; also `ensure_user_bins_on_path`, which `run()` calls
-before any thread exists). `main.rs` is six lines and calls
+arduino-cli installer; also `ensure_user_bins_on_path` and
+`ensure_webkit_renderer_works`, which `run()` calls before any thread exists). `main.rs` is six lines and calls
 `bancada_lib::run()`.
 
 Its first 142 lines are rustdoc, and they are the canonical prose spec for the
