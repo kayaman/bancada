@@ -4,7 +4,7 @@
 //! Events emitted to the frontend:
 //!   "build://line"      { stream: "stdout"|"stderr", line: string }
 //!   "serial://line"     { stream, line }
-//!   "serial://closed"   { session }  (the monitor child that closed; ignore
+//!   "serial://closed"   { session }  (the monitor session that closed; ignore
 //!                       one naming a session you have left)
 //!   "serial://started"  { port, baud, session }  (the backend started the
 //!                       monitor itself — the agent's `serial_read`
@@ -33,7 +33,7 @@
 //! `scope_install_firmware`, plus `save_text_file` / `save_binary_file`.
 //! `scope_start` streams binary envelopes (§2: kind 0x01 samples, 0x02 JSON
 //! events) over a `tauri::ipc::Channel` instead of events. The serial port
-//! has a single owner at a time — monitor child process or scope session —
+//! has a single owner at a time — monitor session or scope session —
 //! and acquiring it for one evicts the other.
 //!
 //! Agent commands (Assistant panel): `agent_probe`, `agent_start`,
@@ -177,16 +177,37 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 /// A running ADC-streaming session: the writer half of the port lives under
 /// the state mutex; the reader half is owned by a dedicated thread that never
-/// touches the mutex (same discipline as the monitor `Child`).
+/// touches the mutex (same discipline as [`MonitorSession`]).
 struct ScopeSession {
     writer: Box<dyn SerialPort>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
+/// A running serial monitor: **our own** handle on the port, opened with the
+/// same `serialport` crate the scope uses.
+///
+/// It used to be an `arduino-cli monitor` child. That tied a plain serial
+/// terminal not just to arduino-cli but to an *installed Arduino platform*:
+/// the `serial-monitor` pluggable tool arduino-cli delegates to is only ever
+/// installed as a platform dependency. On an ESP-IDF-only bench — arduino-cli
+/// present, no cores — every start died at once with "No monitor available
+/// for the port protocol serial". That line landed in the Serial tab,
+/// `serial://closed` followed, the recapture ladder tried five more times and
+/// filled the panel with the same error, and the dead child sat unreaped in
+/// this slot as a zombie. None of it had anything to do with the board.
+///
+/// Same shape as [`ScopeSession`]: the writer half lives under the `serial`
+/// mutex, the reader half belongs to a thread that never touches it.
+struct MonitorSession {
+    writer: Box<dyn Write + Send>,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
 /// Whoever currently holds the serial port. Exactly one owner at a time.
 enum SerialOwner {
-    Monitor(Child),
+    Monitor(MonitorSession),
     Scope(ScopeSession),
 }
 
@@ -371,45 +392,41 @@ fn free_port_for_flash(serial: &Mutex<Option<SerialOwner>>) -> Result<(), String
 
 /// How long a child gets to shut itself down before it is killed.
 ///
-/// Named for the case that forces it — a monitor's pluggable tool orphaning
-/// itself onto the port (see [`kill_child`]) — but it bounds every caller,
-/// the agent session included. Measured cost of the graceful path is tens of
-/// milliseconds; this is the ceiling, not the expected wait.
-///
-/// Only the flash path spends it under a lock: `free_port_for_flash` evicts
-/// the monitor while holding `serial`, which the runtime model otherwise
-/// wants held only across bounded-short work. That is the deliberate trade —
-/// an orphan holding the port is unbounded, and 1 s is not. The agent paths
-/// take the session out of `agent` *before* calling and wait with no lock
-/// held, so the ceiling costs them teardown latency and nothing else.
+/// Named for the case that first forced it — the serial monitor, back when it
+/// was an `arduino-cli monitor` child whose pluggable tool orphaned itself
+/// onto the port (see [`kill_child`]). The monitor no longer spawns anything
+/// ([`MonitorSession`]), so today this bounds the agent session's teardown
+/// only. Measured cost of the graceful path is tens of milliseconds; this is
+/// the ceiling, not the expected wait, and it is never spent under a lock —
+/// the agent paths take the session out of `agent` *before* calling.
 const MONITOR_TERM_GRACE: Duration = Duration::from_millis(1000);
 
 /// Stop a child **gracefully**, then reap it.
 ///
-/// Serves both the serial monitor and the agent CLI session; the monitor is
-/// what forces the graceful path.
+/// Serves the agent's `claude` session. It was written for the serial
+/// monitor, back when that was an `arduino-cli monitor` child, and the lesson
+/// it encodes holds for any child that spawns helpers of its own:
 ///
-/// `arduino-cli monitor` never opens the port itself: it spawns a
-/// `serial-monitor` pluggable tool that does. `Child::kill` sends SIGKILL,
-/// which arduino-cli cannot handle, so that grandchild survived — reparented
-/// to init, still holding the tty and still draining the byte stream.
-///
-/// On the bench this presented as two unrelated-looking faults at once:
-/// esptool reporting it could not connect (the port was taken) and a freshly
-/// started monitor printing nothing (the orphan was eating the data), while
-/// the UI correctly believed it had stopped the monitor. Every subsequent
-/// start leaked another one, which is why swapping cables or sockets never
-/// helped.
+/// `arduino-cli monitor` never opened the port itself — it spawned a
+/// `serial-monitor` pluggable tool that did. `Child::kill` sends SIGKILL,
+/// which arduino-cli cannot handle, so that grandchild survived: reparented
+/// to init, still holding the tty and still draining the byte stream. On the
+/// bench this presented as two unrelated-looking faults at once — esptool
+/// reporting it could not connect (the port was taken) and a freshly started
+/// monitor printing nothing (the orphan was eating the data) — while the UI
+/// correctly believed it had stopped the monitor. Every subsequent start
+/// leaked another one, which is why swapping cables or sockets never helped.
 ///
 /// **Killing the process group does not fix this** — that was tried first.
-/// `serial-monitor` puts itself in its *own* process group (verified live:
+/// `serial-monitor` put itself in its *own* process group (verified live:
 /// `pgid == its own pid`, not arduino-cli's), so `killpg` on the child's
-/// group never reaches it. The only thing that cleans it up is arduino-cli's
-/// own signal handling, so the shutdown has to be polite:
+/// group never reached it. Only the parent's own signal handling cleaned it
+/// up, so the shutdown is polite:
 ///
-/// 1. SIGTERM, and wait up to [`MONITOR_TERM_GRACE`] — verified live to take
-///    both processes down and release the port.
+/// 1. SIGTERM, and wait up to [`MONITOR_TERM_GRACE`].
 /// 2. SIGKILL as the backstop, so a wedged child still cannot outlive this.
+///
+/// The monitor itself no longer spawns anything: see [`MonitorSession`].
 fn kill_child(mut child: Child) {
     #[cfg(unix)]
     {
@@ -436,6 +453,23 @@ fn kill_child(mut child: Child) {
     let _ = child.wait();
 }
 
+/// Stop a monitor: flag the reader thread down, release the writer handle and
+/// join the thread.
+///
+/// The join is what makes "stopped" mean *the port is free*: the reader owns
+/// a second descriptor on the tty, and returning before it closes would hand
+/// esptool a port still held for one more read timeout — the same failure the
+/// orphaned `serial-monitor` tool used to cause, only shorter. The wait is
+/// bounded by [`MONITOR_READ_TIMEOUT`], which is why that timeout is short.
+fn stop_monitor_session(mut session: MonitorSession) {
+    session.stop.store(true, Ordering::Relaxed);
+    let join = session.join.take();
+    drop(session.writer);
+    if let Some(handle) = join {
+        let _ = handle.join();
+    }
+}
+
 /// Politely stop a scope session: ask the firmware to stop streaming, flag the
 /// reader thread down, release the writer handle and join the thread.
 fn stop_scope_session(mut session: ScopeSession) {
@@ -452,7 +486,7 @@ fn stop_scope_session(mut session: ScopeSession) {
 /// Free the serial port from whichever owner holds it.
 fn evict_owner(slot: &mut Option<SerialOwner>) {
     match slot.take() {
-        Some(SerialOwner::Monitor(child)) => kill_child(child),
+        Some(SerialOwner::Monitor(session)) => stop_monitor_session(session),
         Some(SerialOwner::Scope(session)) => stop_scope_session(session),
         None => {}
     }
@@ -2304,104 +2338,214 @@ fn note_flash_on_board(fleet_file: &Path, board_id: &str, dir: &str, info: &Flas
 
 // ---------- serial monitor ----------
 
-/// Spawn a fresh monitor child and its two reader threads.
+/// How long one monitor read blocks before the thread re-checks its stop flag.
 ///
-/// Shared by the user's `start_monitor` command and the agent's
-/// `serial_read` auto-start. Every line goes both to the `serial://line`
-/// event (for the Monitor tab) and into the ring buffer (for the agent);
-/// the stdout thread emits `serial://closed` at EOF exactly as before. The
-/// reader threads own only the emitter Arc and the ring Arc — never the
-/// serial-owner mutex (they are killed under it; see `AppState::serial`).
-/// Read `src` line by line, decoding each **lossily**, until EOF.
+/// Doubles as the ceiling on how long [`stop_monitor_session`] waits — under
+/// the `serial` lock, on the flash path — for the reader to let go of the
+/// port. Short on purpose: the read loop wakes ten times a second doing
+/// nothing, which costs nothing measurable, and a flash waits at most this
+/// long for its port.
+const MONITOR_READ_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// A line with no newline after this many bytes is delivered anyway.
 ///
-/// A serial device emits arbitrary bytes, not UTF-8. `BufRead::lines()` yields
-/// `Err(InvalidData)` for a line that is not valid UTF-8, and the previous
-/// `.map_while(|l| l.ok())` ended the iterator there — so **one bad byte
-/// killed capture for good** while the monitor child stayed alive and kept
-/// holding the port. The console simply stopped, and the toggle flipped to
-/// "Start" with no error.
+/// A stream that never contains `0x0A` — binary output, or a rate so wrong
+/// that even the garbage lacks one — must not grow a buffer without bound.
+/// Wrong-baud garbage usually has plenty of newlines in it; this is the
+/// backstop for when it does not.
+const MONITOR_MAX_LINE: usize = 4096;
+
+/// Splits the byte stream into lines, decoding each **lossily**.
 ///
-/// Which happens constantly: an ESP32's ROM bootloader prints at 74880 baud
-/// and reads as garbage at 115200, a reset mid-`print` truncates a sequence,
-/// a long cable picks up noise, and any wrong baud turns the whole stream
-/// into invalid UTF-8. None of that should end a session — `U+FFFD` in one
-/// line is the honest outcome.
+/// A serial device emits arbitrary bytes, not UTF-8. An earlier reader used
+/// `BufRead::lines()`, which yields `Err(InvalidData)` for a line that is not
+/// valid UTF-8, and `.map_while(|l| l.ok())` ended the iterator there — so
+/// **one bad byte killed capture for good** while the port stayed open. The
+/// console simply stopped, and the toggle flipped to "Start" with no error.
 ///
-/// EOF still ends the loop, so a genuinely dead child is still reported.
-fn read_lines_lossy(src: impl std::io::Read, mut on_line: impl FnMut(&str)) {
-    let mut reader = BufReader::new(src);
-    let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => return, // EOF — the child is gone
-            Ok(_) => {
-                while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                    buf.pop();
-                }
-                on_line(&String::from_utf8_lossy(&buf));
-            }
-            // A real I/O error on the pipe: the child is unreachable.
-            Err(_) => return,
+/// Which happens constantly: an ESP8266's ROM prints at 74880 baud and reads
+/// as garbage at 115200, a reset mid-`print` truncates a sequence, a long
+/// cable picks up noise, and any wrong baud turns the whole stream into
+/// invalid UTF-8. None of that should end a session — `U+FFFD` in one line is
+/// the honest outcome.
+///
+/// Trailing `\r` is stripped with the `\n`: boards print CRLF, and the row
+/// would otherwise carry an invisible byte the filter cannot match.
+#[derive(Default)]
+struct LineSplitter {
+    pending: Vec<u8>,
+}
+
+impl LineSplitter {
+    /// Feed a chunk; get back every line it completed.
+    fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=nl).collect();
+            out.push(Self::decode(&line));
         }
+        while self.pending.len() >= MONITOR_MAX_LINE {
+            let line: Vec<u8> = self.pending.drain(..MONITOR_MAX_LINE).collect();
+            out.push(Self::decode(&line));
+        }
+        out
+    }
+
+    /// Whatever is buffered when the stream ends — a final line with no
+    /// newline is still a line the user wants to see.
+    fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let line = std::mem::take(&mut self.pending);
+        Some(Self::decode(&line))
+    }
+
+    fn decode(mut line: &[u8]) -> String {
+        while let [rest @ .., b'\n' | b'\r'] = line {
+            line = rest;
+        }
+        String::from_utf8_lossy(line).into_owned()
     }
 }
 
 /// Hand out the next monitor-session id (1, 2, 3, …).
 ///
-/// Every monitor child — started from the Monitor tab or auto-started by the
+/// Every monitor — started from the Monitor tab or auto-started by the
 /// agent's `serial_read` — takes one from the *same* counter, and both
 /// `serial://started` and `serial://closed` carry it. Without the stamp a
-/// reader thread that outlived its own child reports `serial://closed` while
-/// a *newer* monitor is happily running, and the frontend believes it: the
-/// port-handoff bug in `docs/RELEASE-NOTES-0.17.1.md` / `0.18.0.md`. With it
-/// the frontend can drop a close that names a session it has already left.
+/// reader thread that outlived its own session reports `serial://closed`
+/// while a *newer* monitor is happily running, and the frontend believes it:
+/// the port-handoff bug in `docs/RELEASE-NOTES-0.17.1.md` / `0.18.0.md`. With
+/// it the frontend can drop a close that names a session it has already left.
 fn next_monitor_session(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, Ordering::SeqCst) + 1
 }
 
+/// Open `port` for the monitor: 8N1 at `baudrate`, reads timing out at
+/// [`MONITOR_READ_TIMEOUT`].
+///
+/// DTR **and** RTS are asserted — what arduino-cli's `serial-monitor` did, and
+/// therefore what every board on the bench has been living with. On a
+/// devkit's auto-program circuit the two lines cancel out: neither EN nor IO0
+/// is pulled, so a reset button pressed while the monitor is open boots the
+/// firmware. DTR alone (the scope's choice, for its own reasons) would hold
+/// IO0 low and turn that same button press into download mode. Native CDC
+/// ports (TinyUSB, USB Serial/JTAG) want DTR up before they transmit at all.
+fn open_monitor_port(port: &str, baudrate: u32) -> Result<Box<dyn SerialPort>, String> {
+    let mut sp = serialport::new(port, baudrate)
+        .data_bits(serialport::DataBits::Eight)
+        .parity(serialport::Parity::None)
+        .stop_bits(serialport::StopBits::One)
+        .timeout(MONITOR_READ_TIMEOUT)
+        .open()
+        .map_err(|e| format!("could not open {port} at {baudrate} baud: {e}"))?;
+    let _ = sp.write_data_terminal_ready(true);
+    let _ = sp.write_request_to_send(true);
+    Ok(sp)
+}
+
+/// Run a monitor over any reader/writer pair — the opened port in the app, a
+/// pseudo-terminal in tests.
+///
+/// Every line goes both to the `serial://line` event (for the Monitor tab)
+/// and into the ring buffer (for the agent). The reader thread owns only the
+/// emitter Arc and the ring Arc — never the serial-owner mutex (it is joined
+/// under it; see `AppState::serial`).
+///
+/// The thread ends on the stop flag or on the port going away, and emits
+/// `serial://closed` stamped with `session` either way — exactly as the old
+/// child's EOF did, which is what the frontend's recapture ladder is built
+/// around. Only the *unexpected* close also reports why, as a stderr line:
+/// a USB Serial/JTAG board re-enumerates on every reset, and "closed: No
+/// such device" beside the last boot line is the honest account of that.
+fn monitor_over(
+    mut reader: impl Read + Send + 'static,
+    writer: impl Write + Send + 'static,
+    emit: Arc<EmitFn>,
+    ring: Arc<Mutex<SerialRing>>,
+    session: u64,
+) -> MonitorSession {
+    use bancada_core::types::OutputStream;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_seen = stop.clone();
+    let join = std::thread::spawn(move || {
+        let push = |stream: OutputStream, line: &str| {
+            ring.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(stream, line);
+            let name = match stream {
+                OutputStream::Stdout => "stdout",
+                OutputStream::Stderr => "stderr",
+            };
+            emit(
+                "serial://line",
+                serde_json::json!({ "stream": name, "line": line }),
+            );
+        };
+        let mut lines = LineSplitter::default();
+        let mut chunk = [0u8; 4096];
+        let reason = loop {
+            if stop_seen.load(Ordering::Relaxed) {
+                break None;
+            }
+            match reader.read(&mut chunk) {
+                // EOF: a pipe's writer is gone, a tty hung up.
+                Ok(0) => break Some("end of stream".to_string()),
+                Ok(n) => {
+                    for line in lines.feed(&chunk[..n]) {
+                        push(OutputStream::Stdout, &line);
+                    }
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                // The device is unreachable: unplugged, or re-enumerating
+                // after a reset.
+                Err(e) => break Some(e.to_string()),
+            }
+        };
+        if let Some(tail) = lines.finish() {
+            push(OutputStream::Stdout, &tail);
+        }
+        if let Some(reason) = reason {
+            push(
+                OutputStream::Stderr,
+                &format!("serial port closed: {reason}"),
+            );
+        }
+        // Stamped with *this* monitor's session so a thread that outlived
+        // its session cannot be mistaken for the live monitor closing.
+        emit("serial://closed", serde_json::json!({ "session": session }));
+    });
+    MonitorSession {
+        writer: Box::new(writer),
+        stop,
+        join: Some(join),
+    }
+}
+
+/// Open the port and start its reader thread.
+///
+/// Shared by the user's `start_monitor` command and the agent's `serial_read`
+/// auto-start. The reader thread gets its own handle on the port (a `dup` of
+/// the descriptor), so it and the `serial`-guarded writer never share one
+/// object.
 fn spawn_monitor(
-    cli: &ArduinoCli,
     port: &str,
     baudrate: u32,
     emit: Arc<EmitFn>,
     ring: Arc<Mutex<SerialRing>>,
     session: u64,
-) -> Result<Child, String> {
-    let mut child = cli.monitor(port, baudrate).map_err(err_str)?;
-    let stdout = child.stdout.take().ok_or("monitor stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("monitor stderr unavailable")?;
-
-    let emit_out = emit.clone();
-    let ring_out = ring.clone();
-    std::thread::spawn(move || {
-        read_lines_lossy(stdout, |line| {
-            ring_out
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(bancada_core::types::OutputStream::Stdout, line);
-            emit_out(
-                "serial://line",
-                serde_json::json!({ "stream": "stdout", "line": line }),
-            );
-        });
-        // Stamped with *this* monitor's session so a thread that outlived
-        // its child cannot be mistaken for the live monitor closing.
-        emit_out("serial://closed", serde_json::json!({ "session": session }));
-    });
-    std::thread::spawn(move || {
-        read_lines_lossy(stderr, |line| {
-            ring.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(bancada_core::types::OutputStream::Stderr, line);
-            emit(
-                "serial://line",
-                serde_json::json!({ "stream": "stderr", "line": line }),
-            );
-        });
-    });
-
-    Ok(child)
+) -> Result<MonitorSession, String> {
+    let writer = open_monitor_port(port, baudrate)?;
+    let reader = writer.try_clone().map_err(err_str)?;
+    Ok(monitor_over(reader, writer, emit, ring, session))
 }
 
 /// Wrap an `AppHandle` as the shared emitter shape.
@@ -2424,8 +2568,7 @@ fn start_monitor(
     evict_owner(&mut guard);
 
     let session = next_monitor_session(&state.monitor_session);
-    let child = spawn_monitor(
-        &state.cli,
+    let monitor = spawn_monitor(
         &port,
         baudrate,
         app_emitter(app),
@@ -2433,7 +2576,7 @@ fn start_monitor(
         session,
     )?;
 
-    *guard = Some(SerialOwner::Monitor(child));
+    *guard = Some(SerialOwner::Monitor(monitor));
     Ok(session)
 }
 
@@ -2465,24 +2608,23 @@ fn stop_monitor(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Write `data` to the monitor child's stdin **verbatim** — nothing is
-/// appended. The Serial Monitor's line-ending selector (None/NL/CR/NL+CR)
-/// decides what, if anything, terminates a line, so a user who picked "No
-/// line ending" gets exactly the bytes they typed. The agent's `serial_send`
+/// Write `data` to the monitor's port **verbatim** — nothing is appended.
+/// The Serial Monitor's line-ending selector (None/NL/CR/NL+CR) decides
+/// what, if anything, terminates a line, so a user who picked "No line
+/// ending" gets exactly the bytes they typed. The agent's `serial_send`
 /// (`run_serial_send`) still appends `\n` on its own; it is a separate path.
 ///
 /// Split out of `monitor_send` purely so it is testable: the command itself
 /// takes a Tauri `State` and cannot be called from a unit test.
 fn monitor_write(slot: &mut Option<SerialOwner>, data: &str) -> Result<(), String> {
-    let Some(SerialOwner::Monitor(child)) = slot.as_mut() else {
+    let Some(SerialOwner::Monitor(monitor)) = slot.as_mut() else {
         return Err("serial monitor is not running".to_string());
     };
-    let stdin = child.stdin.as_mut().ok_or("monitor stdin unavailable")?;
-    stdin.write_all(data.as_bytes()).map_err(err_str)?;
-    stdin.flush().map_err(err_str)
+    monitor.writer.write_all(data.as_bytes()).map_err(err_str)?;
+    monitor.writer.flush().map_err(err_str)
 }
 
-/// Transmit bytes to the board through the monitor's stdin, verbatim.
+/// Transmit bytes to the board through the monitor's port, verbatim.
 #[tauri::command]
 fn monitor_send(state: State<'_, AppState>, data: String) -> Result<(), String> {
     let mut guard = state.serial.lock().unwrap_or_else(|e| e.into_inner());
@@ -3832,10 +3974,6 @@ const VERIFY_MAX_BYTES: usize = 50_000;
 /// but still never locks `state.agent`.
 struct McpToolCtx {
     token: String,
-    /// arduino-cli, kept only for the serial monitor — which is
-    /// backend-independent, being a plain serial terminal. It is *not* what
-    /// builds: see `backend`.
-    monitor_cli: ArduinoCli,
     sketch_dir: String,
     /// The toolchain this session builds with, frozen at spawn.
     backend: Backend,
@@ -4644,15 +4782,14 @@ fn run_serial_read(
                 };
                 let session = next_monitor_session(&ctx.monitor_session);
                 match spawn_monitor(
-                    &ctx.monitor_cli,
                     &target.port,
                     target.baud,
                     emit.clone(),
                     ctx.serial_ring.clone(),
                     session,
                 ) {
-                    Ok(child) => {
-                        *guard = Some(SerialOwner::Monitor(child));
+                    Ok(monitor) => {
+                        *guard = Some(SerialOwner::Monitor(monitor));
                         // Tell the frontend its monitor state changed, so the
                         // Monitor tab lights up and the auto-start effect
                         // doesn't race a second start. The session id is the
@@ -4699,9 +4836,9 @@ fn run_serial_read(
     (text, false)
 }
 
-/// The `serial_send` tool: one line to the monitor child's stdin, newline
-/// appended — unlike `monitor_send`, which writes verbatim and leaves the
-/// line ending to the Monitor tab's selector.
+/// The `serial_send` tool: one line to the monitor's port, newline appended
+/// — unlike `monitor_send`, which writes verbatim and leaves the line ending
+/// to the Monitor tab's selector.
 /// `board_pinout`: the board model, for the session's project.
 ///
 /// Answers in Markdown rather than JSON. Every other tool here returns a
@@ -4799,16 +4936,14 @@ fn run_serial_send(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool)
         );
     };
     let mut guard = ctx.serial.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(SerialOwner::Monitor(child)) = guard.as_mut() else {
+    let Some(SerialOwner::Monitor(monitor)) = guard.as_mut() else {
         return (
             "serial monitor is not running — call serial_read first to start it".to_string(),
             true,
         );
     };
-    let Some(stdin) = child.stdin.as_mut() else {
-        return ("monitor stdin unavailable".to_string(), true);
-    };
-    if let Err(e) = writeln!(stdin, "{data}").and_then(|()| stdin.flush()) {
+    let w = &mut monitor.writer;
+    if let Err(e) = writeln!(w, "{data}").and_then(|()| w.flush()) {
         return (format!("could not write to the monitor: {e}"), true);
     }
     (format!("sent: {data}"), false)
@@ -4872,15 +5007,33 @@ fn system_prompt_extra(sketch_dir: &str, spec: &BuildSpec) -> String {
          {tool}."
     ));
     out.push_str(
-        " After every edit, run mcp__bancada__verify and iterate \
-         until the build passes. To flash the board, use mcp__bancada__upload \
-         (it targets the board selected in the UI and requires the user's \
-         'Allow uploads' switch — if it reports uploads are not armed, ask \
-         the user to enable the switch instead of retrying). After a \
-         successful upload, call mcp__bancada__serial_read to restart the \
-         serial monitor and watch the boot output; mcp__bancada__serial_read \
-         also reads any new monitor output, and mcp__bancada__serial_send \
-         types a line to the board.",
+        " Carry the work through to the board. When the user asks you to \
+         change what the board does, the job is not done when the code \
+         compiles — it is done when the firmware is running on the board and \
+         its serial output shows the behaviour that was asked for. Work that \
+         whole loop yourself: do not ask permission for a step you are \
+         already allowed to take, and do not tell the user to press Upload or \
+         to open the Serial tab and look.\n\n\
+         The loop is: after every edit run mcp__bancada__verify and fix what \
+         it reports until the build passes; then call mcp__bancada__upload to \
+         flash the board (it targets the board selected in the UI — the \
+         user's 'Allow uploads' switch is their standing consent, so flash \
+         without asking again); then call mcp__bancada__serial_read, passing \
+         wait_s to wait for output rather than returning empty-handed, to \
+         restart the monitor and read what the board actually prints — and \
+         mcp__bancada__serial_send to type a line when the firmware expects \
+         input. Read that output against what the user asked for. Silence \
+         where there should be output, a boot loop, a panic or a watchdog \
+         reset is a result you found, not a result you report and stop at: go \
+         back, fix it, flash again. Finish by saying what the board did, \
+         quoting the lines you saw.\n\n\
+         Stop before the end only when a step is refused for a reason only \
+         the user can clear — uploads are not armed, no port is selected, the \
+         oscilloscope owns the port, or the ESP-IDF target changed under the \
+         session. Those refusals do not become true by retrying: say in one \
+         sentence what you need, and stop. If a tool says a build or flash is \
+         in progress, that one does clear itself — wait and call it again. \
+         Nothing else is a reason to hand back a task half-finished.",
     );
     out
 }
@@ -5280,7 +5433,6 @@ fn agent_start(
         .next_seq();
     let ctx = McpToolCtx {
         token,
-        monitor_cli: state.cli.clone(),
         sketch_dir: sketch_dir.clone(),
         backend,
         spec,
@@ -6002,7 +6154,6 @@ mod tests {
         let cursor_start = hw.ring.lock().unwrap().next_seq();
         let ctx = McpToolCtx {
             token: token.clone(),
-            monitor_cli: cli.clone(),
             sketch_dir: sketch_dir.to_string(),
             backend: Backend::Arduino(cli),
             spec: arduino_spec(None, None),
@@ -6482,7 +6633,8 @@ mod tests {
         // Nothing holds the port: nothing to do, and no refusal.
         assert_eq!(free_port_for_flash(&serial), Ok(()));
 
-        *serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        let (monitor, _board) = dummy_monitor();
+        *serial.lock().unwrap() = Some(SerialOwner::Monitor(monitor));
         assert_eq!(free_port_for_flash(&serial), Ok(()));
         assert!(
             serial.lock().unwrap().is_none(),
@@ -6524,7 +6676,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared_gate = gate();
         let hw = HwParts::default();
-        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        let (monitor, _board) = dummy_monitor();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(monitor));
         let serial = hw.serial.clone();
         let ring = hw.ring.clone();
         let l = start_listener_hw(
@@ -6544,18 +6697,68 @@ mod tests {
         evict_owner(&mut serial.lock().unwrap());
     }
 
-    /// A long-lived stand-in for a monitor child, so tests can install a
-    /// `SerialOwner::Monitor` without a real arduino-cli.
+    /// A monitor over a pseudo-terminal pair. The returned master is "the
+    /// board": write to it and the monitor reads it, read it and you see what
+    /// the monitor sent, drop it and the port has vanished. The slave side is
+    /// raw and short-timed, so stop/join behaves as it does on a real port.
     #[cfg(unix)]
-    fn dummy_monitor_child() -> Child {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg("cat >/dev/null")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn dummy monitor")
+    fn pty_monitor(
+        emit: Arc<EmitFn>,
+        ring: Arc<Mutex<SerialRing>>,
+        session: u64,
+    ) -> (MonitorSession, serialport::TTYPort) {
+        let (mut master, mut slave) = serialport::TTYPort::pair().expect("pty pair");
+        slave.set_timeout(Duration::from_millis(20)).unwrap();
+        master.set_timeout(Duration::from_millis(500)).unwrap();
+        let reader = slave.try_clone_native().expect("clone the slave");
+        (monitor_over(reader, slave, emit, ring, session), master)
+    }
+
+    /// A long-lived stand-in for a running monitor, so tests can install a
+    /// `SerialOwner::Monitor` without hardware. Keep the returned master
+    /// alive for as long as the monitor should look alive.
+    #[cfg(unix)]
+    fn dummy_monitor() -> (MonitorSession, serialport::TTYPort) {
+        pty_monitor(
+            Arc::new(|_: &str, _: serde_json::Value| {}),
+            Arc::new(Mutex::new(SerialRing::default())),
+            0,
+        )
+    }
+
+    /// Poll `events` for up to a second for the first payload named `name`.
+    #[cfg(unix)]
+    fn wait_for_event(events: &Events, name: &str) -> Option<serde_json::Value> {
+        for _ in 0..100 {
+            let found = events
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, payload)| payload.clone());
+            if found.is_some() {
+                return found;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// Read from the pty master until `want` bytes have arrived or a second
+    /// has passed — the monitor's writes land asynchronously.
+    #[cfg(unix)]
+    fn read_from_board(board: &mut serialport::TTYPort, want: usize) -> Vec<u8> {
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut chunk = [0u8; 64];
+        while got.len() < want && Instant::now() < deadline {
+            match board.read(&mut chunk) {
+                Ok(n) => got.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => panic!("reading the pty master: {e}"),
+            }
+        }
+        got
     }
 
     #[cfg(unix)]
@@ -6563,7 +6766,8 @@ mod tests {
     fn serial_read_returns_the_ring_backlog_then_reports_quiet() {
         let dir = tempfile::tempdir().unwrap();
         let hw = HwParts::default();
-        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(dummy_monitor_child()));
+        let (monitor, _board) = dummy_monitor();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(monitor));
         let serial = hw.serial.clone();
         let ring = hw.ring.clone();
         let l = start_listener_hw(
@@ -6592,21 +6796,19 @@ mod tests {
         evict_owner(&mut serial.lock().unwrap());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_bad_byte_does_not_end_serial_capture() {
         // The regression: `lines().map_while(|l| l.ok())` ended the reader
-        // thread on the first non-UTF-8 line, while the monitor child stayed
-        // alive holding the port. The console simply stopped. An ESP32's ROM
-        // bootloader prints at 74880 baud and reads as garbage at 115200, so
-        // this arrived on ordinary hardware, not a contrived stream.
+        // thread on the first non-UTF-8 line, while the port stayed open.
+        // The console simply stopped. An ESP8266's ROM prints at 74880 baud
+        // and reads as garbage at 115200, so this arrived on ordinary
+        // hardware, not a contrived stream.
         let mut src: Vec<u8> = Vec::new();
         src.extend_from_slice(b"before\n");
         src.extend_from_slice(&[0xff, 0xfe, b'\n']); // invalid UTF-8
         src.extend_from_slice(b"after\n");
 
-        let mut seen = Vec::new();
-        read_lines_lossy(std::io::Cursor::new(src), |l| seen.push(l.to_string()));
+        let seen = LineSplitter::default().feed(&src);
 
         assert_eq!(seen.len(), 3, "capture stopped early: {seen:?}");
         assert_eq!(seen[0], "before");
@@ -6619,37 +6821,43 @@ mod tests {
     }
 
     #[test]
-    fn serial_capture_ends_only_at_eof() {
-        // EOF must still end the loop — that is what reports a dead child.
-        let mut seen = Vec::new();
-        read_lines_lossy(std::io::Cursor::new(b"one\ntwo".to_vec()), |l| {
-            seen.push(l.to_string())
-        });
-        // A final line with no trailing newline is still delivered.
-        assert_eq!(seen, ["one", "two"]);
+    fn serial_capture_delivers_a_final_line_without_a_newline_at_the_end() {
+        let mut lines = LineSplitter::default();
+        assert_eq!(lines.feed(b"one\ntwo"), ["one"]);
+        // Still pending — the board may be mid-line.
+        assert_eq!(lines.feed(b""), Vec::<String>::new());
+        assert_eq!(lines.finish(), Some("two".to_string()));
+        assert_eq!(lines.finish(), None);
+    }
+
+    #[test]
+    fn serial_capture_reassembles_a_line_split_across_reads() {
+        // A USB read boundary falls wherever it falls; "I (12) boot:" arriving
+        // in two chunks is one line, not two.
+        let mut lines = LineSplitter::default();
+        assert_eq!(lines.feed(b"I (12) bo"), Vec::<String>::new());
+        assert_eq!(lines.feed(b"ot: ok\r\nnext"), ["I (12) boot: ok"]);
+        assert_eq!(lines.finish(), Some("next".to_string()));
     }
 
     #[test]
     fn serial_capture_strips_crlf() {
-        let mut seen = Vec::new();
-        read_lines_lossy(std::io::Cursor::new(b"a\r\nb\n".to_vec()), |l| {
-            seen.push(l.to_string())
-        });
-        assert_eq!(seen, ["a", "b"]);
+        let mut lines = LineSplitter::default();
+        assert_eq!(lines.feed(b"a\r\nb\n\r\n"), ["a", "b", ""]);
+        assert_eq!(lines.feed(b"c\r"), Vec::<String>::new());
+        assert_eq!(lines.finish(), Some("c".to_string()));
     }
 
-    /// Poll `path` for up to a second, waiting for the sink child to flush.
-    #[cfg(unix)]
-    fn read_when_written(path: &std::path::Path, want_len: usize) -> String {
-        for _ in 0..50 {
-            if let Ok(s) = std::fs::read_to_string(path) {
-                if s.len() >= want_len {
-                    return s;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        std::fs::read_to_string(path).unwrap_or_default()
+    #[test]
+    fn a_stream_with_no_newline_is_still_delivered_in_bounded_pieces() {
+        // Binary output, or garbage at a rate so wrong it never produces a
+        // 0x0A: the buffer must not grow forever waiting for one.
+        let mut lines = LineSplitter::default();
+        let blob = vec![b'x'; MONITOR_MAX_LINE * 2 + 10];
+        let seen = lines.feed(&blob);
+        assert_eq!(seen.len(), 2, "{} pieces", seen.len());
+        assert!(seen.iter().all(|l| l.len() == MONITOR_MAX_LINE));
+        assert_eq!(lines.finish().map(|l| l.len()), Some(10));
     }
 
     /// The Monitor tab's send box owns the line ending, so the write path
@@ -6658,27 +6866,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn monitor_write_sends_data_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let out_file = dir.path().join("sent.txt");
-        let child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("cat > {}", out_file.display()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sink");
-        let mut slot = Some(SerialOwner::Monitor(child));
+        let (monitor, mut board) = dummy_monitor();
+        let mut slot = Some(SerialOwner::Monitor(monitor));
         monitor_write(&mut slot, "AT\r").unwrap();
         monitor_write(&mut slot, "X").unwrap();
-        // `cat` copies each read straight through, so the four bytes land
-        // without EOF — read them *before* evicting, because `evict_owner`
-        // SIGTERMs the sink and anything still in flight dies with it. Four
-        // bytes is also the tell: an implicit "\n" per write would make the
+        // Four bytes is the tell: an implicit "\n" per write would make the
         // first four `"AT\r\n"`, not `"AT\rX"`.
-        let written = read_when_written(&out_file, 4);
+        let written = read_from_board(&mut board, 4);
         evict_owner(&mut slot);
-        assert_eq!(written, "AT\rX");
+        assert_eq!(written, b"AT\rX");
     }
 
     #[test]
@@ -6688,13 +6884,56 @@ mod tests {
         assert!(err.contains("not running"), "{err}");
     }
 
-    /// The stale-reader guard: a monitor's stdout thread stamps its own
-    /// session onto `serial://closed`, so a thread outliving its child can
-    /// be told apart from the monitor that replaced it.
+    /// What the board prints reaches both consumers — the Monitor tab's
+    /// event and the agent's ring — one line each, CRLF stripped.
     #[cfg(unix)]
     #[test]
-    fn a_closed_monitor_stamps_its_session_on_the_event() {
-        let dir = tempfile::tempdir().unwrap();
+    fn monitor_lines_reach_the_event_and_the_ring() {
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let collector = events.clone();
+        let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
+            collector.lock().unwrap().push((name.to_string(), payload));
+        });
+        let ring = Arc::new(Mutex::new(SerialRing::default()));
+        let (monitor, mut board) = pty_monitor(emit, ring.clone(), 7);
+
+        board.write_all(b"I (12) boot: ESP-IDF v5.4\r\n").unwrap();
+        board.flush().unwrap();
+
+        let line = wait_for_event(&events, "serial://line").expect("a serial://line event");
+        assert_eq!(
+            line,
+            serde_json::json!({ "stream": "stdout", "line": "I (12) boot: ESP-IDF v5.4" })
+        );
+        let read = ring.lock().unwrap().read_since(0, 1 << 16);
+        assert_eq!(read.text, "I (12) boot: ESP-IDF v5.4");
+
+        // An explicit stop closes the session — and says so, for the same
+        // reason the killed child's EOF used to: the frontend's recapture
+        // ladder is built around `serial://closed`.
+        let mut slot = Some(SerialOwner::Monitor(monitor));
+        evict_owner(&mut slot);
+        let closed = wait_for_event(&events, "serial://closed").expect("serial://closed");
+        assert_eq!(closed, serde_json::json!({ "session": 7 }));
+        // A stop the user asked for is not an error, so no stderr note.
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(n, p)| n == "serial://line" && p["stream"] == "stderr"),
+            "an explicit stop must not be reported as a port failure"
+        );
+    }
+
+    /// The stale-reader guard: a monitor's reader thread stamps its own
+    /// session onto `serial://closed`, so a thread outliving its port can be
+    /// told apart from the monitor that replaced it. And when the port goes
+    /// away under it — a native-USB board re-enumerating after a reset — the
+    /// panel is told why, next to the last line the board managed to print.
+    #[cfg(unix)]
+    #[test]
+    fn a_vanished_port_closes_the_monitor_with_its_session_and_a_reason() {
         let events: Events = Arc::new(Mutex::new(Vec::new()));
         let collector = events.clone();
         let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
@@ -6703,33 +6942,84 @@ mod tests {
         let counter = Arc::new(AtomicU64::new(0));
         let session = next_monitor_session(&counter);
         assert_eq!(session, 1);
-        // `exit 0` — the child is gone at once, so its stdout hits EOF and
-        // the reader thread emits the close.
-        let child = spawn_monitor(
-            &stub_cli(&dir, "exit 0"),
-            "/dev/ttyTEST0",
-            115200,
-            emit,
-            Arc::new(Mutex::new(SerialRing::default())),
-            session,
-        )
-        .expect("spawn monitor");
-        let mut closed = None;
-        for _ in 0..100 {
-            closed = events
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|(name, _)| name == "serial://closed")
-                .map(|(_, payload)| payload.clone());
-            if closed.is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let closed = closed.expect("serial://closed was never emitted");
+        let (monitor, board) =
+            pty_monitor(emit, Arc::new(Mutex::new(SerialRing::default())), session);
+        // The board is gone: the master side of the pty closes, and the
+        // slave's next read fails the way an unplugged tty's does.
+        drop(board);
+
+        let closed = wait_for_event(&events, "serial://closed").expect("serial://closed");
         assert_eq!(closed, serde_json::json!({ "session": 1 }));
-        kill_child(child);
+        let note = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, p)| n == "serial://line" && p["stream"] == "stderr")
+            .map(|(_, p)| p["line"].as_str().unwrap_or_default().to_string())
+            .expect("an unexpected close reports why, on stderr");
+        assert!(note.starts_with("serial port closed: "), "{note}");
+
+        // Evicting a monitor whose port already died must not hang or panic:
+        // the thread is finished, and the join returns at once.
+        let mut slot = Some(SerialOwner::Monitor(monitor));
+        evict_owner(&mut slot);
+        assert!(slot.is_none());
+    }
+
+    /// Opens the port named by `BANCADA_LIVE_PORT` for three seconds and
+    /// prints what arrived. Proves the native monitor against real hardware:
+    /// the `arduino-cli monitor` child it replaced failed on an ESP-IDF-only
+    /// bench for a reason no pty can reproduce (a pluggable tool that is only
+    /// installed with an Arduino platform). Run with
+    ///
+    /// ```text
+    /// BANCADA_LIVE_PORT=/dev/ttyACM0 cargo test -p bancada live_monitor -- --ignored --nocapture
+    /// ```
+    ///
+    /// `BANCADA_LIVE_BAUD` overrides the default 115200.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "opens a real serial port: needs a board on BANCADA_LIVE_PORT"]
+    fn live_monitor_reads_a_real_board() {
+        let Ok(port) = std::env::var("BANCADA_LIVE_PORT") else {
+            eprintln!("BANCADA_LIVE_PORT not set — skipping");
+            return;
+        };
+        let baud = std::env::var("BANCADA_LIVE_BAUD")
+            .ok()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or(115_200);
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let collector = events.clone();
+        let emit: Arc<EmitFn> = Arc::new(move |name: &str, payload: serde_json::Value| {
+            collector.lock().unwrap().push((name.to_string(), payload));
+        });
+        let ring = Arc::new(Mutex::new(SerialRing::default()));
+
+        let monitor = spawn_monitor(&port, baud, emit, ring.clone(), 1).expect("open the port");
+        std::thread::sleep(Duration::from_secs(3));
+        let closed_early = events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == "serial://closed");
+        assert!(
+            !closed_early,
+            "the port closed under a live monitor: {:?}",
+            events.lock().unwrap()
+        );
+
+        let mut slot = Some(SerialOwner::Monitor(monitor));
+        evict_owner(&mut slot);
+        let text = ring.lock().unwrap().read_since(0, 1 << 20).text;
+        eprintln!(
+            "--- {} bytes from {port} at {baud} baud in 3 s ---\n{text}",
+            text.len()
+        );
+        assert!(
+            wait_for_event(&events, "serial://closed").is_some(),
+            "stopping must report the close"
+        );
     }
 
     #[test]
@@ -6739,20 +7029,13 @@ mod tests {
         assert_eq!(next_monitor_session(&counter), 2);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn serial_send_writes_the_line_to_the_monitor_stdin() {
+    fn serial_send_writes_the_line_to_the_monitor_port() {
         let dir = tempfile::tempdir().unwrap();
-        let out_file = dir.path().join("sent.txt");
-        let child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("head -n 1 > {}", out_file.display()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn sink");
         let hw = HwParts::default();
-        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(child));
+        let (monitor, mut board) = dummy_monitor();
+        *hw.serial.lock().unwrap() = Some(SerialOwner::Monitor(monitor));
         let serial = hw.serial.clone();
         let l = start_listener_hw(
             stub_cli(&dir, "exit 0"),
@@ -6763,18 +7046,10 @@ mod tests {
         );
         let (is_error, text) = call_tool(&l, "serial_send", serde_json::json!({"data": "AT+GMR"}));
         assert!(!is_error, "{text}");
-        // head exits after one line; poll for the file it wrote.
-        let mut written = String::new();
-        for _ in 0..50 {
-            if let Ok(s) = std::fs::read_to_string(&out_file) {
-                if !s.is_empty() {
-                    written = s;
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(written, "AT+GMR\n");
+        // The agent's path appends the newline itself — unlike the Monitor
+        // tab's, which sends exactly what its line-ending selector built.
+        let written = read_from_board(&mut board, 7);
+        assert_eq!(written, b"AT+GMR\n");
         evict_owner(&mut serial.lock().unwrap());
     }
 
@@ -7238,6 +7513,55 @@ mod tests {
         // not loop retrying reads the guard will refuse.
         assert!(prompt.contains("outside"), "{prompt}");
         assert!(prompt.contains("sandbox"), "{prompt}");
+    }
+
+    #[test]
+    fn the_system_prompt_tells_the_agent_to_finish_the_job_on_the_board() {
+        // The tools to carry a firmware task to the end have always been
+        // granted; the prompt merely *described* them, and sessions stopped
+        // at "it compiles, now press Upload". Both backends get the same
+        // mandate, so both are asserted.
+        for prompt in [
+            system_prompt_extra("/home/me/Blink", &arduino_spec(Some("esp32s3"), None)),
+            system_prompt_extra(
+                "/home/me/blink",
+                &BuildSpec::Idf {
+                    target: "esp32c6".to_string(),
+                },
+            ),
+        ] {
+            assert!(prompt.contains("mcp__bancada__upload"), "{prompt}");
+            assert!(prompt.contains("mcp__bancada__serial_read"), "{prompt}");
+            assert!(prompt.contains("mcp__bancada__serial_send"), "{prompt}");
+            // Naming the tools is not enough: the prompt has to forbid
+            // handing the task back at the point where it could take the
+            // next step itself.
+            assert!(
+                prompt.contains("do not ask permission"),
+                "prompt must forbid stopping to ask before a step it may take: {prompt}"
+            );
+            assert!(
+                prompt.contains("do not tell the user to press Upload"),
+                "prompt must forbid delegating the flash back to the user: {prompt}"
+            );
+            // And it has to say what "done" means, so the session judges the
+            // board's behaviour instead of the compiler's exit code.
+            assert!(
+                prompt.contains("not done when the code compiles"),
+                "prompt must define done as observed behaviour: {prompt}"
+            );
+            assert!(
+                prompt.contains("wait_s"),
+                "prompt must say how to wait for output: {prompt}"
+            );
+            // The refusals only the user can clear stay non-retryable — the
+            // point of this change is a session that finishes, not one that
+            // hammers a switch the user has to flip.
+            assert!(
+                prompt.contains("uploads are not armed"),
+                "prompt must name the one refusal it must not retry: {prompt}"
+            );
+        }
     }
 
     #[test]
@@ -8242,7 +8566,6 @@ mod tests {
         let hw = HwParts::default();
         let ctx = McpToolCtx {
             token: token.clone(),
-            monitor_cli: cli.clone(),
             sketch_dir: sketch_dir.clone(),
             backend: Backend::Arduino(cli),
             spec: arduino_spec(Some(&profile), None),

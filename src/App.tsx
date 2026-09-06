@@ -7,7 +7,7 @@ import * as api from "./api";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
 import { idfSilentSerialWarning, silentSerialWarning } from "./boardOptions";
-import { MAX_RECAPTURE_ATTEMPTS, recapturePlan } from "./monitorRecovery";
+import { MAX_RECAPTURE_ATTEMPTS, giveUpMarker, recapturePlan } from "./monitorRecovery";
 import {
   comparableIdentity,
   flashTargetMismatch,
@@ -430,6 +430,9 @@ export default function App() {
   const monitorWantedRef = useRef(false);
   /** Recapture attempts since the last successful start. */
   const recaptureAttemptRef = useRef(0);
+  /** Why the last automatic start failed, for the give-up marker. Null once
+   *  a start succeeds: a stale reason must not be pinned on a later give-up. */
+  const lastOpenErrorRef = useRef<string | null>(null);
   /** Render mirror of `recaptureAttemptRef` for the Monitor's status chip.
    *  Written once per rung of the ladder, not per line. */
   const [recaptureAttempt, setRecaptureAttempt] = useState(0);
@@ -2027,7 +2030,8 @@ export default function App() {
         monitorWantedRef.current = false;
         recaptureAttemptRef.current = 0;
         setRecaptureAttempt(0);
-        serialStore.push("info", "— gave up re-opening the port —", Date.now());
+        serialStore.push("info", giveUpMarker(lastOpenErrorRef.current), Date.now());
+        lastOpenErrorRef.current = null;
       }
       return;
     }
@@ -2078,10 +2082,13 @@ export default function App() {
       monitorWantedRef.current = true;
       recaptureAttemptRef.current = 0;
       setRecaptureAttempt(0);
-    } catch {
-      // The port exists but will not open — still re-enumerating, or briefly
-      // held by a dying previous child. This is the case that used to end
-      // capture for good after a flash.
+      lastOpenErrorRef.current = null;
+    } catch (e) {
+      // The port exists but will not open — still re-enumerating, briefly
+      // held by a dying previous session, or not ours to open at all. This is
+      // the case that used to end capture for good after a flash. Quiet by
+      // design, but not amnesiac: the reason surfaces if the ladder gives up.
+      lastOpenErrorRef.current = String(e);
       scheduleRecapture();
     }
   }, [selectedPort, baudrate, scheduleRecapture]);

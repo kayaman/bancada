@@ -3,6 +3,7 @@ import {
   buildBlockedReason,
   projectButtonLabel,
   projectMenuItems,
+  resolveBuildTarget,
   retargetBlockedReason,
   setTargetBlockedReason,
 } from "../toolbarModel";
@@ -119,5 +120,68 @@ describe("setTargetBlockedReason", () => {
     expect(setTargetBlockedReason({ ...base, busy: true })).toBe(
       "a build is already running",
     );
+  });
+});
+
+describe("resolveBuildTarget", () => {
+  const arduino = {
+    kind: "arduino" as const,
+    profile: null,
+    detectedFqbn: null,
+    idfTarget: null,
+  };
+
+  it("prefers the sketch.yaml profile over the detected board", () => {
+    expect(
+      resolveBuildTarget({ ...arduino, profile: "uno", detectedFqbn: "arduino:avr:nano" }),
+    ).toEqual({ target: { profile: "uno" } });
+  });
+
+  it("falls back to the board detected on the port", () => {
+    expect(resolveBuildTarget({ ...arduino, detectedFqbn: "arduino:avr:nano" })).toEqual({
+      target: { fqbn: "arduino:avr:nano" },
+    });
+  });
+
+  it("asks for a profile when a bridge port reports no board", () => {
+    expect(resolveBuildTarget(arduino)).toEqual({
+      error:
+        "No sketch.yaml profile, and this port reports no board identity (USB bridge) — create a profile to set the board.",
+    });
+  });
+
+  it("treats an unrecognised folder as Arduino, like the backend does", () => {
+    expect(resolveBuildTarget({ ...arduino, kind: "unknown" })).toEqual({
+      error:
+        "No sketch.yaml profile, and this port reports no board identity (USB bridge) — create a profile to set the board.",
+    });
+  });
+
+  it("needs no profile or board for an ESP-IDF project with a target", () => {
+    // The chip target lives in sdkconfig and the backend reads it there; the
+    // port being a bare USB bridge is the normal case for a devkit, not a
+    // reason to refuse. sketch.yaml is an Arduino concept and never comes up.
+    expect(
+      resolveBuildTarget({ kind: "idf", profile: null, detectedFqbn: null, idfTarget: "esp32s3" }),
+    ).toEqual({ target: {} });
+  });
+
+  it("ignores a stale profile or detected board on an ESP-IDF project", () => {
+    expect(
+      resolveBuildTarget({
+        kind: "idf",
+        profile: "uno",
+        detectedFqbn: "esp32:esp32:esp32s3",
+        idfTarget: "esp32s3",
+      }),
+    ).toEqual({ target: {} });
+  });
+
+  it("asks for a chip target, not a profile, on an ESP-IDF project without one", () => {
+    expect(
+      resolveBuildTarget({ kind: "idf", profile: null, detectedFqbn: null, idfTarget: null }),
+    ).toEqual({
+      error: "This ESP-IDF project has no target set — choose a chip in the toolbar before building.",
+    });
   });
 });

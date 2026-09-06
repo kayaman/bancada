@@ -5,7 +5,7 @@
 //! callback so the UI can show live progress.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::types::*;
 use crate::{Error, Result};
@@ -81,18 +81,6 @@ impl ArduinoCli {
         on_line: impl FnMut(OutputLine),
     ) -> Result<RunResult> {
         crate::proc::stream(self.base_command(args), &self.bin, on_line)
-    }
-
-    /// Spawn a long-lived subprocess (serial monitor) without waiting.
-    /// stdin is piped so the caller can transmit to the board.
-    pub fn spawn_raw(&self, args: &[&str]) -> Result<Child> {
-        Command::new(&self.bin)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| self.map_spawn_err(e))
     }
 
     // ---------- queries ----------
@@ -354,12 +342,6 @@ impl ArduinoCli {
         let args = upload_args(sketch_dir, profile, fqbn, port);
         self.run_streaming(&as_str_slice(&args), on_line)
     }
-
-    /// Spawn `arduino-cli monitor` as a long-lived child process.
-    pub fn monitor(&self, port: &str, baudrate: u32) -> Result<Child> {
-        let args = monitor_args(port, baudrate);
-        self.spawn_raw(&as_str_slice(&args))
-    }
 }
 
 // ---------- argument construction ----------
@@ -485,13 +467,6 @@ fn core_install_args(id: &str, version: Option<&str>) -> Vec<String> {
 /// not to the command line.
 fn board_details_args(fqbn: &str) -> Vec<String> {
     owned(&["board", "details", "--fqbn", fqbn.trim()])
-}
-
-/// `monitor -p <port> -c baudrate=<n>`
-fn monitor_args(port: &str, baudrate: u32) -> Vec<String> {
-    let mut args = owned(&["monitor", "-p", port, "-c"]);
-    args.push(format!("baudrate={baudrate}"));
-    args
 }
 
 // ---------- tests ----------
@@ -731,14 +706,6 @@ mod tests {
         let args = board_details_args("  esp32:esp32:esp32s3:CDCOnBoot=cdc  ");
         assert_eq!(args.len(), 4, "{args:?}");
         assert_eq!(args[3], "esp32:esp32:esp32s3:CDCOnBoot=cdc", "and trimmed");
-    }
-
-    #[test]
-    fn monitor_encodes_the_baudrate_as_a_config_pair() {
-        assert_eq!(
-            monitor_args("/dev/ttyUSB0", 115200),
-            ["monitor", "-p", "/dev/ttyUSB0", "-c", "baudrate=115200"]
-        );
     }
 
     #[test]

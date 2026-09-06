@@ -50,7 +50,8 @@ describe("serial port handoff", () => {
     const start = appSource.indexOf("const startMonitorQuiet");
     const body = appSource.slice(start, appSource.indexOf("\n  }, [", start));
     expect(body).toContain("catch");
-    const caught = body.indexOf("} catch {");
+    // `(e)`: the reason is kept for the give-up marker, not swallowed.
+    const caught = body.indexOf("} catch (e) {");
     expect(caught).toBeGreaterThan(-1);
     expect(
       body.slice(caught),
@@ -122,7 +123,9 @@ describe("serial port handoff", () => {
     expect(start, "scheduleRecapture not found in App.tsx").toBeGreaterThan(-1);
     const body = appSource.slice(start, appSource.indexOf("\n  }, [", start));
 
-    const give = body.indexOf("gave up re-opening the port");
+    // The marker text itself lives in `giveUpMarker`, which also carries the
+    // last open error — see monitorRecovery.test.ts for its wording.
+    const give = body.indexOf("giveUpMarker(");
     expect(give, "giving up must say so in the log").toBeGreaterThan(-1);
     const head = body.slice(0, give);
     expect(head, "give-up is gated on the ladder being exhausted").toContain(

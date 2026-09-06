@@ -28,6 +28,22 @@ import { nextBackoff } from "./obs/backoff";
  */
 export const MAX_RECAPTURE_ATTEMPTS = 5;
 
+/**
+ * The marker written to the log when the ladder gives up.
+ *
+ * It carries the last open error, when there was one. Five silent retries
+ * ending in a bare "gave up" read as a hardware fault, and on the bench the
+ * usual cause was nothing of the kind: `Permission denied`, because the user
+ * had just been added to `dialout` and the login session predated it. The
+ * panel had the reason all along and threw it away.
+ */
+export function giveUpMarker(lastError: string | null): string {
+  const why = lastError?.trim();
+  return why
+    ? `— gave up re-opening the port: ${why} —`
+    : "— gave up re-opening the port —";
+}
+
 export interface RecaptureState {
   /** The standing request for capture. False after an *explicit* stop — the
    *  user's Stop button, the scope taking the port, the pre-flash handoff. */

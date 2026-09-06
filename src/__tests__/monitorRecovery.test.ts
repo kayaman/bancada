@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_RECAPTURE_ATTEMPTS, recapturePlan } from "../monitorRecovery";
+import { MAX_RECAPTURE_ATTEMPTS, giveUpMarker, recapturePlan } from "../monitorRecovery";
 
 const state = (over: Partial<Parameters<typeof recapturePlan>[0]> = {}) => ({
   wanted: true,
@@ -46,5 +46,20 @@ describe("recapturePlan", () => {
       total += recapturePlan(state({ attempt: a })).delayMs;
     }
     expect(total).toBeGreaterThan(10_000);
+  });
+});
+
+describe("giveUpMarker", () => {
+  it("names the reason the port would not open", () => {
+    // On the bench: the user was added to dialout, the session predated it,
+    // and five silent retries ended in a marker that blamed nothing.
+    expect(giveUpMarker("could not open /dev/ttyACM0 at 115200 baud: Permission denied")).toBe(
+      "— gave up re-opening the port: could not open /dev/ttyACM0 at 115200 baud: Permission denied —",
+    );
+  });
+
+  it("stays bare when nothing was ever reported", () => {
+    expect(giveUpMarker(null)).toBe("— gave up re-opening the port —");
+    expect(giveUpMarker("  ")).toBe("— gave up re-opening the port —");
   });
 });

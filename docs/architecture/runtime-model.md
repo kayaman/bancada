@@ -32,50 +32,56 @@ because only it guards genuinely exclusive hardware.
 
 ```rust
 enum SerialOwner {
-    Monitor(Child),        // an arduino-cli monitor subprocess
-    Scope(ScopeSession),   // a raw serialport handle + reader thread
+    Monitor(MonitorSession), // our own serialport handle + reader thread
+    Scope(ScopeSession),     // a raw serialport handle + reader thread
 }
 ```
 
 > Whoever currently holds the serial port. **Exactly one owner at a time.**
 
 Acquiring the port for either owner **evicts** the other (`evict_owner`), which
-kills and reaps a monitor child or politely stops a scope session — writing
-`cmd_stop()` to the firmware, flagging the reader thread down, dropping the
-writer, and joining.
+stops a monitor session — flagging the reader thread down, dropping the writer,
+joining — or politely stops a scope session, which writes `cmd_stop()` to the
+firmware first and then does the same.
 
 `identify_board` evicts too, because esptool needs the port to itself.
 
-### Evicting the monitor is a *graceful* stop, not a kill
+### The monitor opens the port itself
 
-`arduino-cli monitor` never opens the port itself — it spawns a
-`serial-monitor` pluggable tool that does. So `kill_child` sends **SIGTERM and
-waits** (up to `MONITOR_TERM_GRACE`, 1 s; measured cost ~10 ms), falling back
-to SIGKILL only if that grace expires.
+The monitor used to be an `arduino-cli monitor` child. That tied a plain
+serial terminal not just to arduino-cli but to an *installed Arduino
+platform*: arduino-cli delegates to a `serial-monitor` pluggable tool that is
+only ever installed as a platform dependency. On an ESP-IDF-only bench —
+arduino-cli present, no cores — every start died at once with *No monitor
+available for the port protocol serial*. That line landed in the Serial tab,
+`serial://closed` followed, the recapture ladder tried five more times and
+filled the panel with the same error, and the dead child sat unreaped in the
+slot as a zombie. None of it had anything to do with the board.
 
-SIGKILL alone left the grandchild alive, reparented to init, still holding the
-tty and still draining the byte stream. It produced two faults that looked
-unrelated: a flash failing with *esptool could not connect* (the port was
-taken) and a freshly started monitor printing nothing (the orphan was eating
-the data) — while the UI correctly believed it had stopped the monitor. Every
-subsequent start leaked another one, so swapping cables or sockets never
-helped.
+`MonitorSession` opens the port with the same `serialport` crate the scope
+uses, DTR and RTS both asserted (what `serial-monitor` did, and what keeps a
+devkit's auto-program circuit from pulling IO0). Its reader thread blocks at
+most `MONITOR_READ_TIMEOUT` (100 ms) per read and checks its stop flag between
+reads, so `evict_owner` waits at most that long — under `serial`, on the flash
+path — for the reader's descriptor to close. The join is what makes "stopped"
+mean *the port is free*; returning before it would hand esptool a port still
+held for one more read. The thread emits `serial://closed` whether it ended on
+the flag or on the port going away, exactly as the child's EOF did, and only
+the unexpected case adds a stderr line saying why.
 
-**Killing the process group is not the fix, and was tried first.**
-`serial-monitor` puts itself in its *own* process group (verified live: its
-pgid is its own pid, not arduino-cli's), so `killpg` on the child's group never
-reaches it. Only arduino-cli's own signal handling tears it down.
-
-This is the one place the leaf-lock "bounded-short only" rule is stretched: the
-grace is spent under `serial`. That is deliberate — an orphan holding the port
-is unbounded, and 1 s is not.
+The child-process era left one lesson behind, kept in `kill_child` for the
+agent's `claude` session: SIGKILL alone left arduino-cli's grandchild alive,
+reparented to init, still holding the tty and still draining the byte stream —
+esptool *could not connect* and a fresh monitor printed nothing, while the UI
+correctly believed it had stopped. Killing the process group did not help
+(`serial-monitor` sat in its own), so `kill_child` sends **SIGTERM and waits**
+(up to `MONITOR_TERM_GRACE`, 1 s) before falling back to SIGKILL.
 
 ### The lock contract
 
 `serial` is a **leaf lock**:
 
-- Held only across bounded-short operations — child spawn, port open, pipe
-  write, evict. **Never** across a compile, an upload, or a wait loop.
+- Held only across bounded-short operations — port open, port write, evict. **Never** across a compile, an upload, or a wait loop.
 - May be taken by: Tauri commands, `RunEvent::Exit`, and the agent's MCP
   listener thread.
 - **Never** taken by the monitor, scope or MQTT reader threads — those are
@@ -168,8 +174,7 @@ tasks — everything long-lived is a `std::thread`.
 | Thread | Lifetime and stop mechanism |
 |---|---|
 | **Hotplug watcher** | Never stops. 2 s poll of `available_ports()`, keyed by `port_key`; emits `ports://changed`. The first tick only seeds the previous set. A failed enumeration never emits and never kills the thread. |
-| **Monitor stdout reader** | Ends at pipe EOF, emitting `serial://closed`. Killed indirectly by `evict_owner`. Owns only the emitter and ring `Arc`s. |
-| **Monitor stderr reader** | Same. **Not optional** — an undrained pipe wedges the child. |
+| **Monitor reader** | Reads the port with a 100 ms timeout, checking its stop flag between reads. Ends on the flag or on the port going away, emitting `serial://closed` either way. Stopped and joined by `evict_owner`. Owns only the emitter and ring `Arc`s. |
 | **Scope reader** | `AtomicBool` stop flag checked each loop; `stop_scope_session` sets it, drops the writer, joins. Also exits early if a channel send fails (the frontend is gone). |
 | **MQTT connection** | `AtomicBool` plus `client.disconnect()` — which is what actually unblocks `connection.iter()` — then join. **Never retries:** any error emits `closed` and breaks. |
 | **Device-proxy accept loop** | `Server::unblock()`. An `AtomicBool` cannot interrupt a blocking `accept`. |

@@ -228,6 +228,17 @@ recorded, not accidental.
   reads silence as "no caveats" gives precisely the confidently-wrong pin
   advice the board model exists to prevent.
 
+That structure is what lets the **system prompt be demanding**. It tells the
+session to finish on the board — verify, flash, restart the monitor, read the
+output, and judge it against the request — rather than stopping at a passing
+build and handing the hardware back. None of that widens anything: every step
+it names is a tool the session already had, aimed at a target it cannot
+choose. The arm switch, not the prompt's tone, is what decides whether a flash
+happens at all, and the prompt is explicit that an unarmed `upload`, an
+unselected port and a scope-held port are refusals to *report*, never to
+retry — an eager session that hammers a switch only the user can flip is the
+failure mode this wording has to avoid as much as one that gives up early.
+
 ### ESP-IDF: the same structure, one new refusal
 
 Bancada drives two build backends, and the tool surface does **not** grow to

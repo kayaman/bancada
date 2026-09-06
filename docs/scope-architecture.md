@@ -11,7 +11,7 @@ A software oscilloscope with two sources feeding one TypeScript engine:
 ```
 ESP32 firmware ──serial──▶ Rust scope reader ──Channel (binary)──┐
                             (sync/CRC/seq only)                  ▼
-arduino-cli monitor ──▶ serial://line events ──▶  TS ScopeEngine (src/scope/)
+Rust serial monitor ──▶ serial://line events ──▶  TS ScopeEngine (src/scope/)
                                                   rings · trigger · measure
                                                   · decimate · FFT worker
                                                         │

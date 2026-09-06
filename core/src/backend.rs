@@ -20,12 +20,13 @@
 //!
 //! ## What is *not* here
 //!
-//! Board listing, core and library management, and the serial monitor stay on
+//! Board listing, core and library management stay on
 //! [`crate::cli::ArduinoCli`]. They have no ESP-IDF analogue — "add a registry
 //! library to a profile" is not a question `idf.py` can answer — and a trait
-//! spanning them would be a wall of `unimplemented!()`. The serial monitor in
-//! particular is backend-independent: `arduino-cli monitor` is a plain serial
-//! terminal and works against an IDF-flashed board unchanged.
+//! spanning them would be a wall of `unimplemented!()`. The serial monitor is
+//! not here either, for the opposite reason: it belongs to *neither*
+//! toolchain. The app opens the port itself (`serialport`), so an IDF-flashed
+//! board and an Arduino one read identically.
 
 use std::path::Path;
 

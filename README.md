@@ -232,7 +232,8 @@ scaffolded library, a fetched library and a newly created project actually
     sketchbook library would otherwise be invisible to the build. The flip
     side is that such an entry names a path on this machine, so a `sketch.yaml`
     carrying one is not portable to a collaborator
-- **Serial monitor** via `arduino-cli monitor`, in the **Serial** tab. The baud
+- **Serial monitor** in the **Serial** tab. Bancada opens the port itself, so
+  it works the same on an ESP-IDF-only bench with no Arduino platform. The baud
   is read out of the sketch's own `Serial.begin`, with a per-sketch override
   when you want to listen at something else; the rate list includes 74880, the
   ESP8266 boot-ROM rate, so a reset banner is readable rather than mojibake.
@@ -322,7 +323,12 @@ cards show a unified diff of the change **after it has already been
 applied** (no approval step in between), and **Verify** cards mirror
 `arduino-cli compile` (pass/fail, exit code), with the same output also
 streaming to the existing **Build** console. The agent keeps editing and
-re-verifying on its own until the build passes or it gives up. **Stop**
+re-verifying on its own until the build passes, and — when uploads are armed
+— carries on past the build: it flashes the board, restarts the monitor,
+reads what the board actually prints, and judges that against what you asked
+for, rather than stopping at "it compiles" and handing the board back to you.
+It stops early only for something you have to clear yourself (uploads not
+armed, no port selected, the scope holding the port). **Stop**
 interrupts the current turn; **New session** ends the child process and
 clears the transcript.
 

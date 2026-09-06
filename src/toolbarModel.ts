@@ -6,6 +6,7 @@
 // The component renders what these functions hand it.
 
 import { formatAccel, parseAccel } from "./keys";
+import type { ProjectKind } from "./api";
 
 /** Ctrl+O, already wired to `openSketch` by App's global key handler. */
 const ACCEL_OPEN = parseAccel("Ctrl+O");
@@ -44,6 +45,48 @@ export function buildBlockedReason(
   if (s.busy) return "a build is already running";
   if (action === "flash" && !s.selectedPort) return "select a serial port";
   return null;
+}
+
+/** What a build is aimed at. Empty for ESP-IDF: `idf.py` has no board
+ *  concept, and the backend reads the chip target from sdkconfig itself. */
+export interface BuildTarget {
+  profile?: string;
+  fqbn?: string;
+}
+
+/**
+ * What Verify, Flash and an Assistant session build against, or why nothing
+ * can be built yet.
+ *
+ * Arduino: the sketch.yaml profile first, the board detected on the port as
+ * the fallback. An unrecognised folder goes the same way, because it has
+ * always gone down the arduino-cli path and gets arduino-cli's own error.
+ *
+ * ESP-IDF: neither applies. This used to be Arduino-only and told the owner
+ * of an ESP-IDF project to "create a profile" — advice that made no sense,
+ * since sketch.yaml never enters an `idf.py` build and a devkit behind a bare
+ * USB bridge reporting no board identity is the normal case. The one thing an
+ * IDF build needs is the chip target, which the toolbar's target picker sets.
+ */
+export function resolveBuildTarget(s: {
+  kind: ProjectKind;
+  profile: string | null;
+  detectedFqbn: string | null | undefined;
+  idfTarget: string | null;
+}): { target: BuildTarget } | { error: string } {
+  if (s.kind === "idf") {
+    if (s.idfTarget) return { target: {} };
+    return {
+      error:
+        "This ESP-IDF project has no target set — choose a chip in the toolbar before building.",
+    };
+  }
+  if (s.profile) return { target: { profile: s.profile } };
+  if (s.detectedFqbn) return { target: { fqbn: s.detectedFqbn } };
+  return {
+    error:
+      "No sketch.yaml profile, and this port reports no board identity (USB bridge) — create a profile to set the board.",
+  };
 }
 
 /** Why the profile's board cannot be changed right now, or null. */
