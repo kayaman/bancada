@@ -15,3 +15,7 @@ src-tauri/target/
 # that committing one by accident is painful to undo.
 *.img
 *.img.xz
+
+# Claude Code worktrees: full checkouts with their own target/.
+# .claude/skills/ is tracked; this must never be staged.
+/.claude/worktrees/
