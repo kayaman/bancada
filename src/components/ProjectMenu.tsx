@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { loadSettings, type AppSettings } from "../api";
 import { projectButtonLabel, projectMenuItems, type ProjectAction } from "../toolbarModel";
 import Menu from "./Menu";
@@ -23,8 +23,7 @@ type Anchor = { x: number; y: number };
  * effect re-subscribes when `onClose` changes, and `anchorRef` is passed so
  * the trigger's own mousedown does not read as "outside".
  *
- * What is offered, and what is disabled and why, lives in `toolbarModel.ts` —
- * no component in this repo is reachable from a test.
+ * What is offered, and what is disabled and why, lives in `toolbarModel.ts`.
  */
 export default function ProjectMenu(props: Props) {
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -39,20 +38,6 @@ export default function ProjectMenu(props: Props) {
     setAnchor(null);
   }, []);
   const closeSub = useCallback(() => setSubAnchor(null), []);
-
-  // Escape closes the submenu first, then the menu. Both `Menu`s listen for
-  // Escape on window in the bubble phase, so without this they would close
-  // together. Capture runs before either, and stops the event there.
-  useLayoutEffect(() => {
-    if (!subAnchor) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      setSubAnchor(null);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [subAnchor]);
 
   const toggle = () => {
     if (anchor) {
@@ -116,6 +101,12 @@ export default function ProjectMenu(props: Props) {
         ref={btnRef}
         className="btn project-btn"
         onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" && !anchor) {
+            e.preventDefault();
+            toggle();
+          }
+        }}
         title={props.sketchDir ?? "Open a project folder"}
         aria-haspopup="menu"
         aria-expanded={anchor !== null}

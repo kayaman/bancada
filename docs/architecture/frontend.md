@@ -39,11 +39,12 @@ lives in `src/toolbarModel.ts`. `ProjectMenu` is a leaf component now within
 reach of the `.tsx` harness (conventions.md §2), so what it renders disabled,
 and why, can be asserted directly rather than verified by eye.
 
-`ProjectMenu` is also the codebase's only **nested** `Menu`. `Menu` needed no
-change — a child rendered inside the parent's `children` is inside the parent's
-`ref`, so clicking it does not dismiss the parent. Escape was the one gap: both
-listen on `window` in the bubble phase and would close together, so
-`ProjectMenu` takes Escape in the **capture** phase and stops it there.
+`ProjectMenu` is also the codebase's only **nested** `Menu`. A child rendered
+inside the parent's `children` is inside the parent's `ref`, so clicking it
+does not dismiss the parent. `Menu` owns keyboard navigation: Escape or Left
+closes the focused submenu and restores its trigger; Right opens a submenu;
+Up/Down and Home/End move between enabled items. Tab dismisses the full menu
+and returns focus to the trigger.
 
 **One editor-area form at a time.** `NewProject`, `DuplicateProject`,
 `RenameProject` and `UsageDashboard` are mutually exclusive, and the profile

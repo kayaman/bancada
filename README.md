@@ -263,6 +263,10 @@ scaffolded library, a fetched library and a newly created project actually
   — so nothing is two clicks deep
 - **Editor tabs** — multiple files open at once, dirty markers, and a
   close-again-to-discard step so unsaved work is never dropped by one click
+- **Unsaved-work protection** — switching projects or closing the window
+  offers Save, Discard and Cancel. Failed saves keep the project open;
+  typing during a save leaves the newer edits dirty. Verify, Flash, Commit
+  and Assistant sends stop if their preceding save cannot finish cleanly
 - **Git pill** — repository state at a glance in the toolbar, with commit,
   sync, `git init`, and one-button repo creation through `gh` — private or
   public, with a description, initializing the repository first if the project

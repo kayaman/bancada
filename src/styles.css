@@ -3705,3 +3705,10 @@ body {
   font-size: var(--fs-small);
   word-break: break-all;
 }
+
+.ctx-item:focus-visible,
+.sidebar-resize-handle:focus-visible,
+.panel-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

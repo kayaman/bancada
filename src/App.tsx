@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { cpp } from "@codemirror/lang-cpp";
-import { ask, open } from "@tauri-apps/plugin-dialog";
+import { ask, open, message } from "@tauri-apps/plugin-dialog";
 
 import * as api from "./api";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { createSaveQueue, mayLeaveEditor, saveBuffers } from "./editorSave";
 import { matchesAccel, parseAccel } from "./keys";
 import { boardOffer } from "./boardOffer";
 import { idfSilentSerialWarning, silentSerialWarning } from "./boardOptions";
@@ -88,6 +91,7 @@ import { ChatRecorder, chatFileName, applyChatOps } from "./agent/chatLog";
 import { distillFacts } from "./agent/continueChat";
 import { createResumeWatch, type ResumeWatch } from "./agent/resumeWatch";
 import EditorTabs from "./components/EditorTabs";
+import ResizeHandle from "./components/ResizeHandle";
 import FileTree from "./components/FileTree";
 import Toolbar from "./components/Toolbar";
 import LibraryManager from "./components/LibraryManager";
@@ -356,6 +360,9 @@ export default function App() {
   const [content, setContent] = useState("");
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set());
   const buffersRef = useRef(new Map<string, string>());
+  const saveQueue = useRef(createSaveQueue());
+  const leaveEditorRef = useRef<() => Promise<boolean>>(async () => false);
+  const projectOpeningRef = useRef(false);
   /** The live CodeMirror handle, so a compiler diagnostic can move the
    *  cursor. `.view` is null until the editor has mounted. */
   const editorRef = useRef<ReactCodeMirrorRef>(null);
@@ -1138,10 +1145,8 @@ export default function App() {
   /**
    * Why opening this project now would lose something, or null.
    *
-   * `loadSketch` discards unsaved buffers and tears down a live Assistant
-   * session without asking. Every other caller is a deliberate click; this
-   * one appears unbidden, so it arms first and commits on the second click —
-   * the same idiom a dirty tab close uses.
+   * This unsolicited offer arms first when work would be interrupted.
+   * loadSketch also checks unsaved changes through the shared leave guard.
    */
   const offerOpenCost = (): string | null => {
     if (dirtyFiles.size > 0) {
@@ -1206,16 +1211,20 @@ export default function App() {
 
   /** Load a sketch folder; opens `restoreFile` when present, else the main .ino. */
   const loadSketch = async (dir: string, restoreFile?: string): Promise<boolean> => {
+    if (projectOpeningRef.current) return false;
+    projectOpeningRef.current = true;
     try {
       const [fs, yaml] = await Promise.all([
         api.listSketchFiles(dir),
         api.loadSketchYaml(dir),
       ]);
+      if (!(await leaveEditorRef.current())) return false;
       // A sketchDir change is a hard agent boundary: the Σ chip, transcript
       // and chat recording are per-project. Placed after the awaits so a
       // failed open leaves the current project's session intact; skipped on
       // a same-dir reopen, which changes nothing about the project scope.
       if (sketchDirRef.current !== dir) teardownAgentSession("project switched");
+      sketchDirRef.current = dir;
       setSketchDir(dir);
       // The baud picker follows the project, so re-sniff before anything can
       // render the old sketch's rate against the new one's dir.
@@ -1266,6 +1275,8 @@ export default function App() {
       // A dir that no longer opens (moved, deleted) prunes itself.
       api.removeRecentProject(dir).catch(() => {});
       return false;
+    } finally {
+      projectOpeningRef.current = false;
     }
   };
 
@@ -1599,77 +1610,111 @@ export default function App() {
 
   const saveCurrent = useCallback(async () => {
     if (!sketchDir || !openFile) return;
-    const text = buffersRef.current.get(openFile);
-    if (text === undefined) return; // no unsaved edits
+    const buffers = buffersRef.current;
+    if (!buffers.has(openFile)) return;
     try {
-      await api.writeSketchFile(sketchDir, openFile, text);
-      buffersRef.current.delete(openFile);
-      // A saved edit may well be the `Serial.begin` rate itself.
-      void refreshSketchBaud(sketchDir);
-      setDirtyFiles((prev) => {
-        const next = new Set(prev);
-        next.delete(openFile);
-        return next;
-      });
-      // Same resolution point saveAll() is for the whole conflict set (F1):
-      // this file's buffer is no longer unsaved, so it's no longer a
-      // conflict either. Ctrl+S is the documented way to resolve one, so it
-      // has to actually do it.
-      agentConflictsRef.current.delete(openFile);
+      await saveQueue.current(() => saveBuffers(
+        buffers, (path, text) => api.writeSketchFile(sketchDir, path, text),
+        new Set(), [openFile],
+      ));
+      if (buffersRef.current !== buffers) return;
+      if (!buffers.has(openFile)) agentConflictsRef.current.delete(openFile);
       setConflicts([...agentConflictsRef.current]);
       setArmedTab(null);
-      notify(`Saved ${openFile}`);
+      void refreshSketchBaud(sketchDir);
+      notify(buffers.has(openFile) ? `Saved ${openFile}; newer edits remain unsaved` : `Saved ${openFile}`);
     } catch (e) {
       notify(String(e), true);
+    } finally {
+      if (buffersRef.current === buffers) setDirtyFiles(new Set(buffers.keys()));
     }
   }, [sketchDir, openFile, notify, refreshSketchBaud]);
 
-  /** Flush every dirty buffer to disk (before compile/upload, or before a
-   *  message to the agent), **except** buffers flagged as agent conflicts.
-   *
-   *  A conflict means the agent rewrote a file on disk while the user had
-   *  unsaved edits to it, and the banner tells the user to save (Ctrl+S) to
-   *  resolve. But `saveAll` has three callers, and only `sendToAgent`
-   *  checked `agentConflictsRef` — so a user who clicked Verify or Upload
-   *  instead of saving would silently write the *stale* buffer over the
-   *  agent's on-disk fix, "resolve" the conflict by clobbering it, and then
-   *  compile (or flash!) the pre-fix code. Skipping conflicted paths here
-   *  rather than gating in each caller means no future caller can clobber
-   *  by forgetting to check: the conflicted file stays dirty and conflicted,
-   *  every other buffer still flushes, and `saveCurrent` (Ctrl+S) remains
-   *  the one deliberate way to resolve it. */
-  const saveAll = useCallback(async () => {
-    if (!sketchDir) return;
+  /** Save non-conflicted buffers; callers must stop on failure or newer edits. */
+  const saveAll = useCallback(async (): Promise<boolean> => {
+    const dir = sketchDirRef.current;
+    if (!dir) return true;
+    const buffers = buffersRef.current;
     const conflicted = agentConflictsRef.current;
-    const skipped: string[] = [];
-    for (const [path, text] of buffersRef.current) {
-      if (conflicted.has(path)) {
-        skipped.push(path);
-        continue;
+    try {
+      await saveQueue.current(() => saveBuffers(
+        buffers, (path, text) => api.writeSketchFile(dir, path, text), conflicted,
+      ));
+      if (buffersRef.current !== buffers) return false;
+      for (const path of [...conflicted]) {
+        if (!buffers.has(path)) conflicted.delete(path);
       }
-      await api.writeSketchFile(sketchDir, path, text);
-      // Safe during `for...of` over a Map: deleting the current key does
-      // not disturb the iteration order of the ones still to come.
-      buffersRef.current.delete(path);
+      setConflicts([...conflicted]);
+      setArmedTab(null);
+      if (buffers.size > 0) {
+        notify(conflicted.size > 0
+          ? conflictMessage([...conflicted])
+          : "Newer edits remain unsaved — save again before continuing.", true);
+        return false;
+      }
+      refreshGitState(dir);
+      void refreshSketchBaud(dir);
+      return true;
+    } catch (e) {
+      notify(`Could not save files: ${String(e)}`, true);
+      return false;
+    } finally {
+      if (buffersRef.current === buffers) setDirtyFiles(new Set(buffers.keys()));
     }
-    // A conflict only exists while there is an unsaved buffer to lose. Drop
-    // any whose buffer is gone (saved via Ctrl+S, or the file closed), so a
-    // stale entry cannot wedge `sendToAgent` forever.
-    for (const path of [...conflicted]) {
-      if (!buffersRef.current.has(path)) conflicted.delete(path);
+  }, [notify, refreshGitState, refreshSketchBaud]);
+
+  const leavePendingRef = useRef(false);
+  leaveEditorRef.current = async () => {
+    if (leavePendingRef.current) return false;
+    leavePendingRef.current = true;
+    try {
+      // Let an already requested save finish before deciding what is dirty.
+      await saveQueue.current(async () => {});
+      return await mayLeaveEditor(
+        () => buffersRef.current.size > 0,
+        () => message("Save your changes before leaving this project?", {
+          title: "Unsaved changes", kind: "warning",
+          buttons: { yes: "Save", no: "Discard", cancel: "Cancel" },
+        }),
+        saveAll,
+      );
+    } catch (e) {
+      notify(`Could not confirm unsaved changes: ${String(e)}`, true);
+      return false;
+    } finally {
+      leavePendingRef.current = false;
     }
-    setDirtyFiles(new Set(skipped));
-    // Mirror the ref into state so the banner renders. The ref stays the
-    // source of truth for the synchronous guards below (it is written from
-    // the agent event listener, which has no access to state).
-    setConflicts([...conflicted]);
-    setArmedTab(null);
-    if (skipped.length > 0) {
-      notify(conflictMessage(skipped), true);
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    let removeCloseListener: (() => void) | undefined;
+    if (isTauri()) {
+      const appWindow = getCurrentWindow();
+      const subscription = appWindow.onCloseRequested(async (event) => {
+        event.preventDefault();
+        if (await leaveEditorRef.current()) {
+          await appWindow.destroy().catch((e) => notify(String(e), true));
+        }
+      });
+      void subscription.then((unlisten) => {
+        if (disposed) unlisten();
+        else removeCloseListener = unlisten;
+      }).catch((e) => notify(`Close protection unavailable: ${String(e)}`, true));
     }
-    refreshGitState(sketchDir);
-    void refreshSketchBaud(sketchDir);
-  }, [sketchDir, notify, refreshGitState, refreshSketchBaud]);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (buffersRef.current.size > 0) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => {
+      disposed = true;
+      removeCloseListener?.();
+      window.removeEventListener("beforeunload", beforeUnload);
+    };
+  }, [notify]);
 
   /** Refuse a build/flash while the agent's edits and the user's disagree.
    *
@@ -1747,7 +1792,7 @@ export default function App() {
     if (!sketchDir) return;
     const target = resolveTarget();
     if (!target) return;
-    await saveAll();
+    if (!(await saveAll())) return;
     // After saveAll, not before: saveAll is what discovers which buffers it
     // could not flush.
     if (refuseOnConflict("Compile")) return;
@@ -1775,7 +1820,7 @@ export default function App() {
     if (!sketchDir || !selectedPort) return;
     const target = resolveTarget();
     if (!target) return;
-    await saveAll();
+    if (!(await saveAll())) return;
     // Before freeing the serial port and before anything reaches the board:
     // flashing the agent's on-disk version while the user's edits sit
     // unsaved and unmentioned is the worst outcome this guard prevents.
@@ -1882,7 +1927,7 @@ export default function App() {
 
   const gitCommit = async (message: string) => {
     if (!sketchDir) return;
-    await saveAll();
+    if (!(await saveAll())) return;
     try {
       const outcome = await api.gitCommit(sketchDir, message);
       notify(outcome === "committed" ? "✓ Committed" : "Nothing to commit");
@@ -2563,7 +2608,7 @@ export default function App() {
     // mid-send can't bind the spawned (or about-to-spawn) child to a project
     // it no longer belongs to, unrecorded.
     const epoch = teardownEpochRef.current;
-    await saveAll();
+    if (!(await saveAll())) return;
     // A teardown/continue raced ahead of us during the save — this send no
     // longer belongs to any session we still own. Bail silently: nothing
     // user-visible has happened yet (no bubble, no spawn).
@@ -3025,7 +3070,9 @@ export default function App() {
         onOpenRecent={(dir) => void loadSketch(dir)}
         onNewProject={() => showPane("new")}
         onDuplicateProject={() => showPane("duplicate")}
-        onRenameProject={() => showPane("rename")}
+        onRenameProject={async () => {
+          if (await leaveEditorRef.current()) showPane("rename");
+        }}
         onOpenUsage={() => showPane("usage")}
         onOpenSetup={() => showPane("setup")}
         themePrefs={themePrefs}
@@ -3240,16 +3287,18 @@ export default function App() {
             ›
           </button>
         ) : (
-          <div
+          <ResizeHandle
             className="sidebar-resize-handle"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize sidebar"
-            title="Drag to resize — double-click to reset"
+            orientation="vertical"
+            label="Resize sidebar"
+            value={sidebarWidth}
+            min={SIDEBAR_MIN}
+            max={Math.round(window.innerWidth * 0.5)}
+            defaultValue={SIDEBAR_DEFAULT}
             onPointerDown={startSidebarResize}
-            onDoubleClick={() => {
-              setSidebarWidth(SIDEBAR_DEFAULT);
-              localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT));
+            onChange={(value) => {
+              setSidebarWidth(value);
+              localStorage.setItem(SIDEBAR_WIDTH_KEY, String(value));
             }}
           />
         )}
@@ -3282,6 +3331,10 @@ export default function App() {
               gitState={gitState}
               onRenamed={async (dir) => {
                 setRenamingProject(false);
+                // Leaving was confirmed before the rename form opened. The
+                // old directory no longer exists, so never save buffers to it.
+                buffersRef.current = new Map();
+                setDirtyFiles(new Set());
                 // The old path is gone; loadSketch re-points everything that
                 // the backend migration did not (tabs, buffers, git state).
                 await loadSketch(dir);
@@ -3333,16 +3386,18 @@ export default function App() {
         style={bottomMax ? undefined : { height: bottomHeight }}
       >
         {!bottomMax && (
-          <div
+          <ResizeHandle
             className="panel-resize-handle"
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label="Resize bottom panel"
-            title="Drag to resize — double-click to reset"
+            orientation="horizontal"
+            label="Resize bottom panel"
+            value={bottomHeight}
+            min={BOTTOM_MIN}
+            max={Math.round(window.innerHeight * 0.8)}
+            defaultValue={BOTTOM_DEFAULT}
             onPointerDown={startPanelResize}
-            onDoubleClick={() => {
-              setBottomHeight(BOTTOM_DEFAULT);
-              localStorage.setItem(BOTTOM_HEIGHT_KEY, String(BOTTOM_DEFAULT));
+            onChange={(value) => {
+              setBottomHeight(value);
+              localStorage.setItem(BOTTOM_HEIGHT_KEY, String(value));
             }}
           />
         )}
