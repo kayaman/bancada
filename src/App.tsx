@@ -426,6 +426,10 @@ export default function App() {
   // auto-resume fires from a closure created while the monitor was still on).
   const monitorOnRef = useRef(false);
   monitorOnRef.current = monitorOn;
+  // Set to true for the duration of an in-flight startMonitorQuiet call so
+  // a second concurrent caller (two effects firing on the same selectedPort
+  // change before any re-render) sees it as already starting and bails out.
+  const monitorStartingRef = useRef(false);
   /** The standing request for capture, as opposed to whether a child is
    *  currently alive. Cleared only by an *explicit* stop — the Stop
    *  button, the scope taking the port, the pre-flash handoff — so an
@@ -2092,7 +2096,7 @@ export default function App() {
   }, []);
 
   const startMonitorQuiet = useCallback(async () => {
-    if (monitorOnRef.current) return;
+    if (monitorOnRef.current || monitorStartingRef.current) return;
     // Automatic capture must never take the port from esptool — the manual
     // Start button (toggleMonitor) is the deliberate override. Checked here
     // and not only where a recapture is scheduled, because the ladder
@@ -2105,6 +2109,7 @@ export default function App() {
       scheduleRecapture();
       return;
     }
+    monitorStartingRef.current = true;
     try {
       // The returned session id is what lets a `serial://closed` from the
       // child we just replaced be told apart from this one dying.
@@ -2135,6 +2140,8 @@ export default function App() {
       // design, but not amnesiac: the reason surfaces if the ladder gives up.
       lastOpenErrorRef.current = String(e);
       scheduleRecapture();
+    } finally {
+      monitorStartingRef.current = false;
     }
   }, [selectedPort, baudrate, scheduleRecapture]);
 
