@@ -2517,7 +2517,7 @@ export default function App() {
       } else {
         endActivity(["agent_upload"], ev.success === true, "Assistant flash");
       }
-      if (!flashing) openBottomTab("serial");
+      if (!flashing) openBottomTab("agent");
       return;
     }
     // The host has already killed the child, so no verify_done is coming.
