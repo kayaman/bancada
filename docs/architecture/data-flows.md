@@ -60,10 +60,13 @@ port selected ─▶ api.setSelectedTarget({ port, baud })   ← mirrored into R
              ▼  src-tauri: start_monitor
         lock serial                        ← the leaf lock
           ├─ evict_owner(&mut slot)        ← kills a monitor OR stops a scope session
-          ├─ cli.monitor(port, baud)       ← Child with piped stdio
-          ├─ spawn thread(stdout) ─▶ emit "serial://line"  + serial_ring.push()
-          ├─ spawn thread(stderr) ─▶ emit "serial://line"
-          └─ slot = Some(SerialOwner::Monitor(child))
+          ├─ open_monitor_port(port, baud) ← native serialport handle; no subprocess,
+          │                                  no arduino-cli, no platform required
+          │                                  DTR+RTS both asserted (8N1, 100 ms timeout)
+          ├─ writer.try_clone()            ← reader fd for the thread (dup under the hood)
+          ├─ spawn ONE reader thread ─▶ emit "serial://line"  + serial_ring.push()
+          │    (stop flag checked between 100 ms reads; stderr only on unexpected close)
+          └─ slot = Some(SerialOwner::Monitor { writer, stop, join })
         unlock
                     │
                     ▼
@@ -74,13 +77,18 @@ port selected ─▶ api.setSelectedTarget({ port, baud })   ← mirrored into R
 
 `start_monitor` returns the session id; App keeps it in `monitorSessionRef`.
 
-At EOF the stdout thread emits `serial://closed` **stamped with that session**,
-and App drops one naming any other — a reader thread can outlive its own child,
-and unstamped it would report the live monitor as closed.
+The reader thread emits `serial://closed` **stamped with that session** when it
+exits — whether stopped by the flag or by the port going away. App drops a close
+naming any other session: a reader thread can outlive the `MonitorSession` it
+was reading, and unstamped it would report the live monitor as closed.
 
-**The two locks never meet.** Reader threads push into `serial_ring` but must
-never take `serial` — they are killed or joined *under* it, so taking it would
-deadlock the join.
+An *unexpected* close also emits one `serial://line` on `stderr` explaining why
+(e.g. `"serial port closed: No such device"`) so the last line the board managed
+to print sits beside the reason for the disconnect. An explicit stop does not.
+
+**The lock is never held across a read.** Reader threads push into `serial_ring`
+but must never take `serial` — they are killed or joined *under* it, so taking
+it would deadlock the join.
 
 **The ring outlives the monitor.** Its sequence numbers survive restarts, which
 is what lets the agent's `serial_read` resume from a cursor rather than replay.
