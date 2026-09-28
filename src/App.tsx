@@ -2484,9 +2484,9 @@ export default function App() {
       // wording, not whether the machine looks busy.
       if (ev.type === "verify_started") {
         // Same reset `verify()` does, so the console and the Build badge
-        // describe this compile and not the last one. No tab switch: the
-        // agent's build is not what the user is looking at, and the unseen
-        // dot plus the error badge already say it happened.
+        // describe this compile and not the last one. No tab switch on start:
+        // the agent's build output streams to the build console while the
+        // agent tab is where the work is visible.
         setBuildLines([]);
         beginActivity("agent_compile", "Assistant compiling…");
       } else {
@@ -2495,6 +2495,7 @@ export default function App() {
           ev.success === true,
           "Assistant compile",
         );
+        openBottomTab("agent");
       }
       return;
     }
