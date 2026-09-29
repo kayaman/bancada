@@ -128,6 +128,11 @@ export default function SerialMonitor({
   const lastVersionRef = useRef(-1);
   const scrollTopRef = useRef(0);
   const rafRef = useRef<number | null>(null);
+  // Mirrors `following` state but updated synchronously in onScroll so the
+  // useLayoutEffect always reads the current intent — not the value from the
+  // last committed render, which can lag a timer tick and snap back to bottom
+  // before the setFollowing(false) re-render lands.
+  const followingRef = useRef(true);
   /** A send is awaiting the backend. A ref, not state: the guard must be
    *  true for the *next* keydown in the same tick, before any re-render. */
   const sendingRef = useRef(false);
@@ -205,7 +210,7 @@ export default function SerialMonitor({
   // effect it painted the pre-scroll position first and a fast feed flickered.
   useLayoutEffect(() => {
     const el = logRef.current;
-    if (!el || !autoFollow) return;
+    if (!el || !prefs.autoscroll || !followingRef.current) return;
     el.scrollTop = el.scrollHeight;
   });
 
@@ -219,6 +224,7 @@ export default function SerialMonitor({
     // Scrolling away un-follows and scrolling back to the bottom re-follows —
     // the gesture a terminal uses. It moves the session flag only: the stored
     // pref belongs to the Autoscroll button, and nothing else may write it.
+    followingRef.current = near;
     if (near !== following) setFollowing(near);
     // One frame, one state write: a fast wheel fires scroll far more often
     // than the browser paints.
@@ -379,7 +385,7 @@ export default function SerialMonitor({
             // scroll position had un-followed to. Off leaves the flag alone:
             // it means nothing while the pref is off, and clobbering it would
             // strand the view mid-log when the pref comes back on.
-            if (on) setFollowing(true);
+            if (on) { followingRef.current = true; setFollowing(true); }
           }}
           aria-pressed={prefs.autoscroll}
           title="Keep the newest line in view"
