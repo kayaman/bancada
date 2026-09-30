@@ -164,6 +164,7 @@ mod setup;
 use bancada_core::backend::{Backend, BackendKind, BuildSpec};
 use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
+use bancada_core::bom;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
@@ -606,6 +607,16 @@ fn safe_join(base: &str, rel: &str) -> Result<std::path::PathBuf, String> {
 fn load_sketch_yaml(sketch_dir: String) -> Result<SketchYaml, String> {
     let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
     proj.load_yaml().map_err(err_str)
+}
+
+#[tauri::command]
+fn load_bom(sketch_dir: String) -> Result<Option<bom::Bom>, String> {
+    bom::Bom::load(Path::new(&sketch_dir)).map_err(err_str)
+}
+
+#[tauri::command]
+fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
+    bom.save(Path::new(&sketch_dir)).map_err(err_str)
 }
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
@@ -5758,6 +5769,8 @@ pub fn run() {
             rename_sketch_entry,
             delete_sketch_entry,
             load_sketch_yaml,
+            load_bom,
+            save_bom,
             init_profile,
             retarget_profile,
             add_local_library,

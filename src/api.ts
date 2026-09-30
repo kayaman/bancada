@@ -397,6 +397,28 @@ export interface FleetEntry {
   assigned_project?: string | null;
 }
 
+/** One line item in a project's bill of materials. */
+export interface BomEntry {
+  qty: number;
+  ref: string;
+  value: string;
+  package?: string | null;
+  supplier?: string | null;
+  part_no?: string | null;
+  notes?: string | null;
+}
+
+/** A project's bill of materials (`bom.yaml` in the sketch directory). */
+export interface Bom {
+  components: BomEntry[];
+}
+
+export const loadBom = (sketchDir: string) =>
+  invoke<Bom | null>("load_bom", { sketchDir });
+
+export const saveBom = (sketchDir: string, bom: Bom) =>
+  invoke<void>("save_bom", { sketchDir, bom });
+
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
   value: string;

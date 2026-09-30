@@ -113,6 +113,7 @@ import MqttPanel from "./components/MqttPanel";
 import WsPanel from "./components/WsPanel";
 import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
+import BomPanel from "./components/BomPanel";
 import BottomTabBar from "./components/BottomTabBar";
 import ToastStack from "./components/ToastStack";
 import StatusBar from "./components/StatusBar";
@@ -511,6 +512,7 @@ export default function App() {
   const [wsMounted, setWsMounted] = useState(false);
   const [webMounted, setWebMounted] = useState(false);
   const [agentMounted, setAgentMounted] = useState(false);
+  const [bomMounted, setBomMounted] = useState(false);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
   /**
@@ -819,6 +821,7 @@ export default function App() {
     if (tab === "ws") setWsMounted(true);
     if (tab === "web") setWebMounted(true);
     if (tab === "agent") setAgentMounted(true);
+    if (tab === "bom") setBomMounted(true);
   }, []);
 
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
@@ -3523,6 +3526,13 @@ export default function App() {
             gitWarning={gitState?.kind === "no_git"}
             uploadsArmed={uploadsArmed}
             onToggleUploadsArmed={toggleUploadsArmed}
+          />
+        )}
+        {bomMounted && (
+          <BomPanel
+            active={bottomTab === "bom"}
+            sketchDir={sketchDir}
+            notify={notify}
           />
         )}
       </section>

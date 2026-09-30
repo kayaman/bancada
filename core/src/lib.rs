@@ -11,6 +11,7 @@
 
 pub mod agent;
 pub mod backend;
+pub mod bom;
 pub mod boardprofile;
 pub mod boards;
 pub mod chatlog;
