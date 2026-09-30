@@ -1,0 +1,75 @@
+{
+  "skill_name": "3d-printing",
+  "evals": [
+    {
+      "id": 1,
+      "name": "wall-shelf-bracket-load-path",
+      "prompt": "I need an L bracket to hold a small shelf on the wall, maybe 2 kg on it. Two screws into the wall, two into the shelf. Printing on my A1 Mini.",
+      "expected_output": "Full contract on the house PETG-CF profile. Orientation puts the L on its side so the bending load runs in XY, not across layers; states that standing it up would snap at the corner. Walls 6 x 0.42 = 2.52 mm, filleted inside corner R >= 1 mm, gusset, bed-edge chamfer, countersunk or clearance holes with hole_comp. Supports: none. Watch-out names the layer peel or the root fillet. Load and screw size listed as assumptions.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "failed-print-layer-split",
+      "prompt": "My PETG-CF hook cracked clean along a layer line right where the arm meets the base after a week of holding a bag. What went wrong?",
+      "expected_output": "Uses the diagnosis shape: one most likely cause (the load puts the arm's root in tension across layers because it was printed standing), the observation that confirms it (flat break between layers), one fix (reorient so the arm lies in XY, add a root fillet). Mentions drying and fan only as secondary. Does not recommend 100% infill or a raft.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "clip-on-house-material",
+      "prompt": "Design a snap-fit battery door for a remote, 40 x 25 mm. Print it in the carbon PETG I have loaded.",
+      "expected_output": "Flags that snaps crack in PETG-CF and offers unfilled PETG on the same printer or a screw. If it proceeds in PETG-CF because the user insisted, it applies the house limits (arm >= 10 x thickness, root fillet >= 1.5 mm, deflection < 1.5% of arm) and states the fatigue risk in Watch-out. Arm laid in XY. Strain formula used with real numbers.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "name": "car-dashboard-material-question",
+      "prompt": "What filament should I use for a phone mount that sits on my car dashboard?",
+      "expected_output": "Short answer, no full print plan. Rules out PLA and house PETG-CF on heat. Recommends ASA (or PC/ABS) and says those want an enclosed printer, which the open A1 Mini is not; offers ordering the part or accepting risk with a higher-temp option. No invented print plan.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "name": "enclosure-handoff",
+      "prompt": "Make me a case for a Raspberry Pi 4 with a fan.",
+      "expected_output": "Recognises an electronics enclosure and hands the geometry to the parametric-enclosures skill instead of designing a second enclosure. Answers only print-process questions from this skill. If that skill is unavailable, says so.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "name": "oversize-part-split",
+      "prompt": "I want to print a 240 mm long cable tray that screws under my desk.",
+      "expected_output": "Detects that 240 mm exceeds the 170 mm envelope in every flat orientation, splits the tray, and joins the halves with M3 bolts plus at least two dowel pins at 0.20 mm clearance per side. Explicitly no glue on PETG-CF. Split placed away from the screw points.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "mesh-review-inches",
+      "prompt": "I downloaded this knob STL and it shows up tiny in Bambu Studio, about 1.5 x 1.5 x 0.8 mm. Will it print and how do I fix it?",
+      "expected_output": "Identifies an inch-unit export (scale by 25.4 gives about 38 x 38 x 20 mm) before any other advice. Then runs the rest of the mesh checks in order: envelope, manifold (says which tool ran or that the slicer warning is the check), bed face, shaft bore with hole_comp. Does not pretend to have inspected a file it was not given.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "name": "calibrate-fits",
+      "prompt": "My lids are always either too tight or rattling. How do I dial in tolerances on my A1 Mini?",
+      "expected_output": "Points to assets/fit-coupon.scad with its export commands and explains the reading order: hole_comp row first with a 3 mm drill shank, then the pin clearance row for tol, then the insert bores. Says to freeze tol afterwards and not retune per part. Mentions drying and flow calibration come before the coupon. Uses Bambu Studio setting names if any slicer setting is mentioned.",
+      "files": []
+    },
+    {
+      "id": 9,
+      "name": "bambu-repair-and-floating",
+      "prompt": "Bambu Studio says my bracket STL needs repair, and after slicing there is a little pad floating near the top that is only joined by a thin web. I am printing it on the A1 Mini. Fix the model so I can slice it.",
+      "expected_output": "Treats the repair dialog as a failed mesh, and does not tell the user to click Repair, Split to objects, or auto-orient. Names the likely causes: a cutter that ends on a face, features that only touch, or two shells, plus a region that starts in mid-air. Fixes by overlapping features into the body with a neck of at least two extrusion widths, cutters past the surface by eps, one solid per file, bed on z=0. Runs scripts/check_stl.py and requires an ok result. Print plan uses Bambu Studio names for the A1 Mini preset, with X-Y hole compensation 0 and Make overhangs printable off. Supports none unless a face was sacrificed.",
+      "files": []
+    },
+    {
+      "id": 10,
+      "name": "corners-inserts-infill",
+      "prompt": "I'm designing a PETG-CF bracket for the A1 Mini. How should I do the corners, the M3 heat-set inserts, and the infill?",
+      "expected_output": "Chamfers edges parallel to the bed, including the bed contact and the underside of a lip. Fillets vertical edges and loaded internal corners, R >= 1 mm, without thinning the wall. Insert: datasheet hole plus printed shrink, CAD often 4.0-4.2 mm for a short M3, straight bore, normally no mouth chamfer, depth = length + 1 mm, boss OD >= 9.5 mm of solid perimeters. Install 10-20 C above the spool nozzle temperature, press the last stretch flush and hold. Infill: 6 wall loops first, gyroid at 15-20% (cubic if the machine shakes), not grid, lightning, or 100%. Boss is perimeters, not dense infill. Uses Bambu Studio setting names.",
+      "files": []
+    }
+  ]
+}
