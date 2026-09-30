@@ -24,6 +24,11 @@ Two scope statements that are product law, not preference:
 - **ESP-IDF support is build, flash, monitor and stops there.** No
   `menuconfig`, no component manager, no partition editor. Bancada reads two
   `sdkconfig` values and writes nothing back.
+- **The enclosure is not designed here.** `send_to_enclosure_maker` writes
+  the BOM hand-off and launches `enclosure-maker-app`. Box geometry follows
+  `.claude/skills/parametric-enclosures`. Print process, mesh checks, corners,
+  heat-set inserts, and infill follow `.claude/skills/3d-printing`. Do not
+  invent a second enclosure in this repo.
 
 And an epistemic one: where a board pinout is not modelled, say **inferred**
 or say nothing. *Unknown and safe are different answers.*
