@@ -19,6 +19,7 @@ pub mod circuit;
 pub mod cli;
 pub mod clone;
 pub mod devproxy;
+pub mod enclosure_handoff;
 pub mod esptool;
 pub mod files;
 pub mod fleet;

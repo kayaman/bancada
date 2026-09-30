@@ -430,6 +430,12 @@ export const loadBom = (sketchDir: string) =>
 export const saveBom = (sketchDir: string, bom: Bom) =>
   invoke<void>("save_bom", { sketchDir, bom });
 
+/** Hands this project's BOM and resolved board to enclosure-maker, which
+ *  opens a new project seeded with that context. Throws (as a string) when
+ *  the `enclosure-maker-app` binary isn't found on PATH. */
+export const sendToEnclosureMaker = (sketchDir: string) =>
+  invoke<void>("send_to_enclosure_maker", { sketchDir });
+
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
   value: string;

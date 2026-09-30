@@ -165,6 +165,7 @@ use bancada_core::backend::{Backend, BackendKind, BuildSpec};
 use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
 use bancada_core::bom;
+use bancada_core::enclosure_handoff::EnclosureHandoff;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
@@ -617,6 +618,39 @@ fn load_bom(sketch_dir: String) -> Result<Option<bom::Bom>, String> {
 #[tauri::command]
 fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
     bom.save(Path::new(&sketch_dir)).map_err(err_str)
+}
+
+/// The third pillar, Enclosure, alongside Software and Hardware: hands this
+/// project's BOM and resolved board to enclosure-maker, which opens a new
+/// project seeded with that context and puts it straight in front of its own
+/// AI assistant. Bancada calls out to a separate `enclosure-maker-app`
+/// process (found on `PATH`, the same convention as `arduino-cli`/`esptool`)
+/// rather than the other way around -- there's no long-running service on
+/// either side to call into.
+#[tauri::command]
+fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
+    let dir = Path::new(&sketch_dir);
+    let project_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("can't derive a project name from {sketch_dir}"))?;
+
+    let bom = bom::Bom::load(dir).map_err(err_str)?;
+    let board_choice = bancada_core::project::project_board(dir);
+    let handoff = EnclosureHandoff::build(dir, project_name, bom, &board_choice);
+    let handoff_path = handoff.write(dir).map_err(err_str)?;
+
+    std::process::Command::new("enclosure-maker-app")
+        .env("ENCLOSURE_MAKER_IMPORT", &handoff_path)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "could not find `enclosure-maker-app` on PATH — is it installed?".to_string()
+            } else {
+                format!("failed to launch enclosure-maker: {e}")
+            }
+        })?;
+    Ok(())
 }
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
@@ -5877,6 +5911,7 @@ pub fn run() {
             load_sketch_yaml,
             load_bom,
             save_bom,
+            send_to_enclosure_maker,
             init_profile,
             retarget_profile,
             add_local_library,
