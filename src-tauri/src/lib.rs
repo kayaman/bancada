@@ -150,7 +150,7 @@
 //! connection thread never retries — on any error it emits `closed` and
 //! exits; reconnecting is the frontend's job.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -5657,12 +5657,12 @@ fn agent_start(
     let app_out = app.clone();
     let guard_dir = sketch_dir.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+        bancada_core::proc::for_each_lossy_line(stdout, |line| {
             // `parse_event` is the validity gate, but what reaches the
             // frontend is the CLI's own event object verbatim: the panel's
             // contract is the wire shape, not a re-modelled subset that
             // would silently drop fields core doesn't happen to name.
-            match agent::parse_event(&line) {
+            let keep_reading = match agent::parse_event(&line) {
                 Ok(event) => {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                         let _ = app_out.emit("agent://event", value);
@@ -5674,7 +5674,9 @@ fn agent_start(
                         agent_event_alarm(&event, &guard_dir, with_docs)
                     {
                         raise_agent_alarm(&app_out, child_pid, kind, detail);
-                        break; // the child is gone; stop reading its pipe
+                        false // the child is gone; stop reading its pipe
+                    } else {
+                        true
                     }
                 }
                 // The only `Err` case is a line that isn't JSON at all.
@@ -5683,9 +5685,11 @@ fn agent_start(
                         "agent://event",
                         serde_json::json!({ "type": "unparsed", "line": line }),
                     );
+                    true
                 }
-            }
-        }
+            };
+            keep_reading
+        });
         let _ = app_out.emit(
             "agent://closed",
             serde_json::json!({ "reason": "the agent process ended", "pid": child_pid }),
@@ -5705,12 +5709,13 @@ fn agent_start(
     // reason `start_monitor` runs two reader threads.
     let app_err = app.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+        bancada_core::proc::for_each_lossy_line(stderr, |line| {
             let _ = app_err.emit(
                 "agent://event",
                 serde_json::json!({ "type": "stderr", "line": line }),
             );
-        }
+            true
+        });
     });
 
     *guard = Some(AgentSession {
@@ -8475,6 +8480,8 @@ mod tests {
     #[test]
     #[ignore = "spawns the real claude CLI: needs login, network and tokens"]
     fn live_claude_calls_the_verify_tool_end_to_end() {
+        use std::io::BufRead;
+
         if std::env::var("BANCADA_AGENT_LIVE").is_err() {
             eprintln!("skipped: set BANCADA_AGENT_LIVE=1 to run the live round trip");
             return;
@@ -8528,7 +8535,10 @@ mod tests {
 
         let stdout = child.stdout.take().unwrap();
         let mut saw_sentinel = false;
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(|l| l.ok())
+        {
             eprintln!("{line}");
             if line.contains(sentinel) {
                 saw_sentinel = true;
@@ -8573,6 +8583,8 @@ mod tests {
     #[test]
     #[ignore = "spawns the real claude CLI: needs login, network and tokens"]
     fn live_the_confinement_hook_refuses_an_out_of_project_write() {
+        use std::io::BufRead;
+
         if std::env::var("BANCADA_AGENT_LIVE").is_err() {
             eprintln!("skipped: set BANCADA_AGENT_LIVE=1 to run the live confinement gate");
             return;
@@ -8644,7 +8656,10 @@ mod tests {
 
         let stdout = child.stdout.take().unwrap();
         let mut transcript: Vec<String> = Vec::new();
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(|l| l.ok())
+        {
             eprintln!("{line}");
             transcript.push(line);
         }
@@ -8718,6 +8733,8 @@ mod tests {
     #[test]
     #[ignore = "spawns the real claude CLI and a real arduino-cli compile: needs login, network, tokens and an installed core"]
     fn live_claude_calls_the_verify_tool_with_a_real_compile() {
+        use std::io::BufRead;
+
         if std::env::var("BANCADA_AGENT_LIVE").is_err() {
             eprintln!("skipped: set BANCADA_AGENT_LIVE=1 to run the live verify round trip");
             return;
@@ -8820,7 +8837,10 @@ mod tests {
         let mut saw_verify_tool_use = false;
         let mut saw_verify_tool_result_success_text = false;
         let mut raw_lines: Vec<String> = Vec::new();
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(|l| l.ok())
+        {
             raw_lines.push(line.clone());
             match agent::parse_event(&line) {
                 Ok(agent::AgentEvent::Assistant(a)) => {

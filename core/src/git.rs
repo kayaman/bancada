@@ -100,53 +100,13 @@ pub(crate) fn run(args: &[&str]) -> Result<String> {
 /// Run git streaming stdout+stderr lines into `on_line`; returns exit success.
 /// Sync's fetch/rebase/push go through this so the Build console shows
 /// progress the way compiles do.
-pub fn run_streaming(args: &[&str], mut on_line: impl FnMut(OutputLine)) -> Result<bool> {
-    use std::io::BufRead;
-    let mut child = std::process::Command::new("git")
-        .args(args)
+pub fn run_streaming(args: &[&str], on_line: impl FnMut(OutputLine)) -> Result<bool> {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::ToolMissing("git".into())
-            } else {
-                Error::Io(e)
-            }
-        })?;
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
-    let tx_err = tx.clone();
-    let t_out = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout)
-            .lines()
-            .map_while(|l| l.ok())
-        {
-            let _ = tx.send(OutputLine {
-                stream: OutputStream::Stdout,
-                line,
-            });
-        }
-    });
-    let t_err = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr)
-            .lines()
-            .map_while(|l| l.ok())
-        {
-            let _ = tx_err.send(OutputLine {
-                stream: OutputStream::Stderr,
-                line,
-            });
-        }
-    });
-    for line in rx {
-        on_line(line);
-    }
-    let _ = t_out.join();
-    let _ = t_err.join();
-    Ok(child.wait()?.success())
+        .stderr(std::process::Stdio::piped());
+    Ok(crate::proc::stream(cmd, "git", on_line)?.success)
 }
 
 /// Whether `dir` — or any directory above it — is a git work tree.
@@ -156,17 +116,7 @@ pub fn run_streaming(args: &[&str], mut on_line: impl FnMut(OutputLine)) -> Resu
 /// always has an absolute sketch directory, and guessing from the process's
 /// current directory would be a surprising answer to give.
 pub fn is_under_git(dir: &Path) -> bool {
-    if dir.as_os_str().is_empty() || !dir.is_absolute() {
-        return false;
-    }
-    let mut cur: Option<&Path> = Some(dir);
-    while let Some(d) = cur {
-        if d.join(".git").exists() {
-            return true;
-        }
-        cur = d.parent();
-    }
-    false
+    repo_root(dir).is_some()
 }
 
 /// Puts `dir` under git with one commit containing everything in it.
@@ -922,63 +872,24 @@ pub fn create_remote(
     }
     let args = create_remote_args(name, d, visibility, description);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut child = std::process::Command::new("gh")
-        .args(&arg_refs)
+    let mut cmd = Command::new("gh");
+    cmd.args(&arg_refs)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::ToolMissing("gh".into())
-            } else {
-                Error::Io(e)
-            }
-        })?;
-    // Same interleave shape as run_streaming, inlined for the gh binary.
-    use std::io::BufRead;
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let (tx, rx) = std::sync::mpsc::channel::<OutputLine>();
-    let tx_err = tx.clone();
-    let t_out = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout)
-            .lines()
-            .map_while(|l| l.ok())
-        {
-            let _ = tx.send(OutputLine {
-                stream: OutputStream::Stdout,
-                line,
-            });
-        }
-    });
-    let t_err = std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr)
-            .lines()
-            .map_while(|l| l.ok())
-        {
-            let _ = tx_err.send(OutputLine {
-                stream: OutputStream::Stderr,
-                line,
-            });
-        }
-    });
-    let mut tail = Vec::new();
-    for line in rx {
+        .stderr(std::process::Stdio::piped());
+    let mut stderr_lines = Vec::new();
+    let result = crate::proc::stream(cmd, "gh", |line| {
         if line.stream == OutputStream::Stderr {
-            tail.push(line.line.clone());
+            stderr_lines.push(line.line.clone());
         }
         on_line(line);
-    }
-    let _ = t_out.join();
-    let _ = t_err.join();
-    let status = child.wait()?;
-    if !status.success() {
+    })?;
+    if !result.success {
         return Err(Error::ToolFailed {
             tool: "gh repo create".into(),
-            status: status.code().unwrap_or(-1),
+            status: result.exit_code,
             // gh explains auth problems on stderr ("run: gh auth login").
-            stderr: tail.join("\n"),
+            stderr: stderr_lines.join("\n"),
         });
     }
     Ok(())

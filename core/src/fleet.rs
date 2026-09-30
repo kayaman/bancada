@@ -263,6 +263,13 @@ impl Fleet {
         self.boards.iter().position(|b| b.id == id)
     }
 
+    fn entry_mut(&mut self, id: &str) -> Result<&mut FleetEntry> {
+        self.boards
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))
+    }
+
     /// Record that a board was seen. Returns true when it was new.
     ///
     /// Updates in place, never reorders — a re-sighting should read as an edit
@@ -320,10 +327,8 @@ impl Fleet {
     /// Set or clear a nickname. An empty string clears it rather than storing
     /// a blank, so `display_name` falls back cleanly.
     pub fn set_nickname(&mut self, id: &str, nickname: Option<&str>) -> Result<()> {
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        self.boards[i].nickname = nickname
+        let e = self.entry_mut(id)?;
+        e.nickname = nickname
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -331,19 +336,14 @@ impl Fleet {
     }
 
     pub fn set_condition(&mut self, id: &str, condition: BoardCondition) -> Result<()> {
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        self.boards[i].condition = condition;
+        self.entry_mut(id)?.condition = condition;
         Ok(())
     }
 
     /// Set or clear notes. An empty string clears.
     pub fn set_notes(&mut self, id: &str, notes: Option<&str>) -> Result<()> {
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        self.boards[i].notes = notes
+        let e = self.entry_mut(id)?;
+        e.notes = notes
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -352,10 +352,8 @@ impl Fleet {
 
     /// Set or clear the assigned project path. An empty string clears.
     pub fn set_assigned_project(&mut self, id: &str, project: Option<&str>) -> Result<()> {
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        self.boards[i].assigned_project = project
+        let e = self.entry_mut(id)?;
+        e.assigned_project = project
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -368,10 +366,7 @@ impl Fleet {
         if fqbn.is_empty() {
             return Ok(());
         }
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        let e = &mut self.boards[i];
+        let e = self.entry_mut(id)?;
         if !e.fqbns.iter().any(|f| f == fqbn) {
             e.fqbns.push(fqbn.to_string());
         }
@@ -384,10 +379,7 @@ impl Fleet {
     /// tags, which are durable and shareable; duplicating it per board would be
     /// an unbounded log inside a file that is rewritten on every hotplug.
     pub fn note_flash(&mut self, id: &str, rec: FlashRecord) -> Result<()> {
-        let i = self
-            .index_of(id)
-            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
-        self.boards[i].last_flash = Some(rec);
+        self.entry_mut(id)?.last_flash = Some(rec);
         Ok(())
     }
 
@@ -457,6 +449,11 @@ impl Fleet {
                     e.pid = e.pid.take().or(old.pid);
                     e.last_flash = e.last_flash.take().or(old.last_flash);
                     e.first_seen = e.first_seen.min(old.first_seen);
+                    e.notes = e.notes.take().or(old.notes);
+                    e.assigned_project = e.assigned_project.take().or(old.assigned_project);
+                    if e.condition == BoardCondition::default() {
+                        e.condition = old.condition;
+                    }
                     for f in old.fqbns {
                         if !e.fqbns.contains(&f) {
                             e.fqbns.push(f);
@@ -971,6 +968,29 @@ mod tests {
     }
 
     #[test]
+    fn identifying_merges_notes_condition_and_assigned_project() {
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let esp_id = identify(&esp).unwrap();
+        f.sight(&esp_id, &esp, Some("Ozobot DRVKit"), 50);
+        let ser = serial_port();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&ser_id, &ser, None, 60);
+        f.set_notes("3477325620", Some("wobbly USB")).unwrap();
+        f.set_condition("3477325620", BoardCondition::Broken).unwrap();
+        f.set_assigned_project("3477325620", Some("/home/m/beacon"))
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1b:f6:ce:a3:b8", None, 70)
+            .unwrap();
+
+        let e = &f.boards[0];
+        assert_eq!(e.notes.as_deref(), Some("wobbly USB"));
+        assert_eq!(e.condition, BoardCondition::Broken);
+        assert_eq!(e.assigned_project.as_deref(), Some("/home/m/beacon"));
+    }
+
+    #[test]
     fn identifying_a_brand_new_board_creates_a_mac_record() {
         let mut f = Fleet::default();
         let id = f
@@ -1224,6 +1244,55 @@ mod tests {
             "/home/m/beacon",
             "MAC record wins"
         );
+    }
+
+    #[test]
+    fn identifying_into_an_existing_mac_record_keeps_the_serial_records_bench_notes() {
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let esp_id = identify(&esp).unwrap();
+        f.sight(&esp_id, &esp, None, 50);
+        let ser = serial_port();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&ser_id, &ser, None, 60);
+        f.set_notes("3477325620", Some("shared with Sam")).unwrap();
+        f.set_assigned_project("3477325620", Some("/home/m/blink"))
+            .unwrap();
+        f.set_condition("3477325620", BoardCondition::Reserved)
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1b:f6:ce:a3:b8", None, 70)
+            .unwrap();
+
+        assert_eq!(f.boards.len(), 1);
+        let e = &f.boards[0];
+        assert_eq!(e.notes.as_deref(), Some("shared with Sam"));
+        assert_eq!(e.assigned_project.as_deref(), Some("/home/m/blink"));
+        assert_eq!(e.condition, BoardCondition::Reserved);
+    }
+
+    #[test]
+    fn identifying_does_not_overwrite_the_mac_records_own_bench_notes() {
+        let mut f = Fleet::default();
+        let esp = esp_port();
+        let esp_id = identify(&esp).unwrap();
+        f.sight(&esp_id, &esp, None, 50);
+        f.set_notes("44:1b:f6:ce:a3:b8", Some("on the desk")).unwrap();
+        f.set_condition("44:1b:f6:ce:a3:b8", BoardCondition::Broken)
+            .unwrap();
+        let ser = serial_port();
+        let ser_id = identify(&ser).unwrap();
+        f.sight(&ser_id, &ser, None, 60);
+        f.set_notes("3477325620", Some("stale")).unwrap();
+        f.set_condition("3477325620", BoardCondition::Reserved)
+            .unwrap();
+
+        f.merge_identified(Some("3477325620"), "44:1b:f6:ce:a3:b8", None, 70)
+            .unwrap();
+
+        let e = &f.boards[0];
+        assert_eq!(e.notes.as_deref(), Some("on the desk"));
+        assert_eq!(e.condition, BoardCondition::Broken);
     }
 
     // ---------- forget ----------

@@ -3558,6 +3558,15 @@ export default function App() {
             notify={notify}
           />
         )}
+        {diagramMounted && (
+          <DiagramPanel
+            active={bottomTab === "diagram"}
+            sketchDir={sketchDir}
+            bomVersion={bomVersion}
+            diagramVersion={diagramVersion}
+            notify={notify}
+          />
+        )}
       </section>
 
       <ToastStack
