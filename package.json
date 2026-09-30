@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:e2e": "python3 e2e/native_smoke.py",
     "test:coverage": "vitest run --coverage",
     "coverage": "cargo llvm-cov -p bancada-core --summary-only",
     "coverage:html": "cargo llvm-cov -p bancada-core --html --open",

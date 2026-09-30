@@ -2439,12 +2439,12 @@ export default function App() {
 
   // ---------- agent (Assistant panel) ----------
 
-  /** Refresh the tree and, if the agent touched the file open in the editor,
-   *  either pull the fresh content in or flag a conflict — called from
-   *  `handleAgentSideEffects`, which only has refs (registered once, on
-   *  mount) so this reads sketchDirRef/openFileRef/buffersRef, never state
+  /** Refresh the tree and derived panels when a file changes outside the
+   *  editor. Pull fresh content in or flag a conflict for an open buffer.
+   *  Also called from `handleAgentSideEffects`, registered once on
+   *  mount, so this reads sketchDirRef/openFileRef/buffersRef, never state
    *  directly. */
-  const handleAgentFileChange = (filePath: string) => {
+  const handleProjectFileChange = (filePath: string) => {
     const dir = sketchDirRef.current;
     if (!dir) return;
     api
@@ -2475,7 +2475,7 @@ export default function App() {
       agentConflictsRef.current.add(rel);
       setConflicts([...agentConflictsRef.current]);
       notify(
-        `The assistant edited ${rel} while you had unsaved changes — save the file (Ctrl+S) to resolve the conflict before sending another message.`,
+        `${rel} changed outside the editor while you had unsaved changes — save the file (Ctrl+S) to resolve the conflict before sending another message.`,
         true,
       );
       return;
@@ -2598,7 +2598,7 @@ export default function App() {
           ? (input as Record<string, unknown>).file_path
           : undefined;
       if (typeof filePath !== "string") continue;
-      handleAgentFileChange(filePath);
+      handleProjectFileChange(filePath);
     }
   };
 
@@ -3545,6 +3545,7 @@ export default function App() {
             active={bottomTab === "bom"}
             sketchDir={sketchDir}
             bomVersion={bomVersion}
+            onSaved={() => handleProjectFileChange("bom.yaml")}
             notify={notify}
           />
         )}

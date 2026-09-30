@@ -12,6 +12,7 @@ interface Props {
   active: boolean;
   sketchDir: string | null;
   bomVersion?: number;
+  onSaved: () => void;
   notify: (msg: string, isError?: boolean) => void;
 }
 
@@ -61,7 +62,7 @@ const clean = (e: BomEntry): BomEntry => ({
   wiring:      (e.wiring ?? []).filter((w) => w.pin).map(cleanWire),
 });
 
-export default function BomPanel({ active, sketchDir, bomVersion = 0, notify }: Props) {
+export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, notify }: Props) {
   /** null = not loaded yet; [] = loaded, no file; BomEntry[] = file loaded */
   const [rows, setRows] = useState<BomEntry[] | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -192,6 +193,7 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, notify }: 
     try {
       await saveBom(sketchDir, { components: rows.map(clean) });
       setDirty(false);
+      onSaved();
       notify("BOM saved");
     } catch (err) {
       notify(String(err), true);
@@ -210,6 +212,7 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, notify }: 
       if (dirty) {
         await saveBom(sketchDir, { components: rows.map(clean) });
         setDirty(false);
+        onSaved();
       }
       await sendToEnclosureMaker(sketchDir);
       notify("Opening enclosure-maker…");

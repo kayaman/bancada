@@ -128,9 +128,20 @@ serial-port/ModemManager setup an end user needs) is documented in
 ```bash
 cargo test --workspace     # Rust unit tests
 npm test                   # frontend (vitest)
+npm run tauri build -- --debug --no-bundle
+npm run test:e2e            # native desktop workflow (Linux)
 npm run coverage           # Rust line coverage, per file
 npm run coverage:html      # same, as a browsable report
 ```
+
+The native end-to-end test needs Python 3, `WebKitWebDriver`, a running Linux
+desktop session, and the installed `esp32:esp32` Arduino core. It drives the
+built Tauri app through real IPC: project creation, editor save, successful and
+failed compilation, recovery, BOM wiring, diagrams, rename, duplicate, and
+restart. Set `BANCADA_TEST_FQBN` to choose another installed Arduino board.
+It uses temporary projects and app settings and does not flash devices. The
+printed artifact directory contains UI text snapshots and `results.json`;
+set `BANCADA_TEST_SCREENSHOTS=1` for optional WebDriver image capture.
 
 Coverage needs `cargo-llvm-cov` and the LLVM tools:
 

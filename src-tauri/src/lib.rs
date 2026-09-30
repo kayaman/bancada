@@ -6545,7 +6545,8 @@ mod tests {
                 "upload",
                 "serial_read",
                 "serial_send",
-                "board_pinout"
+                "board_pinout",
+                "validate_circuit"
             ]
         );
     }
