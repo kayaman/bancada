@@ -4388,6 +4388,7 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
         mcp::serial_read_tool_def(),
         mcp::serial_send_tool_def(),
         mcp::board_pinout_tool_def(),
+        mcp::validate_circuit_tool_def(),
     ];
 
     for mut request in server.incoming_requests() {
@@ -4461,6 +4462,7 @@ fn mcp_listener_loop(server: Arc<tiny_http::Server>, ctx: McpToolCtx, emit: Arc<
                     "serial_read" => run_serial_read(&ctx, &emit, &args),
                     "serial_send" => run_serial_send(&ctx, &args),
                     "board_pinout" => run_board_pinout(&ctx, &args),
+                    "validate_circuit" => run_validate_circuit(&ctx, &args),
                     // Unreachable via `handle_request`, which rejects tools
                     // outside `tools` — belt and braces.
                     _ => (format!("unknown tool: {name}"), true),
@@ -4973,6 +4975,79 @@ fn run_board_pinout(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool
             (format!("{caveat}{verdict}"), false)
         }
     }
+}
+
+fn run_validate_circuit(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {
+    use bancada_core::boardprofile::Board;
+    use bancada_core::circuit::{CircuitSpec, Connection, ConnectionRole};
+
+    if ctx.is_cancelled() {
+        return ("cancelled".to_string(), true);
+    }
+
+    // Resolve board: explicit arg wins, then project_board(), else error.
+    let board: &'static Board = if let Some(id) = args["board_id"].as_str() {
+        match Board::from_id(id) {
+            Some(b) => b,
+            None => {
+                return (
+                    format!(
+                        "unknown board `{id}` — call board_pinout to list known boards"
+                    ),
+                    true,
+                )
+            }
+        }
+    } else {
+        let dir = std::path::Path::new(&ctx.sketch_dir);
+        match bancada_core::project::project_board(dir).board() {
+            Some(b) => b,
+            None => {
+                return (
+                    "no board profile for this project — pass board_id or record a board first"
+                        .to_string(),
+                    true,
+                )
+            }
+        }
+    };
+
+    // Parse connections array.
+    let raw = match args["connections"].as_array() {
+        Some(a) => a,
+        None => return ("connections is required".to_string(), true),
+    };
+
+    let mut connections = Vec::with_capacity(raw.len());
+    for (i, c) in raw.iter().enumerate() {
+        let gpio = match c["gpio"].as_u64().filter(|&g| g <= 255) {
+            Some(g) => g as u8,
+            None => {
+                return (
+                    format!("connection {i}: gpio must be an integer 0–255"),
+                    true,
+                )
+            }
+        };
+        let role_str = match c["role"].as_str() {
+            Some(s) => s,
+            None => return (format!("connection {i}: role is required"), true),
+        };
+        let role = match ConnectionRole::from_str(role_str) {
+            Some(r) => r,
+            None => {
+                return (
+                    format!("connection {i}: unknown role `{role_str}`"),
+                    true,
+                )
+            }
+        };
+        let component = c["component"].as_str().map(str::to_string);
+        connections.push(Connection { gpio, role, component });
+    }
+
+    let report = bancada_core::circuit::validate_circuit(&CircuitSpec { board, connections });
+    (report.to_markdown(), false)
 }
 
 fn run_serial_send(ctx: &McpToolCtx, args: &serde_json::Value) -> (String, bool) {

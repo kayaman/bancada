@@ -207,6 +207,56 @@ pub fn board_pinout_tool_def() -> ToolDef {
     }
 }
 
+pub fn validate_circuit_tool_def() -> ToolDef {
+    ToolDef {
+        name: "validate_circuit".to_string(),
+        description: "Validate a GPIO wiring plan against the board profile and basic \
+            electrical rules. For every connection, checks whether the GPIO is broken out, \
+            and maps any caveats (strapping pin, input-only, flash/PSRAM, USB, UART0 console, \
+            ADC2-Wi-Fi conflict) to Error/Warn/Info. Also checks for duplicate GPIO assignments, \
+            I2C buses missing pull-up resistors, and LEDs without current-limiting resistors. \
+            Returns a Markdown report. `board_id` is optional — omit it to use the project's \
+            recorded board. `is_error` is false even when issues are found: a report with \
+            findings is still a valid result for you to act on."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "board_id": {
+                    "type": "string",
+                    "description": "Board id (e.g. 'esp32-s3-devkitc-1'). Omit to use the project's recorded board."
+                },
+                "connections": {
+                    "type": "array",
+                    "description": "GPIO assignments to check",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "gpio": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                            },
+                            "role": {
+                                "type": "string",
+                                "description": "digital-output | digital-input | analog-input | i2c-sda | i2c-scl | spi-mosi | spi-miso | spi-clk | spi-cs | uart-tx | uart-rx | pwm | neopixel"
+                            },
+                            "component": {
+                                "type": "string",
+                                "description": "Optional component description, e.g. 'LED + 220Ω', 'SHT31 sensor', '4.7kΩ pull-up'"
+                            }
+                        },
+                        "required": ["gpio", "role"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["connections"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 // ---------- JSON-RPC wire types ----------
 
 /// A JSON-RPC 2.0 request. `id` is kept as a raw [`Value`] because the spec
@@ -800,5 +850,27 @@ mod tests {
     fn check_bearer_non_bearer_scheme_fails() {
         assert!(!check_bearer(Some("Basic sekrit"), "sekrit"));
         assert!(!check_bearer(Some("sekrit"), "sekrit"));
+    }
+
+    #[test]
+    fn validate_circuit_tool_schema_shape() {
+        let def = validate_circuit_tool_def();
+        assert_eq!(def.name, "validate_circuit");
+        assert_eq!(def.input_schema["type"], "object");
+        assert_eq!(def.input_schema["additionalProperties"], false);
+        // connections is required
+        let required = &def.input_schema["required"];
+        assert!(
+            required.as_array().map_or(false, |a| a
+                .iter()
+                .any(|v| v.as_str() == Some("connections"))),
+            "connections must be in required"
+        );
+        // board_id is optional
+        assert!(def.input_schema["properties"]["board_id"].is_object());
+        // gpio bounds
+        let gpio = &def.input_schema["properties"]["connections"]["items"]["properties"]["gpio"];
+        assert_eq!(gpio["minimum"], 0);
+        assert_eq!(gpio["maximum"], 255);
     }
 }

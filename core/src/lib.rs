@@ -15,6 +15,7 @@ pub mod bom;
 pub mod boardprofile;
 pub mod boards;
 pub mod chatlog;
+pub mod circuit;
 pub mod cli;
 pub mod clone;
 pub mod devproxy;
