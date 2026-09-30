@@ -11,7 +11,7 @@
 //! module only runs it. That split is what lets `arduino-cli`'s and `idf.py`'s
 //! argv builders both stay pure and separately unit-tested.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::Command;
 use std::sync::mpsc;
 
@@ -52,24 +52,8 @@ pub(crate) fn stream(
     let stderr = child.stderr.take().expect("stderr was piped");
 
     let (tx, rx) = mpsc::channel::<OutputLine>();
-    let tx_err = tx.clone();
-
-    let t_out = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(|l| l.ok()) {
-            let _ = tx.send(OutputLine {
-                stream: OutputStream::Stdout,
-                line,
-            });
-        }
-    });
-    let t_err = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
-            let _ = tx_err.send(OutputLine {
-                stream: OutputStream::Stderr,
-                line,
-            });
-        }
-    });
+    let t_out = spawn_line_reader(stdout, OutputStream::Stdout, tx.clone());
+    let t_err = spawn_line_reader(stderr, OutputStream::Stderr, tx);
 
     // Receive until both writer threads hang up.
     for line in rx {
@@ -82,6 +66,40 @@ pub(crate) fn stream(
     Ok(RunResult {
         success: status.success(),
         exit_code: status.code().unwrap_or(-1),
+    })
+}
+
+/// Forward one pipe to `tx` a line at a time until it closes.
+///
+/// Lines are decoded lossily rather than with `BufRead::lines`, which stops at
+/// the first byte sequence that is not UTF-8. A reader that quits early stops
+/// draining the pipe, and the child then blocks on a full pipe or dies of
+/// SIGPIPE — a whole build lost to one stray byte in a compiler message.
+fn spawn_line_reader(
+    pipe: impl Read + Send + 'static,
+    stream: OutputStream,
+    tx: mpsc::Sender<OutputLine>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(pipe);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+            }
+            let line = String::from_utf8_lossy(&buf).into_owned();
+            if tx.send(OutputLine { stream, line }).is_err() {
+                break;
+            }
+        }
     })
 }
 
@@ -101,4 +119,59 @@ pub(crate) fn output(mut cmd: Command, bin: &str, display: &str) -> Result<Strin
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_output_does_not_stop_the_stream() {
+        let mut lines = Vec::new();
+        let result = stream(
+            sh("printf 'before\\n\\377bad\\n'; seq 1 20000; echo done >&2"),
+            "sh",
+            |l| lines.push(l),
+        )
+        .unwrap();
+        assert!(result.success, "child must not die of SIGPIPE");
+        let stdout: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.stream == OutputStream::Stdout)
+            .map(|l| l.line.as_str())
+            .collect();
+        assert_eq!(stdout.len(), 20002);
+        assert_eq!(stdout[0], "before");
+        assert_eq!(stdout[1], "\u{FFFD}bad");
+        assert_eq!(stdout.last(), Some(&"20000"));
+        assert!(lines
+            .iter()
+            .any(|l| l.stream == OutputStream::Stderr && l.line == "done"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crlf_and_unterminated_last_line_are_handled() {
+        let mut lines = Vec::new();
+        stream(sh("printf 'a\\r\\nb'"), "sh", |l| lines.push(l.line)).unwrap();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_missing_binary_is_tool_missing() {
+        let cmd = Command::new("bancada-definitely-not-a-binary");
+        let err = stream(cmd, "bancada-definitely-not-a-binary", |_| {}).unwrap_err();
+        assert!(matches!(err, Error::ToolMissing(_)), "{err}");
+    }
 }
