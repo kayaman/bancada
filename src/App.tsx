@@ -548,6 +548,12 @@ export default function App() {
    *  both together, always. */
   const agentFlashingRef = useRef(false);
   const [agentFlashing, setAgentFlashing] = useState(false);
+  /** The bottom tab that was active right before an agent flash borrowed it
+   *  to show the Build console. `null` means no flash currently owns the
+   *  tab. Captured once per flash (never overwritten mid-flash) so the user
+   *  lands back exactly where they left off — whichever tab that was, not a
+   *  hardcoded one — the instant `upload_done` arrives. */
+  const preFlashTabRef = useRef<BottomTab | null>(null);
   /** "Continue this chat" bookkeeping — see `ContinuationStash` and
    *  `sendToAgent`/`fallbackRespawn`/`teardownAgentSession` below. */
   const continuationRef = useRef<ContinuationStash | null>(null);
@@ -2515,10 +2521,27 @@ export default function App() {
       if (ev.type === "upload_started") {
         setBuildLines([]);
         beginActivity("agent_upload", "Assistant flashing…", "upload");
+        // Show the flash landing on the board — this is the one agent
+        // operation that can fail in a way only the Build console explains
+        // (wrong port, esptool timeout). Capture the tab it interrupted so
+        // `upload_done` below can hand it straight back; a second flash
+        // arriving before the first is put back (there is only ever one at a
+        // time) must not overwrite that with "build".
+        if (preFlashTabRef.current === null) {
+          preFlashTabRef.current = bottomTabRef.current;
+        }
+        openBottomTab("build");
       } else {
         endActivity(["agent_upload"], ev.success === true, "Assistant flash");
+        // Back to wherever the user actually was — the chat, the serial
+        // monitor, whatever — the moment the flash resolves, not to a
+        // hardcoded tab. The assistant's next turn (it reads the board's
+        // serial output) still reaches the user via the agent tab's unseen
+        // dot if that is not where they land.
+        const tab = preFlashTabRef.current;
+        preFlashTabRef.current = null;
+        openBottomTab(tab ?? "agent");
       }
-      if (!flashing) openBottomTab("agent");
       return;
     }
     // The host has already killed the child, so no verify_done is coming.
@@ -2526,6 +2549,12 @@ export default function App() {
       setAgentBuilding(false);
       agentFlashingRef.current = false;
       setAgentFlashing(false);
+      // A flash the alarm cut off still owes the user their tab back.
+      if (preFlashTabRef.current !== null) {
+        const tab = preFlashTabRef.current;
+        preFlashTabRef.current = null;
+        openBottomTab(tab);
+      }
       // No verdict: the child was killed mid-op, so nothing finished. A
       // `lastResult` here would leave "✗ Assistant compile" on the bar for a
       // compile that was never allowed to fail on its own terms.
@@ -2855,6 +2884,14 @@ export default function App() {
     setAgentBuilding(false);
     agentFlashingRef.current = false;
     setAgentFlashing(false);
+    // A stopped session's flash (if any) will never emit `upload_done`
+    // either — restore the tab it borrowed rather than leaving a stale
+    // capture around to mis-restore the *next* session's first flash.
+    if (preFlashTabRef.current !== null) {
+      const tab = preFlashTabRef.current;
+      preFlashTabRef.current = null;
+      openBottomTab(tab);
+    }
     // Same reasoning, for the bar: no `verify_done` is coming, so the clock
     // has to be stopped here or it counts up forever. No verdict — the op
     // was cancelled, not decided.

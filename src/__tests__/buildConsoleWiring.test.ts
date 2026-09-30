@@ -90,4 +90,41 @@ describe("App.tsx wiring: the build console, the badge and the editor jump", () 
     );
     expect(uploadBranch).toContain("setBuildLines([]);");
   });
+
+  it("shows the Build console for an agent flash, then hands the exact tab back", () => {
+    // Regression: `upload_done` used to force the tab to a hardcoded
+    // "agent", stealing focus from wherever the user actually was (the
+    // serial monitor, the fleet view, …). It must restore that tab instead.
+    const uploadEvent = between(
+      'if (ev.type === "upload_started" || ev.type === "upload_done") {',
+      "return;\n    }\n    // The host has already killed the child",
+    );
+    expect(uploadEvent).toContain('if (ev.type === "upload_started") {');
+    expect(uploadEvent).toContain("openBottomTab(\"build\");");
+    expect(uploadEvent).not.toContain('openBottomTab("agent");');
+    expect(uploadEvent).toContain("preFlashTabRef.current === null");
+    expect(uploadEvent).toContain("preFlashTabRef.current = bottomTabRef.current;");
+    expect(uploadEvent).toContain("preFlashTabRef.current = null;");
+    expect(uploadEvent).toContain("openBottomTab(tab ?? \"agent\");");
+  });
+
+  it("hands the borrowed tab back on a security kill or a stopped session too", () => {
+    // Both paths end the flash without an `upload_done` ever arriving, so
+    // each owes the tab back itself rather than leaving it parked on
+    // "build" (security_alarm) or leaking a stale capture into the next
+    // session's first flash (teardownAgentSession).
+    const alarmBranch = between(
+      'if (ev.type === "security_alarm") {',
+      "clearAgentActivity();",
+    );
+    expect(alarmBranch).toContain("preFlashTabRef.current !== null");
+    expect(alarmBranch).toContain("openBottomTab(tab);");
+
+    const teardown = between(
+      "const teardownAgentSession = (reason: string) => {",
+      "clearAgentActivity();",
+    );
+    expect(teardown).toContain("preFlashTabRef.current !== null");
+    expect(teardown).toContain("openBottomTab(tab);");
+  });
 });
