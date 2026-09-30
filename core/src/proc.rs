@@ -75,6 +75,37 @@ pub(crate) fn stream(
 /// the first byte sequence that is not UTF-8. A reader that quits early stops
 /// draining the pipe, and the child then blocks on a full pipe or dies of
 /// SIGPIPE — a whole build lost to one stray byte in a compiler message.
+fn trim_trailing_crlf(buf: &mut Vec<u8>) {
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    }
+}
+
+/// Read `reader` line-by-line until EOF, decoding each line lossily.
+///
+/// Same semantics as the line readers inside [`stream`]: a byte sequence
+/// that is not valid UTF-8 becomes `U+FFFD` rather than ending the read.
+/// `on_line` returns `false` to stop reading early (e.g. the consumer has
+/// raised an alarm and the child is being torn down).
+pub fn for_each_lossy_line(reader: impl Read, mut on_line: impl FnMut(String) -> bool) {
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        trim_trailing_crlf(&mut buf);
+        if !on_line(String::from_utf8_lossy(&buf).into_owned()) {
+            break;
+        }
+    }
+}
+
 fn spawn_line_reader(
     pipe: impl Read + Send + 'static,
     stream: OutputStream,
@@ -89,12 +120,7 @@ fn spawn_line_reader(
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
-            if buf.last() == Some(&b'\n') {
-                buf.pop();
-                if buf.last() == Some(&b'\r') {
-                    buf.pop();
-                }
-            }
+            trim_trailing_crlf(&mut buf);
             let line = String::from_utf8_lossy(&buf).into_owned();
             if tx.send(OutputLine { stream, line }).is_err() {
                 break;
@@ -173,5 +199,19 @@ mod tests {
         let cmd = Command::new("bancada-definitely-not-a-binary");
         let err = stream(cmd, "bancada-definitely-not-a-binary", |_| {}).unwrap_err();
         assert!(matches!(err, Error::ToolMissing(_)), "{err}");
+    }
+
+    #[test]
+    fn for_each_lossy_line_keeps_going_past_invalid_utf8() {
+        use std::io::Cursor;
+        let mut lines = Vec::new();
+        for_each_lossy_line(Cursor::new(b"one\n\xff\nthree\n"), |l| {
+            lines.push(l);
+            true
+        });
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "one");
+        assert_eq!(lines[2], "three");
+        assert!(lines[1].contains('\u{fffd}'));
     }
 }
