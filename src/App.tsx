@@ -114,6 +114,7 @@ import WsPanel from "./components/WsPanel";
 import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
 import BomPanel from "./components/BomPanel";
+import DiagramPanel from "./components/DiagramPanel";
 import BottomTabBar from "./components/BottomTabBar";
 import ToastStack from "./components/ToastStack";
 import StatusBar from "./components/StatusBar";
@@ -514,6 +515,8 @@ export default function App() {
   const [agentMounted, setAgentMounted] = useState(false);
   const [bomMounted, setBomMounted] = useState(false);
   const [bomVersion, setBomVersion] = useState(0);
+  const [diagramMounted, setDiagramMounted] = useState(false);
+  const [diagramVersion, setDiagramVersion] = useState(0);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
   /**
@@ -823,6 +826,7 @@ export default function App() {
     if (tab === "web") setWebMounted(true);
     if (tab === "agent") setAgentMounted(true);
     if (tab === "bom") setBomMounted(true);
+    if (tab === "diagram") setDiagramMounted(true);
   }, []);
 
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
@@ -2457,6 +2461,9 @@ export default function App() {
     if (filePath.endsWith("/bom.yaml") || filePath === "bom.yaml") {
       setBomVersion((v) => v + 1);
     }
+    if (filePath.endsWith("/wiring.svg") || filePath === "wiring.svg") {
+      setDiagramVersion((v) => v + 1);
+    }
 
     const rel = relativeToSketchDir(filePath, dir);
     if (rel !== openFileRef.current) return;
@@ -3538,6 +3545,15 @@ export default function App() {
             active={bottomTab === "bom"}
             sketchDir={sketchDir}
             bomVersion={bomVersion}
+            notify={notify}
+          />
+        )}
+        {diagramMounted && (
+          <DiagramPanel
+            active={bottomTab === "diagram"}
+            sketchDir={sketchDir}
+            bomVersion={bomVersion}
+            diagramVersion={diagramVersion}
             notify={notify}
           />
         )}
