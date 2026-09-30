@@ -102,6 +102,8 @@ describe("checkRename", () => {
     expect(check("src/util.h", "/abs").ok).toBe(false);
     expect(check("src/util.h", "a//b").ok).toBe(false);
     expect(check("src/util.h", "../out").ok).toBe(false);
+    expect(check("src/util.h", "./out").ok).toBe(false);
+    expect(check("src/util.h", "src/./out").ok).toBe(false);
   });
 
   it("rejects an empty target", () => {

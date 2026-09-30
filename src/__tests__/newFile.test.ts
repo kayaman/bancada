@@ -63,6 +63,12 @@ describe("checkNewFile", () => {
     expect(checkNewFile("data/../../out.h", existing).ok).toBe(false);
   });
 
+  it("rejects a . segment, which core refuses and which would alias a protected file", () => {
+    expect(checkNewFile("./sketch.yaml", existing).ok).toBe(false);
+    expect(checkNewFile("data/./x.h", existing).ok).toBe(false);
+    expect(checkNewFile(".hidden", existing).ok).toBe(true);
+  });
+
   it("rejects a trailing slash — that names a folder", () => {
     expect(checkNewFile("data/", existing).ok).toBe(false);
   });

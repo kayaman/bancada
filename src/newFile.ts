@@ -30,6 +30,8 @@ export function checkNewEntry(
   const segments = relPath.split("/");
   if (segments.some((s) => s === ".."))
     return { ok: false, reason: "the path cannot leave the project (..)" };
+  if (segments.some((s) => s === "."))
+    return { ok: false, reason: "the path cannot contain a . segment" };
   if (segments.some((s) => s.trim() === ""))
     return { ok: false, reason: "the path has an empty segment" };
   if (existing.some((f) => f.rel_path === relPath))

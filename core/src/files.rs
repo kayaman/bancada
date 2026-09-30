@@ -23,6 +23,11 @@ pub fn validate_rel_path(rel: &str) -> Result<()> {
         if seg == ".." {
             return Err(Error::Other(format!("{rel} would leave the project (..)")));
         }
+        if seg == "." {
+            return Err(Error::Other(format!(
+                "{rel} has a `.` path segment — name the entry directly"
+            )));
+        }
         if seg.trim().is_empty() {
             return Err(Error::Other(format!("{rel} has an empty path segment")));
         }
@@ -191,6 +196,15 @@ mod tests {
     fn validate_rejects_parent_traversal() {
         assert!(validate_rel_path("..").is_err());
         assert!(validate_rel_path("src/../../x").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_dot_segments() {
+        assert!(validate_rel_path(".").is_err());
+        assert!(validate_rel_path("./sketch.yaml").is_err());
+        assert!(validate_rel_path("src/./util.h").is_err());
+        assert!(validate_rel_path(".hidden").is_ok());
+        assert!(validate_rel_path("a.b/c.d").is_ok());
     }
 
     #[test]
@@ -369,6 +383,18 @@ mod tests {
         let (_t, proj) = sample();
         assert!(proj.delete_entry("demo.ino").is_err());
         assert!(proj.delete_entry("sketch.yaml").is_err());
+    }
+
+    #[test]
+    fn dot_spellings_cannot_bypass_the_protected_files() {
+        let (_t, proj) = sample();
+        assert!(proj.delete_entry("./demo.ino").is_err());
+        assert!(proj.delete_entry("./sketch.yaml").is_err());
+        assert!(proj.rename_entry("./sketch.yaml", "cfg.yaml").is_err());
+        assert!(proj.delete_entry(".").is_err());
+        assert!(proj.rename_entry(".", "moved").is_err());
+        assert!(proj.dir.join("demo.ino").is_file());
+        assert!(proj.dir.join("sketch.yaml").is_file());
     }
 
     #[test]
