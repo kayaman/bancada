@@ -3249,6 +3249,42 @@ fn set_board_nickname(
     Ok(f.boards)
 }
 
+#[tauri::command]
+fn set_board_condition(
+    app: AppHandle,
+    id: String,
+    condition: fleet::BoardCondition,
+) -> Result<Vec<fleet::FleetEntry>, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    f.set_condition(&id, condition).map_err(err_str)?;
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
+#[tauri::command]
+fn set_board_notes(
+    app: AppHandle,
+    id: String,
+    notes: Option<String>,
+) -> Result<Vec<fleet::FleetEntry>, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    f.set_notes(&id, notes.as_deref()).map_err(err_str)?;
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
+#[tauri::command]
+fn set_board_assigned_project(
+    app: AppHandle,
+    id: String,
+    project: Option<String>,
+) -> Result<Vec<fleet::FleetEntry>, String> {
+    let (path, mut f) = load_fleet(&app)?;
+    f.set_assigned_project(&id, project.as_deref()).map_err(err_str)?;
+    f.save(&path).map_err(err_str)?;
+    Ok(f.boards)
+}
+
 /// Record that the board on `port` was built for `fqbn`.
 ///
 /// Resolving the port to a fleet id happens here so the frontend never needs a
@@ -5796,6 +5832,9 @@ pub fn run() {
             read_board_mac,
             fleet_sync,
             set_board_nickname,
+            set_board_condition,
+            set_board_notes,
+            set_board_assigned_project,
             note_board_fqbn,
             identify_board,
             forget_board,

@@ -343,6 +343,8 @@ export interface InstalledCore {
 /** How confidently a port identifies one specific physical board. */
 export type BoardIdKind = "mac" | "serial";
 
+export type BoardCondition = "Working" | "Broken" | "Reserved" | "Retired";
+
 /**
  * How far a project has moved since a recorded commit.
  *
@@ -389,6 +391,10 @@ export interface FleetEntry {
   last_seen: number;
   /** Only the last flash is kept; the repository's tags are the history. */
   last_flash?: FlashRecord | null;
+  /** Defaults to `"Working"` on first sight (Rust `#[serde(default)]`). */
+  condition?: BoardCondition;
+  notes?: string | null;
+  assigned_project?: string | null;
 }
 
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
@@ -992,6 +998,12 @@ export const identifyBoard = (port: string, previousId?: string | null) =>
   });
 export const forgetBoard = (id: string) =>
   invoke<FleetEntry[]>("forget_board", { id });
+export const setBoardCondition = (id: string, condition: BoardCondition) =>
+  invoke<FleetEntry[]>("set_board_condition", { id, condition });
+export const setBoardNotes = (id: string, notes: string | null) =>
+  invoke<FleetEntry[]>("set_board_notes", { id, notes });
+export const setBoardAssignedProject = (id: string, project: string | null) =>
+  invoke<FleetEntry[]>("set_board_assigned_project", { id, project });
 
 /** One colour theme found in a `.json` file or a `.vsix` package. */
 export interface ThemeSource {

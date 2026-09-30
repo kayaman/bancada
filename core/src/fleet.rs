@@ -112,6 +112,17 @@ pub fn board_name(dp: &DetectedPort) -> Option<&str> {
     Some(first.name.as_str())
 }
 
+/// The operational status of a board, as assessed by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub enum BoardCondition {
+    #[default]
+    Working,
+    Broken,
+    Reserved,
+    Retired,
+}
+
 /// What was last flashed to a board, and from where.
 ///
 /// The board itself cannot tell you what is running on it, so the registry
@@ -164,6 +175,16 @@ pub struct FleetEntry {
     /// project are the history, this is just the pointer back into it.
     #[serde(default)]
     pub last_flash: Option<FlashRecord>,
+    /// User-assessed operational status. Defaults to `Working` on first sight.
+    #[serde(default)]
+    pub condition: BoardCondition,
+    /// Free-text notes: location, owner, known quirks, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// The project this board is intended to run — the user's intent, as
+    /// opposed to `last_flash.project_dir` which is what was actually flashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_project: Option<String>,
     /// Epoch seconds. Supplied by the caller, never read from a clock here.
     pub first_seen: u64,
     pub last_seen: u64,
@@ -285,6 +306,9 @@ impl Fleet {
                     // A sighting learns nothing about firmware; only a flash
                     // fills this in, and re-sighting must never clear it.
                     last_flash: None,
+                    condition: BoardCondition::Working,
+                    notes: None,
+                    assigned_project: None,
                     first_seen: now,
                     last_seen: now,
                 });
@@ -300,6 +324,38 @@ impl Fleet {
             .index_of(id)
             .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
         self.boards[i].nickname = nickname
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(())
+    }
+
+    pub fn set_condition(&mut self, id: &str, condition: BoardCondition) -> Result<()> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
+        self.boards[i].condition = condition;
+        Ok(())
+    }
+
+    /// Set or clear notes. An empty string clears.
+    pub fn set_notes(&mut self, id: &str, notes: Option<&str>) -> Result<()> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
+        self.boards[i].notes = notes
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(())
+    }
+
+    /// Set or clear the assigned project path. An empty string clears.
+    pub fn set_assigned_project(&mut self, id: &str, project: Option<&str>) -> Result<()> {
+        let i = self
+            .index_of(id)
+            .ok_or_else(|| Error::Other(format!("no board with id `{id}` in the fleet")))?;
+        self.boards[i].assigned_project = project
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -420,6 +476,9 @@ impl Fleet {
                     vid: None,
                     pid: None,
                     last_flash: None,
+                    condition: BoardCondition::Working,
+                    notes: None,
+                    assigned_project: None,
                     first_seen: now,
                     last_seen: now,
                 });
@@ -1242,6 +1301,48 @@ mod tests {
         assert_eq!(rec.branch.as_deref(), Some("main"));
         assert_eq!(rec.commit, "9f2c1ab");
         assert_eq!(rec.at, 1_500);
+    }
+
+    // ---------- condition / notes / assigned_project ----------
+
+    #[test]
+    fn set_condition_persists() {
+        let (mut f, _) = fleet_with_esp(1);
+        f.set_condition("44:1b:f6:ce:a3:b8", BoardCondition::Broken)
+            .unwrap();
+        assert_eq!(f.boards[0].condition, BoardCondition::Broken);
+    }
+
+    #[test]
+    fn set_notes_roundtrip() {
+        let (mut f, _) = fleet_with_esp(1);
+        f.set_notes("44:1b:f6:ce:a3:b8", Some("bench probe")).unwrap();
+        assert_eq!(f.boards[0].notes.as_deref(), Some("bench probe"));
+        f.set_notes("44:1b:f6:ce:a3:b8", None).unwrap();
+        assert_eq!(f.boards[0].notes, None);
+        // An empty string also clears.
+        f.set_notes("44:1b:f6:ce:a3:b8", Some("")).unwrap();
+        assert_eq!(f.boards[0].notes, None);
+    }
+
+    #[test]
+    fn set_assigned_project_survives_sight() {
+        let (mut f, id) = fleet_with_esp(1);
+        let port = esp_port();
+        f.set_assigned_project("44:1b:f6:ce:a3:b8", Some("/home/m/weather"))
+            .unwrap();
+        // A subsequent sight must not wipe the assigned_project.
+        f.sight(&id, &port, None, 2);
+        assert_eq!(
+            f.boards[0].assigned_project.as_deref(),
+            Some("/home/m/weather")
+        );
+    }
+
+    #[test]
+    fn set_condition_unknown_id_is_an_error() {
+        let (mut f, _) = fleet_with_esp(1);
+        assert!(f.set_condition("00:00:00:00:00:00", BoardCondition::Broken).is_err());
     }
 
     #[test]

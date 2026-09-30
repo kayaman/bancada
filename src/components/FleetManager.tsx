@@ -3,7 +3,11 @@ import {
   fleetSync,
   forgetBoard,
   identifyBoard,
+  setBoardAssignedProject,
+  setBoardCondition,
   setBoardNickname,
+  setBoardNotes,
+  type BoardCondition,
   type DetectedPort,
   type FleetEntry,
 } from "../api";
@@ -12,10 +16,19 @@ import { fleetDisplayName, portTitle } from "../ports";
 interface Props {
   /** The current port scan; drives which boards show as online. */
   ports: DetectedPort[];
+  /** Current open sketch directory — used for "Set to current" on assigned project. */
+  sketchDir: string | null;
   /** Called before esptool runs so the build console can be shown. */
   onStreamStart: () => void;
   notify: (msg: string, isError?: boolean) => void;
 }
+
+const CONDITION_LABELS: Record<BoardCondition, string> = {
+  Working: "Working",
+  Broken: "Broken",
+  Reserved: "Reserved",
+  Retired: "Retired",
+};
 
 /** Epoch seconds → a compact local stamp, matching ScopeView's export format. */
 const when = (secs: number) => {
@@ -35,7 +48,14 @@ const ago = (secs: number, now: number) => {
   return `${Math.round(d / 86400)} d ago`;
 };
 
-export default function FleetManager({ ports, onStreamStart, notify }: Props) {
+const baseName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+
+export default function FleetManager({
+  ports,
+  sketchDir,
+  onStreamStart,
+  notify,
+}: Props) {
   const [boards, setBoards] = useState<FleetEntry[]>([]);
   const [online, setOnline] = useState<string[]>([]);
   const [unidentified, setUnidentified] = useState<DetectedPort[]>([]);
@@ -43,6 +63,9 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
   /** Id whose nickname is being edited, and the draft text. */
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  /** Id whose notes are being edited. */
+  const [editingNotes, setEditingNotes] = useState<string | null>(null);
+  const [notesDraft, setNotesDraft] = useState("");
   const [confirmForget, setConfirmForget] = useState<string | null>(null);
   const [nowSecs, setNowSecs] = useState(() => Math.floor(Date.now() / 1000));
 
@@ -73,7 +96,19 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
     try {
       setBoards(await setBoardNickname(id, draft));
       setEditing(null);
-      notify(draft.trim() ? `Renamed to “${draft.trim()}”` : "Nickname cleared");
+      notify(draft.trim() ? `Renamed to "${draft.trim()}"` : "Nickname cleared");
+    } catch (e) {
+      notify(String(e), true);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const saveNotes = async (id: string) => {
+    setWorking(true);
+    try {
+      setBoards(await setBoardNotes(id, notesDraft.trim() || null));
+      setEditingNotes(null);
     } catch (e) {
       notify(String(e), true);
     } finally {
@@ -116,6 +151,12 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
   const card = (entry: FleetEntry) => {
     const live = isOnline(entry.id);
     const name = fleetDisplayName(entry);
+    const flash = entry.last_flash;
+    const isCurrentProject =
+      sketchDir && flash?.project_dir === sketchDir;
+    const isAssignedCurrent =
+      sketchDir && entry.assigned_project === sketchDir;
+
     return (
       <div key={entry.id} className={live ? "fleet-card online" : "fleet-card"}>
         <div className="fleet-head">
@@ -155,6 +196,25 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
           >
             {entry.id_kind}
           </span>
+          <select
+            className={`select small fleet-condition fleet-condition-${(entry.condition ?? "Working").toLowerCase()}`}
+            value={entry.condition ?? "Working"}
+            aria-label="Board condition"
+            onChange={async (e) => {
+              const cond = e.target.value as BoardCondition;
+              try {
+                setBoards(await setBoardCondition(entry.id, cond));
+              } catch (err) {
+                notify(String(err), true);
+              }
+            }}
+          >
+            {Object.keys(CONDITION_LABELS).map((c) => (
+              <option key={c} value={c}>
+                {CONDITION_LABELS[c as BoardCondition]}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="fleet-id">{entry.id}</div>
@@ -171,6 +231,84 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
           </div>
         )}
 
+        {/* Assigned project */}
+        <div className="fleet-meta fleet-project-row">
+          <span className="fleet-meta-label">Project:</span>
+          <span
+            className={
+              isAssignedCurrent
+                ? "fleet-project-name current"
+                : "fleet-project-name"
+            }
+            title={entry.assigned_project ?? "No project assigned"}
+          >
+            {entry.assigned_project ? baseName(entry.assigned_project) : "—"}
+          </span>
+          {sketchDir && !isAssignedCurrent && (
+            <button
+              className="btn small"
+              title={`Assign to ${baseName(sketchDir)}`}
+              onClick={async () => {
+                try {
+                  setBoards(await setBoardAssignedProject(entry.id, sketchDir));
+                } catch (err) {
+                  notify(String(err), true);
+                }
+              }}
+            >
+              Set to current
+            </button>
+          )}
+          {entry.assigned_project && (
+            <button
+              className="btn small"
+              title="Clear assigned project"
+              onClick={async () => {
+                try {
+                  setBoards(await setBoardAssignedProject(entry.id, null));
+                } catch (err) {
+                  notify(String(err), true);
+                }
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Notes */}
+        {editingNotes === entry.id ? (
+          <textarea
+            className="input mono fleet-notes-edit"
+            autoFocus
+            value={notesDraft}
+            placeholder="notes…"
+            rows={2}
+            onChange={(e) => setNotesDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                saveNotes(entry.id);
+              }
+              if (e.key === "Escape") setEditingNotes(null);
+            }}
+            onBlur={() => saveNotes(entry.id)}
+          />
+        ) : (
+          <div
+            className={
+              entry.notes ? "fleet-notes" : "fleet-notes fleet-notes-empty"
+            }
+            title="Click to edit notes"
+            onClick={() => {
+              setNotesDraft(entry.notes ?? "");
+              setEditingNotes(entry.id);
+            }}
+          >
+            {entry.notes ?? "add notes…"}
+          </div>
+        )}
+
         <div className="fleet-meta">
           {live ? (
             <>attached on {entry.last_port ?? "—"}</>
@@ -184,6 +322,31 @@ export default function FleetManager({ ports, onStreamStart, notify }: Props) {
         <div className="fleet-meta" title={`First seen ${when(entry.first_seen)}`}>
           known since {when(entry.first_seen)}
         </div>
+
+        {/* Last flash */}
+        {flash && (
+          <div
+            className={
+              isCurrentProject
+                ? "fleet-flash fleet-flash-current"
+                : "fleet-flash"
+            }
+            title={`Project: ${flash.project_dir}\nCommit: ${flash.commit}\nTag: ${flash.tag}`}
+          >
+            <span className="fleet-flash-label">Flashed:</span>{" "}
+            {baseName(flash.project_dir)}
+            {" · "}
+            {flash.commit.slice(0, 7)}
+            {flash.branch ? ` (${flash.branch})` : ""}
+            {" · "}
+            {when(flash.at)}
+            {isCurrentProject && (
+              <span className="fleet-flash-current-badge" title="Current open project">
+                {" "}current
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="fleet-actions">
           <div className="spacer" />

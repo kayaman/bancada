@@ -1178,6 +1178,98 @@ body {
   margin-bottom: var(--sp-4);
 }
 
+/* Condition select — lives in the card head, right of the id-kind badge. */
+.fleet-condition {
+  margin-left: 0;
+  font-size: var(--fs-tiny);
+  height: 20px;
+  padding: 0 var(--sp-2);
+}
+
+.fleet-condition-working { color: var(--accent); }
+.fleet-condition-broken  { color: var(--error, #e05c5c); }
+.fleet-condition-reserved { color: var(--warn, #c89b30); }
+.fleet-condition-retired { color: var(--text-dim); }
+
+/* Assigned project row */
+.fleet-project-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.fleet-meta-label {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.fleet-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.fleet-project-name.current {
+  color: var(--accent);
+}
+
+/* Notes — click to edit */
+.fleet-notes {
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+  margin-top: var(--sp-1);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-notes:hover {
+  color: var(--text);
+}
+
+.fleet-notes-empty {
+  font-style: italic;
+  opacity: 0.55;
+}
+
+.fleet-notes-edit {
+  width: 100%;
+  margin-top: var(--sp-1);
+  resize: none;
+  font-size: var(--fs-small);
+}
+
+/* Last flash record */
+.fleet-flash {
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-inset, var(--bg-raised));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-flash-label {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.fleet-flash-current {
+  border-color: var(--accent-dim);
+}
+
+.fleet-flash-current-badge {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* ---------- observability ---------- */
 
 .obs-panel {

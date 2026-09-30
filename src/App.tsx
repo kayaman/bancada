@@ -3276,6 +3276,7 @@ export default function App() {
           {sideTab === "fleet" && (
             <FleetManager
               ports={ports}
+              sketchDir={sketchDir}
               onStreamStart={() => {
                 setBuildLines([]);
                 openBottomTab("build");
