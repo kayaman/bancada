@@ -307,10 +307,48 @@ fn write_tree(
 /// changes, so a rename produces a one-line diff and every comment the user
 /// added survives.
 fn rewrite_project_name(text: &str, new_name: &str) -> Option<String> {
-    let start = text.find("project(")?;
-    let open = start + "project(".len();
-    let close = text[open..].find(')')? + open;
-    Some(format!("{}{}{}", &text[..open], new_name, &text[close..]))
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let indent = line.len() - line.trim_start().len();
+        let t = &line[indent..];
+        let Some(head) = t.get(.."project".len()) else {
+            continue;
+        };
+        if !head.eq_ignore_ascii_case("project") {
+            continue;
+        }
+        let after_keyword = &t["project".len()..];
+        let Some(args) = after_keyword.trim_start().strip_prefix('(') else {
+            continue;
+        };
+        let args_start = line_start + line.len() - args.len();
+        let name_len = project_name_len(args);
+        let name_start = args_start + (args.len() - args.trim_start().len());
+        let name_end = args_start + name_len;
+        return Some(format!(
+            "{}{}{}",
+            &text[..name_start],
+            new_name,
+            &text[name_end..]
+        ));
+    }
+    None
+}
+
+fn project_name_len(args: &str) -> usize {
+    let lead = args.len() - args.trim_start().len();
+    let rest = &args[lead..];
+    if let Some(quoted) = rest.strip_prefix('"') {
+        return match quoted.find('"') {
+            Some(close) => lead + close + 2,
+            None => args.find(')').unwrap_or(args.len()),
+        };
+    }
+    lead + rest
+        .find(|c: char| c.is_whitespace() || c == ')')
+        .unwrap_or(rest.len())
 }
 
 /// Rename an ESP-IDF project: its directory and its CMake name, together.
@@ -622,6 +660,42 @@ mod tests {
             "# a comment\ncmake_minimum_required(VERSION 3.16)\nproject(new)\n# trailing\n"
         );
         assert!(rewrite_project_name("no call at all\n", "new").is_none());
+    }
+
+    #[test]
+    fn a_commented_out_project_call_is_not_the_one_rewritten() {
+        let text = "# project(old_draft)\nproject(real)\n";
+        assert_eq!(
+            rewrite_project_name(text, "new").unwrap(),
+            "# project(old_draft)\nproject(new)\n"
+        );
+        assert!(rewrite_project_name("# project(only_a_comment)\n", "new").is_none());
+    }
+
+    #[test]
+    fn project_arguments_after_the_name_survive_a_rewrite() {
+        let text = "project(old VERSION 1.2 LANGUAGES C CXX)\n";
+        assert_eq!(
+            rewrite_project_name(text, "new").unwrap(),
+            "project(new VERSION 1.2 LANGUAGES C CXX)\n"
+        );
+    }
+
+    #[test]
+    fn the_call_is_found_however_cmake_lets_it_be_spelled() {
+        assert_eq!(
+            rewrite_project_name("  PROJECT (old)\n", "new").unwrap(),
+            "  PROJECT (new)\n"
+        );
+        assert_eq!(
+            rewrite_project_name("project( old )\n", "new").unwrap(),
+            "project( new )\n"
+        );
+        assert_eq!(
+            rewrite_project_name("project(\"old\" C)\n", "new").unwrap(),
+            "project(new C)\n"
+        );
+        assert!(rewrite_project_name("project_extra(old)\n", "new").is_none());
     }
 
     #[test]
