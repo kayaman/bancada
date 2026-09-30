@@ -14,7 +14,7 @@ const item = (row: ReturnType<typeof tabRow>, tab: BottomTab) => {
 };
 
 describe("BOTTOM_TABS / TAB_LABEL / SEPARATOR_AFTER", () => {
-  it("is exactly the seven tabs, in bench order", () => {
+  it("is exactly the nine tabs, in bench order", () => {
     expect([...BOTTOM_TABS]).toEqual([
       "build",
       "serial",
@@ -23,6 +23,8 @@ describe("BOTTOM_TABS / TAB_LABEL / SEPARATOR_AFTER", () => {
       "ws",
       "web",
       "agent",
+      "bom",
+      "diagram",
     ]);
   });
 

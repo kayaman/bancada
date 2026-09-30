@@ -7,14 +7,14 @@ afterEach(cleanup);
 
 const noop = () => {};
 
-/** The seven tab buttons, in DOM order (the maximize button has no .tab class). */
+/** The tab buttons, in DOM order (the maximize button has no .tab class). */
 const tabButtons = () =>
   screen
     .getAllByRole("button")
     .filter((b) => b.classList.contains("tab"));
 
 describe("BottomTabBar", () => {
-  it("renders the seven tabs in bench order", () => {
+  it("renders all tabs in bench order", () => {
     render(
       <BottomTabBar
         active="build"
@@ -32,6 +32,8 @@ describe("BottomTabBar", () => {
       "WS",
       "Web",
       "Assistant",
+      "BOM",
+      "Diagram",
     ]);
   });
 

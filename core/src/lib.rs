@@ -11,12 +11,14 @@
 
 pub mod agent;
 pub mod backend;
+pub mod bom;
 pub mod boardprofile;
 pub mod boards;
 pub mod chatlog;
 pub mod cli;
 pub mod clone;
 pub mod devproxy;
+pub mod enclosure_handoff;
 pub mod esptool;
 pub mod files;
 pub mod fleet;

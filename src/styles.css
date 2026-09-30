@@ -1270,6 +1270,420 @@ body {
   font-weight: 600;
 }
 
+/* ---------- BOM panel ---------- */
+
+.bom-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.bom-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.bom-count {
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+}
+
+.bom-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+  text-align: center;
+  padding: var(--sp-8);
+}
+
+.bom-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+
+.bom-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.bom-th {
+  font-size: var(--fs-tiny);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-align: left;
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.bom-td {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bom-td-delete {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.bom-cell {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  padding: var(--sp-1) var(--sp-2);
+  outline: none;
+}
+
+.bom-cell:focus {
+  background: var(--accent-dim);
+}
+
+.bom-cell[type="number"] {
+  text-align: right;
+}
+
+/* Hide the native number spin buttons — the field is already narrow */
+.bom-cell[type="number"]::-webkit-inner-spin-button,
+.bom-cell[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.bom-delete {
+  background: none;
+  border: none;
+  padding: 0 var(--sp-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--fs-small);
+  line-height: 1;
+}
+
+.bom-delete:hover {
+  color: var(--error, #e05c5c);
+}
+
+.bom-add-row {
+  display: block;
+  width: 100%;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-small);
+  cursor: pointer;
+  text-align: center;
+}
+
+.bom-add-row:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.bom-td-expand {
+  width: 1.5rem;
+  padding: 0;
+  text-align: center;
+}
+
+.bom-row-expand {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-dim);
+  padding: 0 2px;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.bom-row-expand:hover {
+  color: var(--fg);
+}
+
+.bom-detail {
+  background: var(--surface-1, var(--bg-alt));
+}
+
+.bom-detail-cell {
+  padding: 0;
+}
+
+.bom-detail-inner {
+  padding: 8px 12px 10px 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bom-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bom-detail-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.bom-desc {
+  width: 100%;
+  background: var(--input-bg, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 6px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.bom-desc:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.bom-images-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.bom-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--chip-bg, var(--bg-alt));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 0.75rem;
+}
+
+.bom-image-url {
+  color: var(--accent);
+  text-decoration: none;
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bom-image-url:hover {
+  text-decoration: underline;
+}
+
+.bom-image-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-dim);
+  padding: 0;
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+.bom-image-del:hover {
+  color: var(--danger, #e55);
+}
+
+.bom-image-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bom-image-add .bom-wcell {
+  width: 18rem;
+}
+
+.bom-wiring-table {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.bom-wth {
+  padding: 2px 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.bom-wtd {
+  padding: 1px 2px;
+}
+
+.bom-wtd-del {
+  width: 1.5rem;
+  text-align: center;
+}
+
+.bom-wcell {
+  background: var(--input-bg, var(--bg));
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 2px 4px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.bom-wcell:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+  background: var(--input-bg-focus, var(--bg));
+}
+
+.bom-wcell[type="number"] {
+  width: 4.5rem;
+}
+
+.bom-wire-row .bom-wtd:first-child .bom-wcell {
+  width: 6rem;
+}
+
+.bom-add-wire {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent-dim);
+  font-size: 0.78rem;
+  padding: 2px 0;
+}
+
+.bom-add-wire:hover {
+  color: var(--accent);
+}
+
+/* ---------- diagram ---------- */
+
+.diagram-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.diagram-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.diagram-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.diagram-section-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-dim);
+}
+
+.diagram-svg-wrap {
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.diagram-auto-svg {
+  display: block;
+}
+
+.diagram-col-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  fill: var(--fg-dim);
+}
+
+.diagram-comp-name {
+  font-size: 0.72rem;
+  font-weight: 600;
+  fill: var(--fg);
+}
+
+.diagram-pin-label {
+  font-size: 0.7rem;
+  fill: var(--fg);
+  font-family: var(--font-mono, monospace);
+}
+
+.diagram-board-pin {
+  fill: var(--fg-dim);
+}
+
+.diagram-agent-img {
+  max-width: 100%;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.diagram-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.diagram-empty code {
+  font-family: var(--font-mono, monospace);
+  color: var(--fg);
+}
+
+.diagram-empty-hint {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin: 0;
+}
+
 /* ---------- observability ---------- */
 
 .obs-panel {

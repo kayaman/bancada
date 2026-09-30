@@ -164,6 +164,8 @@ mod setup;
 use bancada_core::backend::{Backend, BackendKind, BuildSpec};
 use bancada_core::boards::{self, CoreView};
 use bancada_core::cli::ArduinoCli;
+use bancada_core::bom;
+use bancada_core::enclosure_handoff::EnclosureHandoff;
 use bancada_core::fleet::{self, Fleet};
 use bancada_core::ghlib;
 use bancada_core::scope::{self, serialport, FrameScanner, ScopeCaps, ScopeFrame};
@@ -606,6 +608,49 @@ fn safe_join(base: &str, rel: &str) -> Result<std::path::PathBuf, String> {
 fn load_sketch_yaml(sketch_dir: String) -> Result<SketchYaml, String> {
     let proj = SketchProject::open(&sketch_dir).map_err(err_str)?;
     proj.load_yaml().map_err(err_str)
+}
+
+#[tauri::command]
+fn load_bom(sketch_dir: String) -> Result<Option<bom::Bom>, String> {
+    bom::Bom::load(Path::new(&sketch_dir)).map_err(err_str)
+}
+
+#[tauri::command]
+fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
+    bom.save(Path::new(&sketch_dir)).map_err(err_str)
+}
+
+/// The third pillar, Enclosure, alongside Software and Hardware: hands this
+/// project's BOM and resolved board to enclosure-maker, which opens a new
+/// project seeded with that context and puts it straight in front of its own
+/// AI assistant. Bancada calls out to a separate `enclosure-maker-app`
+/// process (found on `PATH`, the same convention as `arduino-cli`/`esptool`)
+/// rather than the other way around -- there's no long-running service on
+/// either side to call into.
+#[tauri::command]
+fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
+    let dir = Path::new(&sketch_dir);
+    let project_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("can't derive a project name from {sketch_dir}"))?;
+
+    let bom = bom::Bom::load(dir).map_err(err_str)?;
+    let board_choice = bancada_core::project::project_board(dir);
+    let handoff = EnclosureHandoff::build(dir, project_name, bom, &board_choice);
+    let handoff_path = handoff.write(dir).map_err(err_str)?;
+
+    std::process::Command::new("enclosure-maker-app")
+        .env("ENCLOSURE_MAKER_IMPORT", &handoff_path)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "could not find `enclosure-maker-app` on PATH — is it installed?".to_string()
+            } else {
+                format!("failed to launch enclosure-maker: {e}")
+            }
+        })?;
+    Ok(())
 }
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
@@ -5069,7 +5114,38 @@ fn system_prompt_extra(sketch_dir: &str, spec: &BuildSpec) -> String {
          session. Those refusals do not become true by retrying: say in one \
          sentence what you need, and stop. If a tool says a build or flash is \
          in progress, that one does clear itself — wait and call it again. \
-         Nothing else is a reason to hand back a task half-finished.",
+         Nothing else is a reason to hand back a task half-finished.\n\n\
+         The project may have a `bom.yaml` in its root directory (next to the \
+         sketch). Use `Read` to inspect it when the user asks about components, \
+         and `Write` or `Edit` to create or update it. The schema is:\n\n\
+           components:\n\
+             - qty: 1           # required — integer quantity\n\
+               ref: U1          # required — reference designator, e.g. \"R1,R2\"\n\
+               value: ESP32-S3  # required — component value or name\n\
+               package: SMD     # optional — PCB footprint\n\
+               supplier: LCSC   # optional\n\
+               part_no: C528945 # optional\n\
+               notes: main MCU  # optional — free text\n\
+               description: …   # optional — role of this component in the circuit\n\
+               images:          # optional — list of URLs (photos, datasheets)\n\
+                 - https://…\n\
+               wiring:          # optional — pin-to-GPIO/rail connections\n\
+                 - pin: IO4     # required — silkscreen label on the component\n\
+                   gpio: 4      # optional — GPIO number\n\
+                   rail: 3V3    # optional — power rail name (3V3, GND, 5V, …)\n\
+                   notes: SDA   # optional\n\n\
+         Before filling in wiring, call `mcp__bancada__board_pinout` with no \
+         arguments to get the current board's header table — pin labels, GPIO \
+         numbers, and alternate functions. Match the component's datasheet pin \
+         names to those headers. If `bom.yaml` does not exist yet, use `Write` \
+         to create it. Preserve any entries the user has already added when \
+         appending new ones.\n\n\
+         You can also write `wiring.svg` to the sketch directory. The Diagram \
+         tab displays it automatically. When the user asks for a circuit or \
+         wiring diagram, read `bom.yaml`, call `mcp__bancada__board_pinout` for \
+         the pin layout, then generate a self-contained SVG (no external URLs \
+         or scripts). A simple two-column layout — components on the left, board \
+         pins on the right, labelled lines between them — is clear and compact.",
     );
     out
 }
@@ -5758,6 +5834,9 @@ pub fn run() {
             rename_sketch_entry,
             delete_sketch_entry,
             load_sketch_yaml,
+            load_bom,
+            save_bom,
+            send_to_enclosure_maker,
             init_profile,
             retarget_profile,
             add_local_library,

@@ -397,6 +397,45 @@ export interface FleetEntry {
   assigned_project?: string | null;
 }
 
+/** One pin connection within a BOM component's wiring block. */
+export interface WiringEntry {
+  pin: string;
+  gpio?: number | null;
+  rail?: string | null;
+  notes?: string | null;
+}
+
+/** One line item in a project's bill of materials. */
+export interface BomEntry {
+  qty: number;
+  ref: string;
+  value: string;
+  package?: string | null;
+  supplier?: string | null;
+  part_no?: string | null;
+  notes?: string | null;
+  description?: string | null;
+  images?: string[] | null;
+  wiring?: WiringEntry[] | null;
+}
+
+/** A project's bill of materials (`bom.yaml` in the sketch directory). */
+export interface Bom {
+  components: BomEntry[];
+}
+
+export const loadBom = (sketchDir: string) =>
+  invoke<Bom | null>("load_bom", { sketchDir });
+
+export const saveBom = (sketchDir: string, bom: Bom) =>
+  invoke<void>("save_bom", { sketchDir, bom });
+
+/** Hands this project's BOM and resolved board to enclosure-maker, which
+ *  opens a new project seeded with that context. Throws (as a string) when
+ *  the `enclosure-maker-app` binary isn't found on PATH. */
+export const sendToEnclosureMaker = (sketchDir: string) =>
+  invoke<void>("send_to_enclosure_maker", { sketchDir });
+
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
   value: string;
