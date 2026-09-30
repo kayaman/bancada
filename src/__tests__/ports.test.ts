@@ -48,6 +48,12 @@ const port = (address: string, protocol = "serial"): DetectedPort => ({
   matching_boards: [],
 });
 
+/** A genuine USB serial port — carries `vid`, unlike a bare `port()`. */
+const usbPort = (address: string): DetectedPort => ({
+  ...port(address),
+  port: { ...port(address).port, properties: { vid: "0x303A" } },
+});
+
 describe("nextSelectedPort", () => {
   it("picks the first serial port when nothing is selected", () => {
     expect(nextSelectedPort([port("/dev/ttyACM0")], null)).toBe("/dev/ttyACM0");
@@ -90,6 +96,19 @@ describe("nextSelectedPort", () => {
     expect(nextSelectedPort([port("2804:7f0::1", "network")], null)).toBe(
       "2804:7f0::1",
     );
+  });
+
+  it("prefers a USB serial port over a bare one that sorts first", () => {
+    // Linux always exposes /dev/ttyS0 (a legacy motherboard UART) whether or
+    // not anything is wired to it, and it sorts ahead of /dev/ttyUSB0 — the
+    // real board. Auto-selecting it used to send every flash at a port with
+    // nothing listening, failing with "No serial data received."
+    const ports = [port("/dev/ttyS0"), usbPort("/dev/ttyUSB0")];
+    expect(nextSelectedPort(ports, null)).toBe("/dev/ttyUSB0");
+  });
+
+  it("falls back to a bare serial port when no USB one is attached", () => {
+    expect(nextSelectedPort([port("/dev/ttyS0")], null)).toBe("/dev/ttyS0");
   });
 });
 

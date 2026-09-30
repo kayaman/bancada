@@ -214,14 +214,23 @@ export function portOptions(
  * The fallback prefers a serial port because that is what can be flashed and
  * monitored; a network port is only ever chosen when it is the only thing
  * attached or the user picked it deliberately.
+ *
+ * Within serial ports, a USB one wins over a bare one. Linux always exposes
+ * `/dev/ttyS0`–`ttyS3` (legacy motherboard UARTs) whether or not any chip is
+ * wired to them, and they sort alphabetically ahead of `/dev/ttyUSB0` — so
+ * without this, a real board's first-ever auto-select landed on a port with
+ * nothing attached, and flashing failed with "No serial data received."
+ * `properties.vid` is only ever set for a USB port (see `Port`).
  */
 export function nextSelectedPort(
   ports: DetectedPort[],
   current: string | null,
 ): string | null {
   if (current && ports.some((p) => p.port.address === current)) return current;
+  const serial = ports.filter((p) => p.port.protocol === "serial");
   return (
-    ports.find((p) => p.port.protocol === "serial")?.port.address ??
+    serial.find((p) => p.port.properties.vid !== undefined)?.port.address ??
+    serial[0]?.port.address ??
     ports[0]?.port.address ??
     null
   );
