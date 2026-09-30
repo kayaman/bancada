@@ -11,6 +11,7 @@ import { loadBom, saveBom, type BomEntry, type WiringEntry } from "../api";
 interface Props {
   active: boolean;
   sketchDir: string | null;
+  bomVersion?: number;
   notify: (msg: string, isError?: boolean) => void;
 }
 
@@ -60,7 +61,7 @@ const clean = (e: BomEntry): BomEntry => ({
   wiring:      (e.wiring ?? []).filter((w) => w.pin).map(cleanWire),
 });
 
-export default function BomPanel({ active, sketchDir, notify }: Props) {
+export default function BomPanel({ active, sketchDir, bomVersion = 0, notify }: Props) {
   /** null = not loaded yet; [] = loaded, no file; BomEntry[] = file loaded */
   const [rows, setRows] = useState<BomEntry[] | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -68,7 +69,7 @@ export default function BomPanel({ active, sketchDir, notify }: Props) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const addRowRef = useRef<HTMLButtonElement>(null);
 
-  // Reload whenever the open project changes.
+  // Reload whenever the open project changes or the agent writes bom.yaml.
   useEffect(() => {
     if (!sketchDir) {
       setRows(null);
@@ -106,7 +107,7 @@ export default function BomPanel({ active, sketchDir, notify }: Props) {
         setDirty(false);
       })
       .catch((err) => notify(String(err), true));
-  }, [sketchDir]);
+  }, [sketchDir, bomVersion]);
 
   const update = (i: number, field: keyof BomEntry, val: unknown) => {
     setRows((prev) => {

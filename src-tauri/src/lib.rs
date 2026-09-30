@@ -5080,7 +5080,32 @@ fn system_prompt_extra(sketch_dir: &str, spec: &BuildSpec) -> String {
          session. Those refusals do not become true by retrying: say in one \
          sentence what you need, and stop. If a tool says a build or flash is \
          in progress, that one does clear itself — wait and call it again. \
-         Nothing else is a reason to hand back a task half-finished.",
+         Nothing else is a reason to hand back a task half-finished.\n\n\
+         The project may have a `bom.yaml` in its root directory (next to the \
+         sketch). Use `Read` to inspect it when the user asks about components, \
+         and `Write` or `Edit` to create or update it. The schema is:\n\n\
+           components:\n\
+             - qty: 1           # required — integer quantity\n\
+               ref: U1          # required — reference designator, e.g. \"R1,R2\"\n\
+               value: ESP32-S3  # required — component value or name\n\
+               package: SMD     # optional — PCB footprint\n\
+               supplier: LCSC   # optional\n\
+               part_no: C528945 # optional\n\
+               notes: main MCU  # optional — free text\n\
+               description: …   # optional — role of this component in the circuit\n\
+               images:          # optional — list of URLs (photos, datasheets)\n\
+                 - https://…\n\
+               wiring:          # optional — pin-to-GPIO/rail connections\n\
+                 - pin: IO4     # required — silkscreen label on the component\n\
+                   gpio: 4      # optional — GPIO number\n\
+                   rail: 3V3    # optional — power rail name (3V3, GND, 5V, …)\n\
+                   notes: SDA   # optional\n\n\
+         Before filling in wiring, call `mcp__bancada__board_pinout` with no \
+         arguments to get the current board's header table — pin labels, GPIO \
+         numbers, and alternate functions. Match the component's datasheet pin \
+         names to those headers. If `bom.yaml` does not exist yet, use `Write` \
+         to create it. Preserve any entries the user has already added when \
+         appending new ones.",
     );
     out
 }

@@ -513,6 +513,7 @@ export default function App() {
   const [webMounted, setWebMounted] = useState(false);
   const [agentMounted, setAgentMounted] = useState(false);
   const [bomMounted, setBomMounted] = useState(false);
+  const [bomVersion, setBomVersion] = useState(0);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
   /**
@@ -2453,6 +2454,10 @@ export default function App() {
     // silently stale picker costs a bench session.
     void refreshSketchBaud(dir);
 
+    if (filePath.endsWith("/bom.yaml") || filePath === "bom.yaml") {
+      setBomVersion((v) => v + 1);
+    }
+
     const rel = relativeToSketchDir(filePath, dir);
     if (rel !== openFileRef.current) return;
     if (buffersRef.current.has(rel)) {
@@ -3532,6 +3537,7 @@ export default function App() {
           <BomPanel
             active={bottomTab === "bom"}
             sketchDir={sketchDir}
+            bomVersion={bomVersion}
             notify={notify}
           />
         )}
