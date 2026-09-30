@@ -33,6 +33,7 @@ describe("BottomTabBar", () => {
       "Web",
       "Assistant",
       "BOM",
+      "Diagram",
     ]);
   });
 

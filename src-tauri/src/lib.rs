@@ -5139,7 +5139,13 @@ fn system_prompt_extra(sketch_dir: &str, spec: &BuildSpec) -> String {
          numbers, and alternate functions. Match the component's datasheet pin \
          names to those headers. If `bom.yaml` does not exist yet, use `Write` \
          to create it. Preserve any entries the user has already added when \
-         appending new ones.",
+         appending new ones.\n\n\
+         You can also write `wiring.svg` to the sketch directory. The Diagram \
+         tab displays it automatically. When the user asks for a circuit or \
+         wiring diagram, read `bom.yaml`, call `mcp__bancada__board_pinout` for \
+         the pin layout, then generate a self-contained SVG (no external URLs \
+         or scripts). A simple two-column layout — components on the left, board \
+         pins on the right, labelled lines between them — is clear and compact.",
     );
     out
 }
