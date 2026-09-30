@@ -397,6 +397,14 @@ export interface FleetEntry {
   assigned_project?: string | null;
 }
 
+/** One pin connection within a BOM component's wiring block. */
+export interface WiringEntry {
+  pin: string;
+  gpio?: number | null;
+  rail?: string | null;
+  notes?: string | null;
+}
+
 /** One line item in a project's bill of materials. */
 export interface BomEntry {
   qty: number;
@@ -406,6 +414,9 @@ export interface BomEntry {
   supplier?: string | null;
   part_no?: string | null;
   notes?: string | null;
+  description?: string | null;
+  images?: string[] | null;
+  wiring?: WiringEntry[] | null;
 }
 
 /** A project's bill of materials (`bom.yaml` in the sketch directory). */

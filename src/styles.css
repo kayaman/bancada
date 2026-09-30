@@ -1399,6 +1399,193 @@ body {
   color: var(--accent);
 }
 
+.bom-td-expand {
+  width: 1.5rem;
+  padding: 0;
+  text-align: center;
+}
+
+.bom-row-expand {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-dim);
+  padding: 0 2px;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.bom-row-expand:hover {
+  color: var(--fg);
+}
+
+.bom-detail {
+  background: var(--surface-1, var(--bg-alt));
+}
+
+.bom-detail-cell {
+  padding: 0;
+}
+
+.bom-detail-inner {
+  padding: 8px 12px 10px 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bom-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bom-detail-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.bom-desc {
+  width: 100%;
+  background: var(--input-bg, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 4px 6px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.bom-desc:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.bom-images-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.bom-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--chip-bg, var(--bg-alt));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 0.75rem;
+}
+
+.bom-image-url {
+  color: var(--accent);
+  text-decoration: none;
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bom-image-url:hover {
+  text-decoration: underline;
+}
+
+.bom-image-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--fg-dim);
+  padding: 0;
+  font-size: 0.6rem;
+  line-height: 1;
+}
+
+.bom-image-del:hover {
+  color: var(--danger, #e55);
+}
+
+.bom-image-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bom-image-add .bom-wcell {
+  width: 18rem;
+}
+
+.bom-wiring-table {
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.bom-wth {
+  padding: 2px 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.bom-wtd {
+  padding: 1px 2px;
+}
+
+.bom-wtd-del {
+  width: 1.5rem;
+  text-align: center;
+}
+
+.bom-wcell {
+  background: var(--input-bg, var(--bg));
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.8rem;
+  padding: 2px 4px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.bom-wcell:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+  background: var(--input-bg-focus, var(--bg));
+}
+
+.bom-wcell[type="number"] {
+  width: 4.5rem;
+}
+
+.bom-wire-row .bom-wtd:first-child .bom-wcell {
+  width: 6rem;
+}
+
+.bom-add-wire {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent-dim);
+  font-size: 0.78rem;
+  padding: 2px 0;
+}
+
+.bom-add-wire:hover {
+  color: var(--accent);
+}
+
 /* ---------- observability ---------- */
 
 .obs-panel {

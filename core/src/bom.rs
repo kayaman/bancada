@@ -44,6 +44,31 @@ pub struct BomEntry {
     /// Free-text notes for this line item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// What this component does in the circuit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// URLs to product photos or datasheets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// Pin-to-GPIO / power-rail connections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wiring: Vec<WiringEntry>,
+}
+
+/// One pin connection for a component.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WiringEntry {
+    /// Silkscreen pin label on the component, e.g. `"IO4"`, `"VCC"`, `"GND"`.
+    pub pin: String,
+    /// GPIO number this pin connects to, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpio: Option<u32>,
+    /// Power rail name this pin connects to, e.g. `"3V3"`, `"GND"`, `"5V"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail: Option<String>,
+    /// Any additional notes about this connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 impl Bom {
@@ -85,6 +110,7 @@ mod tests {
                     supplier: Some("LCSC".into()),
                     part_no: Some("C528945".into()),
                     notes: Some("main MCU".into()),
+                    ..Default::default()
                 },
                 BomEntry {
                     qty: 3,
@@ -130,5 +156,38 @@ mod tests {
         bom.save(tmp.path()).unwrap();
         let back = Bom::load(tmp.path()).unwrap().unwrap();
         assert!(back.components.is_empty());
+    }
+
+    #[test]
+    fn wiring_round_trips() {
+        let tmp = tempdir().unwrap();
+        let bom = Bom {
+            components: vec![BomEntry {
+                qty: 1,
+                ref_: "U1".into(),
+                value: "SSD1306".into(),
+                description: Some("OLED display".into()),
+                images: vec!["https://example.com/ssd1306.jpg".into()],
+                wiring: vec![
+                    WiringEntry { pin: "VCC".into(), rail: Some("3V3".into()), ..Default::default() },
+                    WiringEntry { pin: "SDA".into(), gpio: Some(4), notes: Some("I2C SDA".into()), ..Default::default() },
+                ],
+                ..Default::default()
+            }],
+        };
+        bom.save(tmp.path()).unwrap();
+        let back = Bom::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(back, bom);
+    }
+
+    #[test]
+    fn old_bom_without_new_fields_still_parses() {
+        let tmp = tempdir().unwrap();
+        let yaml = "components:\n  - qty: 1\n    ref: U1\n    value: ESP32-S3\n";
+        std::fs::write(tmp.path().join(BOM_FILE), yaml).unwrap();
+        let bom = Bom::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(bom.components[0].description, None);
+        assert!(bom.components[0].images.is_empty());
+        assert!(bom.components[0].wiring.is_empty());
     }
 }
