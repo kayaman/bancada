@@ -319,6 +319,29 @@ describe("file saving and scope firmware", () => {
   });
 });
 
+describe("bill of materials and enclosure hand-off", () => {
+  it("loadBom passes sketchDir", async () => {
+    await api.loadBom("/s");
+    expect(called()).toEqual(["load_bom", { sketchDir: "/s" }]);
+  });
+
+  it("saveBom passes sketchDir and bom", async () => {
+    const bom: api.Bom = {
+      components: [{ qty: 1, ref: "U1", value: "ESP32-C6-WROOM-1" }],
+    };
+    await api.saveBom("/s", bom);
+    expect(called()).toEqual(["save_bom", { sketchDir: "/s", bom }]);
+  });
+
+  it("sendToEnclosureMaker passes sketchDir", async () => {
+    await api.sendToEnclosureMaker("/s");
+    expect(called()).toEqual([
+      "send_to_enclosure_maker",
+      { sketchDir: "/s" },
+    ]);
+  });
+});
+
 describe("events", () => {
   it("subscribes to the exact event names the Rust side emits", async () => {
     // These strings are duplicated in src-tauri; a typo silently means a console
