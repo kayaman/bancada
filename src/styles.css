@@ -1586,6 +1586,30 @@ body {
   color: var(--accent);
 }
 
+/* ---------- enclosure panel ---------- */
+
+.enclosure-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.enclosure-prompt {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: var(--sp-4);
+  font-family: var(--font-mono);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  background: transparent;
+  color: var(--text);
+}
+
 /* ---------- diagram ---------- */
 
 .diagram-panel {

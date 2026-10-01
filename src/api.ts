@@ -430,11 +430,19 @@ export const loadBom = (sketchDir: string) =>
 export const saveBom = (sketchDir: string, bom: Bom) =>
   invoke<void>("save_bom", { sketchDir, bom });
 
-/** Hands this project's BOM and resolved board to enclosure-maker, which
- *  opens a new project seeded with that context. Throws (as a string) when
- *  the `enclosure-maker-app` binary isn't found on PATH. */
-export const sendToEnclosureMaker = (sketchDir: string) =>
-  invoke<void>("send_to_enclosure_maker", { sketchDir });
+/** The draft seed message for enclosure-maker's AI assistant, built from
+ *  this project's BOM and resolved board — read-only, for the Enclosure
+ *  tab's compose box. */
+export const previewEnclosurePrompt = (sketchDir: string) =>
+  invoke<string>("preview_enclosure_prompt", { sketchDir });
+
+/** Hands this project's BOM, resolved board, and the user-approved `prompt`
+ *  to enclosure-maker, which opens a new project seeded with that context.
+ *  Returns the spawned `enclosure-maker-app` child's pid, which
+ *  `onEnclosureEvent`/`onEnclosureClosed` payloads are tagged with. Throws
+ *  (as a string) when the `enclosure-maker-app` binary isn't found on PATH. */
+export const sendToEnclosureMaker = (sketchDir: string, prompt: string) =>
+  invoke<number>("send_to_enclosure_maker", { sketchDir, prompt });
 
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
@@ -1367,3 +1375,16 @@ export const onAgentClosed = (
   cb: (p: { reason: string; pid: number }) => void,
 ): Promise<UnlistenFn> =>
   listen<{ reason: string; pid: number }>("agent://closed", (e) => cb(e.payload));
+
+/** One parsed line from the mirrored `enclosure-maker-app` child's stdout —
+ *  the same claude-CLI stream-json shape `onAgentEvent` carries, plus
+ *  bancada's synthetic stderr/unparsed events, each tagged with the pid of
+ *  the enclosure-maker-app process that produced it (see
+ *  `send_to_enclosure_maker`). */
+export const onEnclosureEvent = (cb: (ev: AgentEvent) => void): Promise<UnlistenFn> =>
+  listen<AgentEvent>("enclosure://event", (e) => cb(e.payload));
+/** Fires once enclosure-maker-app's stdout hits EOF (the process exited). */
+export const onEnclosureClosed = (
+  cb: (p: { reason: string; pid: number }) => void,
+): Promise<UnlistenFn> =>
+  listen<{ reason: string; pid: number }>("enclosure://closed", (e) => cb(e.payload));

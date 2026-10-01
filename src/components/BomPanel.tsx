@@ -6,7 +6,7 @@
 // travels with the project in git.
 
 import { useEffect, useRef, useState } from "react";
-import { loadBom, saveBom, sendToEnclosureMaker, type BomEntry, type WiringEntry } from "../api";
+import { loadBom, saveBom, type BomEntry, type WiringEntry } from "../api";
 
 interface Props {
   active: boolean;
@@ -67,7 +67,6 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
   const [rows, setRows] = useState<BomEntry[] | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [sendingToEnclosure, setSendingToEnclosure] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const addRowRef = useRef<HTMLButtonElement>(null);
 
@@ -202,27 +201,6 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
     }
   };
 
-  // Software | Hardware | Enclosure: hand this project's BOM + board off to
-  // enclosure-maker. Saves first if there are unsaved edits, so the
-  // handed-off bom.yaml always matches what's on screen.
-  const designEnclosure = async () => {
-    if (!sketchDir || !rows) return;
-    setSendingToEnclosure(true);
-    try {
-      if (dirty) {
-        await saveBom(sketchDir, { components: rows.map(clean) });
-        setDirty(false);
-        onSaved();
-      }
-      await sendToEnclosureMaker(sketchDir);
-      notify("Opening enclosure-maker…");
-    } catch (err) {
-      notify(String(err), true);
-    } finally {
-      setSendingToEnclosure(false);
-    }
-  };
-
   // Tab to next cell; Enter on the last cell of a row adds a new row.
   const onCellKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
@@ -254,16 +232,6 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
           </span>
         )}
         <div className="spacer" />
-        {rows !== null && rows.length > 0 && (
-          <button
-            className="btn small"
-            disabled={sendingToEnclosure || saving || !sketchDir}
-            onClick={() => void designEnclosure()}
-            title="Send this BOM and board to enclosure-maker"
-          >
-            {sendingToEnclosure ? "Opening…" : "Design Enclosure →"}
-          </button>
-        )}
         {rows !== null && rows.length >= 0 && (
           <button
             className={dirty ? "btn small primary" : "btn small"}

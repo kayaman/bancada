@@ -620,16 +620,12 @@ fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
     bom.save(Path::new(&sketch_dir)).map_err(err_str)
 }
 
-/// The third pillar, Enclosure, alongside Software and Hardware: hands this
-/// project's BOM and resolved board to enclosure-maker, which opens a new
-/// project seeded with that context and puts it straight in front of its own
-/// AI assistant. Bancada calls out to a separate `enclosure-maker-app`
-/// process (found on `PATH`, the same convention as `arduino-cli`/`esptool`)
-/// rather than the other way around -- there's no long-running service on
-/// either side to call into.
-#[tauri::command]
-fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
-    let dir = Path::new(&sketch_dir);
+/// Loads this project's BOM and resolved board and builds the
+/// [`EnclosureHandoff`] both enclosure-maker's hand-off commands share --
+/// the one piece of I/O `preview_enclosure_prompt` and
+/// `send_to_enclosure_maker` have in common.
+fn load_enclosure_handoff(sketch_dir: &str) -> Result<EnclosureHandoff, String> {
+    let dir = Path::new(sketch_dir);
     let project_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -637,11 +633,45 @@ fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
 
     let bom = bom::Bom::load(dir).map_err(err_str)?;
     let board_choice = bancada_core::project::project_board(dir);
-    let handoff = EnclosureHandoff::build(dir, project_name, bom, &board_choice);
+    Ok(EnclosureHandoff::build(dir, project_name, bom, &board_choice))
+}
+
+/// The draft seed message for enclosure-maker's AI assistant, built from
+/// this project's BOM and resolved board -- shown in bancada's Enclosure tab
+/// for the user to read and edit *before* anything is sent. Read-only:
+/// writes nothing, spawns nothing.
+#[tauri::command]
+fn preview_enclosure_prompt(sketch_dir: String) -> Result<String, String> {
+    Ok(load_enclosure_handoff(&sketch_dir)?.draft_prompt())
+}
+
+/// The third pillar, Enclosure, alongside Software and Hardware: hands this
+/// project's BOM and resolved board -- plus the user-approved `prompt` from
+/// bancada's Enclosure tab -- to enclosure-maker, which opens a new project
+/// seeded with that context and puts it straight in front of its own AI
+/// assistant. Bancada calls out to a separate `enclosure-maker-app` process
+/// (found on `PATH`, the same convention as `arduino-cli`/`esptool`) rather
+/// than the other way around -- there's no long-running service on either
+/// side to call into.
+///
+/// Unlike `agent_start`, bancada never writes to this child -- the user
+/// drives enclosure-maker's own chat in its own window from here on. Piping
+/// its stdout/stderr is purely to *mirror* its live tool-call activity back
+/// into this project's Enclosure tab (see `enclosure_session.rs` on the
+/// enclosure-maker side, which echoes its already-normalized agent events to
+/// its own stdout). No `AppState` tracking is needed: the `Child` is simply
+/// moved into the reader thread and dropped when that thread ends.
+#[tauri::command]
+fn send_to_enclosure_maker(app: AppHandle, sketch_dir: String, prompt: String) -> Result<u32, String> {
+    let dir = Path::new(&sketch_dir);
+    let mut handoff = load_enclosure_handoff(&sketch_dir)?;
+    handoff.prompt = Some(prompt);
     let handoff_path = handoff.write(dir).map_err(err_str)?;
 
-    std::process::Command::new("enclosure-maker-app")
+    let mut child = std::process::Command::new("enclosure-maker-app")
         .env("ENCLOSURE_MAKER_IMPORT", &handoff_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -650,7 +680,61 @@ fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
                 format!("failed to launch enclosure-maker: {e}")
             }
         })?;
-    Ok(())
+    let pid = child.id();
+
+    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
+        (Some(stdout), Some(stderr)) => (stdout, stderr),
+        _ => return Err("enclosure-maker's stdio pipes were unavailable".to_string()),
+    };
+
+    let app_out = app.clone();
+    std::thread::spawn(move || {
+        let mut child = child;
+        bancada_core::proc::for_each_lossy_line(stdout, |line| {
+            // `parse_event` is the validity gate; what reaches the frontend
+            // is the event verbatim, tagged with the pid so a superseded
+            // session's late events can be told apart (same FE-C1 pattern
+            // `agent_start`'s stdout thread uses for `agent://event`).
+            match agent::parse_event(&line) {
+                Ok(_) => {
+                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert("pid".to_string(), serde_json::json!(pid));
+                        }
+                        let _ = app_out.emit("enclosure://event", value);
+                    }
+                }
+                Err(_) => {
+                    let _ = app_out.emit(
+                        "enclosure://event",
+                        serde_json::json!({ "type": "unparsed", "line": line, "pid": pid }),
+                    );
+                }
+            }
+            true
+        });
+        // stdout EOF means the process has exited (or is about to); wait()
+        // reaps it so it doesn't linger as a zombie -- nothing else holds
+        // this Child.
+        let _ = child.wait();
+        let _ = app_out.emit(
+            "enclosure://closed",
+            serde_json::json!({ "reason": "enclosure-maker exited", "pid": pid }),
+        );
+    });
+
+    let app_err = app;
+    std::thread::spawn(move || {
+        bancada_core::proc::for_each_lossy_line(stderr, |line| {
+            let _ = app_err.emit(
+                "enclosure://event",
+                serde_json::json!({ "type": "stderr", "line": line, "pid": pid }),
+            );
+            true
+        });
+    });
+
+    Ok(pid)
 }
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
@@ -5916,6 +6000,7 @@ pub fn run() {
             load_sketch_yaml,
             load_bom,
             save_bom,
+            preview_enclosure_prompt,
             send_to_enclosure_maker,
             init_profile,
             retarget_profile,

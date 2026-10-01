@@ -115,6 +115,7 @@ import DeviceBrowserPanel from "./components/DeviceBrowserPanel";
 import AgentPanel from "./components/AgentPanel";
 import BomPanel from "./components/BomPanel";
 import DiagramPanel from "./components/DiagramPanel";
+import EnclosurePanel from "./components/EnclosurePanel";
 import BottomTabBar from "./components/BottomTabBar";
 import ToastStack from "./components/ToastStack";
 import StatusBar from "./components/StatusBar";
@@ -188,6 +189,11 @@ const agentStore = new AgentStore();
 // saved chat replays into an identical transcript. Recording is
 // fire-and-forget (a failed append never breaks a live chat).
 const chatRecorder = new ChatRecorder();
+
+// Same reasoning as `agentStore`, for the Enclosure tab: `enclosure://event`
+// mirrors enclosure-maker-app's own live tool-call activity, fed by App-level
+// listeners so it keeps accumulating while that tab isn't mounted yet.
+const enclosureStore = new AgentStore();
 
 // The serial log, App-owned for the same reason `agentStore` is:
 // `serial://line` arrives while the Monitor tab is hidden — from the
@@ -517,6 +523,7 @@ export default function App() {
   const [bomVersion, setBomVersion] = useState(0);
   const [diagramMounted, setDiagramMounted] = useState(false);
   const [diagramVersion, setDiagramVersion] = useState(0);
+  const [enclosureMounted, setEnclosureMounted] = useState(false);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
   /**
@@ -827,6 +834,7 @@ export default function App() {
     if (tab === "agent") setAgentMounted(true);
     if (tab === "bom") setBomMounted(true);
     if (tab === "diagram") setDiagramMounted(true);
+    if (tab === "enclosure") setEnclosureMounted(true);
   }, []);
 
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
@@ -1024,6 +1032,20 @@ export default function App() {
         // `agent_stop(pid)` is a no-op unless pid still matches the live
         // session, so a stale close can never kill the new one (F4).
         api.agentStop(p.pid).catch(() => {});
+      }),
+      // Mirrors enclosure-maker-app's own tool-call activity into the
+      // Enclosure tab. Much simpler than the Assistant's agent plumbing
+      // above: bancada never drives this session (no send/interrupt, no
+      // chat recording, no verify/upload side effects — enclosure-maker's
+      // own tools aren't bancada's MCP ones), it only displays what the
+      // mirrored child reports.
+      api.onEnclosureEvent((ev) => {
+        enclosureStore.push(ev);
+        if (bottomTabRef.current !== "enclosure")
+          setUnseen((u) => (u.enclosure ? u : { ...u, enclosure: true }));
+      }),
+      api.onEnclosureClosed((p) => {
+        enclosureStore.closed(p.reason, p.pid);
       }),
     ];
     api
@@ -3558,12 +3580,13 @@ export default function App() {
             notify={notify}
           />
         )}
-        {diagramMounted && (
-          <DiagramPanel
-            active={bottomTab === "diagram"}
+        {enclosureMounted && (
+          <EnclosurePanel
+            key={sketchDir ?? ""}
+            active={bottomTab === "enclosure"}
             sketchDir={sketchDir}
-            bomVersion={bomVersion}
-            diagramVersion={diagramVersion}
+            store={enclosureStore}
+            openBottomTab={openBottomTab}
             notify={notify}
           />
         )}

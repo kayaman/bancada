@@ -11,7 +11,7 @@
 // next to the oscilloscope. Flat, the whole bench is one click away and the
 // old group boundaries survive as thin separators.
 
-export type BottomTab = "build" | "serial" | "scope" | "mqtt" | "ws" | "web" | "agent" | "bom" | "diagram";
+export type BottomTab = "build" | "serial" | "scope" | "mqtt" | "ws" | "web" | "agent" | "bom" | "diagram" | "enclosure";
 
 export const BOTTOM_TABS: readonly BottomTab[] = [
   "build",
@@ -23,6 +23,7 @@ export const BOTTOM_TABS: readonly BottomTab[] = [
   "agent",
   "bom",
   "diagram",
+  "enclosure",
 ];
 
 export const TAB_LABEL: Record<BottomTab, string> = {
@@ -35,6 +36,7 @@ export const TAB_LABEL: Record<BottomTab, string> = {
   agent: "Assistant",
   bom: "BOM",
   diagram: "Diagram",
+  enclosure: "Enclosure",
 };
 
 /** Thin separators after these tabs — the former group boundaries:

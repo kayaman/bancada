@@ -36,6 +36,12 @@ pub struct EnclosureHandoff {
     pub board: Option<BoardSummary>,
     #[serde(default)]
     pub components: Vec<BomEntry>,
+    /// The seed chat message the user reviewed and (maybe) edited in
+    /// bancada's Enclosure tab before sending. `None` means "bancada didn't
+    /// offer one" (an older bancada, or a hand-off built for tests) --
+    /// enclosure-maker falls back to generating its own in that case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -92,7 +98,79 @@ impl EnclosureHandoff {
             source_dir: project_dir.display().to_string(),
             board,
             components: bom.map(|b| b.components).unwrap_or_default(),
+            prompt: None,
         }
+    }
+
+    /// Formats this hand-off into a readable first request for
+    /// enclosure-maker's AI assistant -- a port of enclosure-maker's own
+    /// `bancada_import::build_seed_message`, kept in bancada so the user has
+    /// something to read and edit *before* anything is sent. Ignores
+    /// `self.prompt`: that field holds the user's final edited text, this
+    /// method only ever produces the starting draft.
+    pub fn draft_prompt(&self) -> String {
+        let mut out = String::from("Design an enclosure for this project.\n\n");
+
+        match &self.board {
+            Some(board) if !board.name.is_empty() => {
+                out.push_str(&format!("Board: {}", board.name));
+                if !board.vendor.is_empty() {
+                    out.push_str(&format!(" ({})", board.vendor));
+                }
+                out.push('\n');
+                if !board.usb_ports.is_empty() {
+                    let ports: Vec<String> = board
+                        .usb_ports
+                        .iter()
+                        .map(|p| {
+                            if p.label.is_empty() {
+                                p.kind.to_string()
+                            } else {
+                                format!("{} ({})", p.label, p.kind)
+                            }
+                        })
+                        .collect();
+                    out.push_str(&format!("USB: {}\n", ports.join(", ")));
+                }
+            }
+            _ => out.push_str("Board: not identified -- infer a reasonable enclosure from the components below.\n"),
+        }
+
+        if self.components.is_empty() {
+            out.push_str("\nNo bill of materials was provided.\n");
+        } else {
+            out.push_str("\nComponents:\n");
+            for c in &self.components {
+                out.push_str(&format!("- {} x{}: {}", c.ref_, c.qty, c.value));
+                if let Some(pkg) = &c.package {
+                    out.push_str(&format!(" [{pkg}]"));
+                }
+                if let Some(desc) = &c.description {
+                    out.push_str(&format!(" -- {desc}"));
+                }
+                out.push('\n');
+                for w in &c.wiring {
+                    out.push_str(&format!("    {}", w.pin));
+                    if let Some(gpio) = w.gpio {
+                        out.push_str(&format!(" -> GPIO{gpio}"));
+                    }
+                    if let Some(rail) = &w.rail {
+                        out.push_str(&format!(" -> {rail}"));
+                    }
+                    if let Some(notes) = &w.notes {
+                        out.push_str(&format!(" ({notes})"));
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+
+        out.push_str(
+            "\nUse this to decide which faces need cutouts (connectors, buttons, \
+             displays), which components need mounting or clearance, and a \
+             sensible overall size. Ask if anything critical is missing.",
+        );
+        out
     }
 
     /// Writes this hand-off to `<project_dir>/.bancada/enclosure_handoff.json`,
@@ -169,5 +247,30 @@ mod tests {
         assert_eq!(value["components"][0]["ref"], "U1");
         assert_eq!(value["components"][0]["wiring"][0]["gpio"], 4);
         assert!(value.get("board").is_none(), "board should be omitted, not null, when there's no profile");
+    }
+
+    #[test]
+    fn draft_prompt_mentions_board_name_and_component_details() {
+        let mut handoff = EnclosureHandoff::build(Path::new("/tmp/soil-sensor"), "soil-sensor", Some(sample_bom()), &BoardChoice::NoProfile);
+        handoff.board = Some(BoardSummary {
+            id: "esp32-c6-devkitc-1".to_string(),
+            name: "ESP32-C6-DevKitC-1".to_string(),
+            vendor: "Espressif".to_string(),
+            usb_ports: vec![UsbPortSummary { label: "USB".to_string(), kind: "native" }],
+        });
+        let msg = handoff.draft_prompt();
+        assert!(msg.contains("ESP32-C6-DevKitC-1"));
+        assert!(msg.contains("Espressif"));
+        assert!(msg.contains("main MCU"));
+        assert!(msg.contains("GPIO4"));
+        assert!(msg.contains("I2C SDA"));
+    }
+
+    #[test]
+    fn draft_prompt_handles_no_board_and_no_components() {
+        let handoff = EnclosureHandoff::build(Path::new("/tmp/bare"), "bare", None, &BoardChoice::NoProfile);
+        let msg = handoff.draft_prompt();
+        assert!(msg.contains("not identified"));
+        assert!(msg.contains("No bill of materials"));
     }
 }
