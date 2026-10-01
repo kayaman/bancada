@@ -430,11 +430,20 @@ export const loadBom = (sketchDir: string) =>
 export const saveBom = (sketchDir: string, bom: Bom) =>
   invoke<void>("save_bom", { sketchDir, bom });
 
-/** Hands this project's BOM and resolved board to enclosure-maker, which
- *  opens a new project seeded with that context. Throws (as a string) when
- *  the `enclosure-maker-app` binary isn't found on PATH. */
-export const sendToEnclosureMaker = (sketchDir: string) =>
-  invoke<void>("send_to_enclosure_maker", { sketchDir });
+/** Builds the enclosure-maker seed prompt for this project (board + BOM
+ *  brief) without launching anything — for review/edit before send. */
+export const enclosureSeedPrompt = (sketchDir: string) =>
+  invoke<string>("enclosure_seed_prompt", { sketchDir });
+
+/** Hands this project's BOM, resolved board, and seed prompt to
+ *  enclosure-maker, which opens a new project seeded with that context.
+ *  `prompt` is the (possibly edited) brief; omit it to regenerate on the
+ *  Rust side. Throws (as a string) when `enclosure-maker-app` isn't on PATH. */
+export const sendToEnclosureMaker = (sketchDir: string, prompt?: string) =>
+  invoke<void>("send_to_enclosure_maker", {
+    sketchDir,
+    prompt: prompt ?? null,
+  });
 
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
