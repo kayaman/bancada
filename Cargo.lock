@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "bancada"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "bancada-core",
  "base64 0.22.1",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "bancada-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "base64 0.22.1",
  "rumqttc",
@@ -947,7 +947,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "em-agent"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -955,18 +955,18 @@ dependencies = [
 
 [[package]]
 name = "em-core"
-version = "0.25.0"
+version = "0.26.0"
 
 [[package]]
 name = "em-csg"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "em-core",
 ]
 
 [[package]]
 name = "em-export"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "em-core",
  "thiserror 2.0.19",
@@ -975,14 +975,14 @@ dependencies = [
 
 [[package]]
 name = "em-hardware"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "em-primitives",
 ]
 
 [[package]]
 name = "em-preview"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "em-primitives"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "em-core",
  "em-csg",
@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "em-projects"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "em-script"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "em-core",
  "em-csg",
