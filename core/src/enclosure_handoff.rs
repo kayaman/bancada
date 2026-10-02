@@ -174,9 +174,9 @@ impl EnclosureHandoff {
     }
 
     /// Writes this hand-off to `<project_dir>/.bancada/enclosure_handoff.json`,
-    /// creating the `.bancada` subdirectory if needed -- the same
-    /// dotted-directory convention already used for vendored libraries
-    /// ([`crate::ghlib::VENDOR_DIR`]).
+    /// creating the `.bancada` subdirectory if needed. Unlike re-fetchable
+    /// vendored libraries under [`crate::ghlib::VENDOR_DIR`], this is a
+    /// durable project artifact and is intended to travel with the git repo.
     pub fn write(&self, project_dir: &Path) -> Result<PathBuf> {
         let dir = project_dir.join(".bancada");
         std::fs::create_dir_all(&dir)?;

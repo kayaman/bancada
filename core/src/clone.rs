@@ -22,10 +22,11 @@ use serde::Serialize;
 use crate::git::merged_gitignore;
 use crate::{ghlib, library, project, sketch, Error, Result};
 
-/// Directories excluded from a clone on top of the sketch walker's skip
-/// list: `.bancada` is re-fetchable from `bancada.yaml`, and `.claude` is
-/// per-checkout agent state.
-const CLONE_EXTRA_SKIP_DIRS: &[&str] = &[".bancada", ".claude"];
+/// Directories excluded from a clone on top of the sketch walker's skip list.
+/// `.claude` is per-checkout agent state. `.bancada` itself is copied because
+/// it contains durable artifacts; only its re-fetchable `libs/` child is
+/// skipped below.
+const CLONE_EXTRA_SKIP_DIRS: &[&str] = &[".claude"];
 
 /// A finished clone.
 #[derive(Debug, Clone, Serialize)]
@@ -265,13 +266,15 @@ fn copy_dir(
                 ));
             }
         } else if ft.is_dir() {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            if rel == Path::new(ghlib::VENDOR_DIR) {
+                warnings.push(
+                    "`.bancada/libs/` (vendored libraries) was not copied — run gh restore to re-fetch them"
+                        .into(),
+                );
+                continue;
+            }
             if is_skipped_dir(&name_s) {
-                if name_s == ".bancada" {
-                    warnings.push(
-                        "`.bancada/` (vendored libraries) was not copied — run gh restore to re-fetch them"
-                            .into(),
-                    );
-                }
                 continue;
             }
             let sub = dst.join(&name);
@@ -544,6 +547,11 @@ mod tests {
         std::fs::write(src.join("build/junk.o"), "o").unwrap();
         std::fs::write(src.join(".git/MARKER"), "from-source").unwrap();
         std::fs::write(src.join(".bancada/libs/x.h"), "x").unwrap();
+        std::fs::write(
+            src.join(".bancada/enclosure_handoff.json"),
+            "{\"version\":1}\n",
+        )
+        .unwrap();
         std::fs::write(src.join(".claude/settings.json"), "{}").unwrap();
         std::fs::write(src.join("node_modules/pkg/i.js"), "js").unwrap();
         // Nested skip dir with a sibling that must still arrive.
@@ -559,7 +567,11 @@ mod tests {
         assert!(!made.dir.join("build").exists());
         // git init creates a fresh .git; what must be absent is the source's.
         assert!(!made.dir.join(".git/MARKER").exists());
-        assert!(!made.dir.join(".bancada").exists());
+        assert!(!made.dir.join(".bancada/libs").exists());
+        assert_eq!(
+            read(made.dir.join(".bancada/enclosure_handoff.json")),
+            "{\"version\":1}\n"
+        );
         assert!(!made.dir.join(".claude").exists());
         assert!(!made.dir.join("node_modules").exists());
         assert!(!made.dir.join("src/deep/build").exists());
@@ -655,7 +667,7 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         assert_eq!(
             read(made.dir.join(".gitignore")),
-            "build/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            ".bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
     }
 
@@ -667,7 +679,7 @@ mod tests {
         let made = clone_project(&src, &tmp.path().join("out"), "New").unwrap();
         assert_eq!(
             read(made.dir.join(".gitignore")),
-            "custom.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            "custom.txt\n.bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
         // The source's own .gitignore is untouched.
         assert_eq!(read(src.join(".gitignore")), "custom.txt");
@@ -694,7 +706,7 @@ mod tests {
         assert!(meta.file_type().is_file(), "must be a regular file");
         assert_eq!(
             read(made.dir.join(".gitignore")),
-            "shared.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            "shared.txt\n.bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
     }
 
@@ -707,7 +719,7 @@ mod tests {
         let text = read(made.dir.join(".gitignore"));
         assert_eq!(
             text,
-            "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n"
+            "build\n.env\n.bancada/libs/\nsecrets.h\narduino_secrets.h\n"
         );
         let build_lines = text
             .lines()

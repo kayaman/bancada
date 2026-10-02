@@ -30,20 +30,61 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Entries every repository's `.gitignore` must carry: build output, vendored
-/// libraries, and the credential files that must never reach a commit.
+/// Entries every repository's `.gitignore` must carry: build output,
+/// re-fetchable vendored libraries, and the credential files that must never
+/// reach a commit. Other `.bancada/` files are durable project artifacts and
+/// belong in version control.
 pub const GITIGNORE_REQUIRED: &[&str] = &[
     "build/",
-    ".bancada/",
+    ".bancada/libs/",
     ".env",
     "secrets.h",
     "arduino_secrets.h",
 ];
 
+fn ignores_all_bancada(line: &str) -> bool {
+    matches!(
+        line.trim(),
+        ".bancada" | ".bancada/" | "/.bancada" | "/.bancada/"
+    )
+}
+
+/// Replace the legacy whole-directory `.bancada/` ignore with the narrow
+/// vendored-library rule. This makes enclosure handoffs and future durable
+/// artifacts visible to git without committing re-fetchable dependencies.
+pub(crate) fn merged_vendor_gitignore(existing: &str) -> String {
+    let mut out = existing
+        .split_inclusive('\n')
+        .filter(|line| !ignores_all_bancada(line))
+        .collect::<String>();
+    if !existing.ends_with('\n') {
+        if let Some(last) = existing.lines().last() {
+            if ignores_all_bancada(last) {
+                out = out.trim_end_matches('\n').to_string();
+            }
+        }
+    }
+
+    let has_vendor_rule = out.lines().any(|line| {
+        matches!(
+            line.trim(),
+            ".bancada/libs" | ".bancada/libs/" | "/.bancada/libs" | "/.bancada/libs/"
+        )
+    });
+    if !has_vendor_rule {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(".bancada/libs/\n");
+    }
+    out
+}
+
 /// Append the [`GITIGNORE_REQUIRED`] entries `existing` lacks, using the same
 /// trimmed-line comparison as git's ignore logic: `build`, `build/`,
 /// `/build` and `/build/` all count as the entry being present. Existing
 /// content is preserved, gaining a trailing newline when it is missing one.
+/// Legacy `.bancada/` rules are narrowed to `.bancada/libs/`.
 pub fn merged_gitignore(existing: &str) -> String {
     let has = |content: &str, entry: &str| {
         let base = entry.trim_end_matches('/');
@@ -55,7 +96,7 @@ pub fn merged_gitignore(existing: &str) -> String {
                 || t == format!("/{base}/")
         })
     };
-    let mut out = existing.to_string();
+    let mut out = merged_vendor_gitignore(existing);
     for entry in GITIGNORE_REQUIRED {
         if !has(&out, entry) {
             if !out.is_empty() && !out.ends_with('\n') {
@@ -443,6 +484,10 @@ pub fn commit(dir: &Path, message: &str) -> Result<CommitOutcome> {
     let d = dir
         .to_str()
         .ok_or_else(|| Error::Other(format!("path is not valid UTF-8: {}", dir.display())))?;
+    // Existing projects may still ignore `.bancada/` wholesale. Narrow that
+    // legacy rule before checking status so durable artifacts participate in
+    // this checkpoint and the migration itself is committed.
+    write_gitignore(dir)?;
     let status = run(&["-C", d, "status", "--porcelain", "--", "."])?;
     if status.trim().is_empty() {
         return Ok(CommitOutcome::NothingToCommit);
@@ -1302,7 +1347,7 @@ mod tests {
         let result = merged_gitignore("");
         assert_eq!(
             result,
-            "build/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            ".bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
     }
 
@@ -1312,7 +1357,7 @@ mod tests {
         let result = merged_gitignore(existing);
         assert_eq!(
             result,
-            "custom.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            "custom.txt\n.bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
     }
 
@@ -1322,7 +1367,7 @@ mod tests {
         let result = merged_gitignore(existing);
         assert_eq!(
             result,
-            "custom.txt\nbuild/\n.bancada/\n.env\nsecrets.h\narduino_secrets.h\n"
+            "custom.txt\n.bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
         );
     }
 
@@ -1332,13 +1377,51 @@ mod tests {
         let result = merged_gitignore(existing);
         assert_eq!(
             result,
-            "build\n.env\n.bancada/\nsecrets.h\narduino_secrets.h\n"
+            "build\n.env\n.bancada/libs/\nsecrets.h\narduino_secrets.h\n"
         );
         let build_lines = result
             .lines()
             .filter(|l| matches!(l.trim(), "build" | "build/" | "/build" | "/build/"))
             .count();
         assert_eq!(build_lines, 1, "{result}");
+    }
+
+    #[test]
+    fn merged_gitignore_migrates_legacy_bancada_rule() {
+        let result = merged_gitignore("custom.txt\n/.bancada/\n");
+        assert_eq!(
+            result,
+            "custom.txt\n.bancada/libs/\nbuild/\n.env\nsecrets.h\narduino_secrets.h\n"
+        );
+        assert!(!result.lines().any(ignores_all_bancada), "{result}");
+    }
+
+    #[test]
+    fn commit_versions_durable_bancada_artifacts_from_legacy_projects() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().canonicalize().unwrap().join("LegacyArtifacts");
+        std::fs::create_dir_all(dir.join(".bancada/libs")).unwrap();
+        std::fs::write(dir.join("x.ino"), "void setup() {}\n").unwrap();
+        init_repo(&dir).unwrap();
+
+        std::fs::write(dir.join(".gitignore"), "build/\n.bancada/\n").unwrap();
+        std::fs::write(
+            dir.join(".bancada/enclosure_handoff.json"),
+            "{\"version\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(".bancada/libs/vendor.h"), "generated\n").unwrap();
+
+        assert_eq!(
+            commit(&dir, "checkpoint artifacts").unwrap(),
+            CommitOutcome::Committed
+        );
+        let tracked = run(&["-C", dir.to_str().unwrap(), "ls-files"]).unwrap();
+        assert!(
+            tracked.contains(".bancada/enclosure_handoff.json"),
+            "{tracked}"
+        );
+        assert!(!tracked.contains(".bancada/libs/vendor.h"), "{tracked}");
     }
 
     /// The credential rules must exist before any commit can happen — a

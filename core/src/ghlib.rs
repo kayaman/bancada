@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::git::merged_vendor_gitignore;
 use crate::{Error, Result};
 
 /// Manifest filename, alongside `sketch.yaml` in the sketch directory.
@@ -390,24 +391,18 @@ pub fn fetch_subtree(
     Ok(commit)
 }
 
-/// Ensure `.bancada/` is ignored by the sketch's git repo, if it has one.
+/// Ensure `.bancada/libs/` is ignored by the sketch's git repo, if it has one.
 ///
 /// Returns true when the line was added. Vendored libraries are re-fetchable
 /// from the manifest, so committing them would only bloat the repository.
+/// Other `.bancada/` files are project artifacts and remain versionable.
 pub fn ensure_gitignored(sketch_dir: &Path) -> Result<bool> {
     let p = sketch_dir.join(".gitignore");
     let current = std::fs::read_to_string(&p).unwrap_or_default();
-    if current.lines().any(|l| {
-        let t = l.trim();
-        t == ".bancada" || t == ".bancada/" || t == "/.bancada" || t == "/.bancada/"
-    }) {
+    let next = merged_vendor_gitignore(&current);
+    if next == current {
         return Ok(false);
     }
-    let mut next = current;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(".bancada/\n");
     std::fs::write(&p, next)?;
     Ok(true)
 }
@@ -635,7 +630,7 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
         assert!(ensure_gitignored(tmp.path()).unwrap());
         assert!(!ensure_gitignored(tmp.path()).unwrap(), "idempotent");
         let text = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert_eq!(text.matches(".bancada/").count(), 1, "{text}");
+        assert_eq!(text.matches(".bancada/libs/").count(), 1, "{text}");
     }
 
     #[test]
@@ -644,15 +639,24 @@ dcef8baaeecf81f20dc2c7ac2abe9ac60c7a7985\trefs/tags/StatusPanel/v1.0.0
         std::fs::write(tmp.path().join(".gitignore"), "build/").unwrap();
         assert!(ensure_gitignored(tmp.path()).unwrap());
         let text = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
-        assert_eq!(text, "build/\n.bancada/\n");
+        assert_eq!(text, "build/\n.bancada/libs/\n");
     }
 
     #[test]
-    fn recognises_existing_variants() {
-        for existing in [".bancada", "/.bancada/", ".bancada/"] {
+    fn recognises_existing_vendor_variants() {
+        for existing in [".bancada/libs", "/.bancada/libs/", ".bancada/libs/"] {
             let tmp = tempfile::tempdir().unwrap();
             std::fs::write(tmp.path().join(".gitignore"), format!("{existing}\n")).unwrap();
             assert!(!ensure_gitignored(tmp.path()).unwrap(), "{existing}");
         }
+    }
+
+    #[test]
+    fn migrates_legacy_whole_bancada_ignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "build/\n.bancada/\n").unwrap();
+        assert!(ensure_gitignored(tmp.path()).unwrap());
+        let text = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(text, "build/\n.bancada/libs/\n");
     }
 }
