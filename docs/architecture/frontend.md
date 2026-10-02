@@ -216,6 +216,7 @@ So anything worth testing has been extracted into a plain `.ts` module — a
 | `profileInit.ts` | profile form modes and submit plans |
 | `usageDashboard.ts` | totals and display names |
 | `keys.ts` | accelerator parsing and matching; Ctrl and Cmd are one modifier |
+| `commandPalette.ts` | command list type, fuzzy filter and row navigation for the Ctrl+K / Ctrl+Shift+P palette (`CommandPalette.tsx`); `App.tsx` builds the list |
 
 Plus `src/scope/`, `src/agent/`, `src/obs/` and `src/serial/`, which are
 subsystems in their own right (§5).
