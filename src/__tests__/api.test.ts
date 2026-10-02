@@ -955,3 +955,27 @@ describe("device browser", () => {
     expect(called()).toEqual(["device_browse_stop", {}]);
   });
 });
+
+describe("enclosure hand-off", () => {
+  it("enclosureSeedPrompt passes sketchDir", async () => {
+    await api.enclosureSeedPrompt("/s");
+    expect(called()).toEqual(["enclosure_seed_prompt", { sketchDir: "/s" }]);
+  });
+
+  it("sendToEnclosureMaker nulls an omitted prompt", async () => {
+    // Rust takes Option<String>; omit → null so the hand-off regenerates.
+    await api.sendToEnclosureMaker("/s");
+    expect(called()).toEqual([
+      "send_to_enclosure_maker",
+      { sketchDir: "/s", prompt: null },
+    ]);
+  });
+
+  it("sendToEnclosureMaker forwards an edited prompt", async () => {
+    await api.sendToEnclosureMaker("/s", "Make a box for this PCB");
+    expect(called()).toEqual([
+      "send_to_enclosure_maker",
+      { sketchDir: "/s", prompt: "Make a box for this PCB" },
+    ]);
+  });
+});

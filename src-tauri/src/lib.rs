@@ -627,8 +627,13 @@ fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
 /// process (found on `PATH`, the same convention as `arduino-cli`/`esptool`)
 /// rather than the other way around -- there's no long-running service on
 /// either side to call into.
+///
+/// `prompt`, when provided and non-blank, is the seed chat message the user
+/// already reviewed (and maybe edited). Otherwise the hand-off generates a
+/// brief from the BOM and board using the parametric-enclosures /
+/// 3d-printing skill shape.
 #[tauri::command]
-fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
+fn send_to_enclosure_maker(sketch_dir: String, prompt: Option<String>) -> Result<(), String> {
     let dir = Path::new(&sketch_dir);
     let project_name = dir
         .file_name()
@@ -637,7 +642,13 @@ fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
 
     let bom = bom::Bom::load(dir).map_err(err_str)?;
     let board_choice = bancada_core::project::project_board(dir);
-    let handoff = EnclosureHandoff::build(dir, project_name, bom, &board_choice);
+    let handoff = EnclosureHandoff::build(
+        dir,
+        project_name,
+        bom,
+        &board_choice,
+        prompt.as_deref(),
+    );
     let handoff_path = handoff.write(dir).map_err(err_str)?;
 
     std::process::Command::new("enclosure-maker-app")
@@ -651,6 +662,31 @@ fn send_to_enclosure_maker(sketch_dir: String) -> Result<(), String> {
             }
         })?;
     Ok(())
+}
+
+/// Builds the enclosure-maker seed prompt for this project without launching
+/// anything — so the UI can show/edit it before `send_to_enclosure_maker`.
+#[tauri::command]
+fn enclosure_seed_prompt(sketch_dir: String) -> Result<String, String> {
+    let dir = Path::new(&sketch_dir);
+    let project_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("can't derive a project name from {sketch_dir}"))?;
+    let bom = bom::Bom::load(dir).map_err(err_str)?;
+    let board_choice = bancada_core::project::project_board(dir);
+    let board = match &board_choice {
+        bancada_core::project::BoardChoice::Recorded { board }
+        | bancada_core::project::BoardChoice::Inferred { board } => Some(*board),
+        bancada_core::project::BoardChoice::Unchosen { .. }
+        | bancada_core::project::BoardChoice::NoProfile => None,
+    };
+    let components = bom.map(|b| b.components).unwrap_or_default();
+    Ok(bancada_core::enclosure_handoff::build_seed_prompt(
+        project_name,
+        board,
+        &components,
+    ))
 }
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
@@ -5917,6 +5953,7 @@ pub fn run() {
             load_bom,
             save_bom,
             send_to_enclosure_maker,
+            enclosure_seed_prompt,
             init_profile,
             retarget_profile,
             add_local_library,

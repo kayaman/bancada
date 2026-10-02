@@ -1586,6 +1586,52 @@ body {
   color: var(--accent);
 }
 
+/* Compose step: edit the enclosure seed prompt before launching
+   enclosure-maker. Replaces the BOM table while open. */
+.bom-enclosure-compose {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.bom-enclosure-compose-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+}
+
+.bom-enclosure-compose-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--input-bg, var(--bg));
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.45;
+  padding: var(--sp-4);
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.bom-enclosure-compose-textarea:focus {
+  background: var(--accent-dim);
+}
+
+.bom-enclosure-compose-textarea:disabled {
+  opacity: 0.7;
+}
+
 /* ---------- diagram ---------- */
 
 .diagram-panel {
