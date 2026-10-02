@@ -158,6 +158,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+mod enclosure_preview;
 mod idfhost;
 mod setup;
 
@@ -623,7 +624,7 @@ fn save_bom(sketch_dir: String, bom: bom::Bom) -> Result<(), String> {
 /// Loads this project's BOM and resolved board and builds the
 /// [`EnclosureHandoff`] both enclosure-maker's hand-off commands share --
 /// the one piece of I/O `preview_enclosure_prompt` and
-/// `send_to_enclosure_maker` have in common.
+/// `enclosure_preview::open_enclosure_preview` have in common.
 fn load_enclosure_handoff(sketch_dir: &str) -> Result<EnclosureHandoff, String> {
     let dir = Path::new(sketch_dir);
     let project_name = dir
@@ -645,97 +646,12 @@ fn preview_enclosure_prompt(sketch_dir: String) -> Result<String, String> {
     Ok(load_enclosure_handoff(&sketch_dir)?.draft_prompt())
 }
 
-/// The third pillar, Enclosure, alongside Software and Hardware: hands this
-/// project's BOM and resolved board -- plus the user-approved `prompt` from
-/// bancada's Enclosure tab -- to enclosure-maker, which opens a new project
-/// seeded with that context and puts it straight in front of its own AI
-/// assistant. Bancada calls out to a separate `enclosure-maker-app` process
-/// (found on `PATH`, the same convention as `arduino-cli`/`esptool`) rather
-/// than the other way around -- there's no long-running service on either
-/// side to call into.
-///
-/// Unlike `agent_start`, bancada never writes to this child -- the user
-/// drives enclosure-maker's own chat in its own window from here on. Piping
-/// its stdout/stderr is purely to *mirror* its live tool-call activity back
-/// into this project's Enclosure tab (see `enclosure_session.rs` on the
-/// enclosure-maker side, which echoes its already-normalized agent events to
-/// its own stdout). No `AppState` tracking is needed: the `Child` is simply
-/// moved into the reader thread and dropped when that thread ends.
-#[tauri::command]
-fn send_to_enclosure_maker(app: AppHandle, sketch_dir: String, prompt: String) -> Result<u32, String> {
-    let dir = Path::new(&sketch_dir);
-    let mut handoff = load_enclosure_handoff(&sketch_dir)?;
-    handoff.prompt = Some(prompt);
-    let handoff_path = handoff.write(dir).map_err(err_str)?;
-
-    let mut child = std::process::Command::new("enclosure-maker-app")
-        .env("ENCLOSURE_MAKER_IMPORT", &handoff_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "could not find `enclosure-maker-app` on PATH — is it installed?".to_string()
-            } else {
-                format!("failed to launch enclosure-maker: {e}")
-            }
-        })?;
-    let pid = child.id();
-
-    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
-        (Some(stdout), Some(stderr)) => (stdout, stderr),
-        _ => return Err("enclosure-maker's stdio pipes were unavailable".to_string()),
-    };
-
-    let app_out = app.clone();
-    std::thread::spawn(move || {
-        let mut child = child;
-        bancada_core::proc::for_each_lossy_line(stdout, |line| {
-            // `parse_event` is the validity gate; what reaches the frontend
-            // is the event verbatim, tagged with the pid so a superseded
-            // session's late events can be told apart (same FE-C1 pattern
-            // `agent_start`'s stdout thread uses for `agent://event`).
-            match agent::parse_event(&line) {
-                Ok(_) => {
-                    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if let Some(obj) = value.as_object_mut() {
-                            obj.insert("pid".to_string(), serde_json::json!(pid));
-                        }
-                        let _ = app_out.emit("enclosure://event", value);
-                    }
-                }
-                Err(_) => {
-                    let _ = app_out.emit(
-                        "enclosure://event",
-                        serde_json::json!({ "type": "unparsed", "line": line, "pid": pid }),
-                    );
-                }
-            }
-            true
-        });
-        // stdout EOF means the process has exited (or is about to); wait()
-        // reaps it so it doesn't linger as a zombie -- nothing else holds
-        // this Child.
-        let _ = child.wait();
-        let _ = app_out.emit(
-            "enclosure://closed",
-            serde_json::json!({ "reason": "enclosure-maker exited", "pid": pid }),
-        );
-    });
-
-    let app_err = app;
-    std::thread::spawn(move || {
-        bancada_core::proc::for_each_lossy_line(stderr, |line| {
-            let _ = app_err.emit(
-                "enclosure://event",
-                serde_json::json!({ "type": "stderr", "line": line, "pid": pid }),
-            );
-            true
-        });
-    });
-
-    Ok(pid)
-}
+// The third pillar, Enclosure: see `enclosure_preview::open_enclosure_preview`.
+// That used to spawn a separate `enclosure-maker-app` process and mirror its
+// stdout into this project's Enclosure tab; enclosure-maker is merged into
+// this workspace now (see `enclosure-maker/README.md`), so it opens its own
+// preview window in-process instead -- no subprocess, no piping, no event
+// mirroring to maintain.
 
 /// The pinned `platform:` entry for `fqbn`, from the installed platform.
 /// Not installed → an error naming the core to install; nothing is written
@@ -6001,7 +5917,10 @@ pub fn run() {
             load_bom,
             save_bom,
             preview_enclosure_prompt,
-            send_to_enclosure_maker,
+            enclosure_preview::has_enclosure_project,
+            enclosure_preview::resume_enclosure_preview,
+            enclosure_preview::open_enclosure_preview,
+            enclosure_preview::save_stl_to_downloads,
             init_profile,
             retarget_profile,
             add_local_library,

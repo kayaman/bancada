@@ -1,0 +1,7 @@
+[package]
+name = "em-csg"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+em-core = { workspace = true }

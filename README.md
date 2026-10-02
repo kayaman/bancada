@@ -312,6 +312,20 @@ scaffolded library, a fetched library and a newly created project actually
   are not confined, and web access means what is read can leave the machine.
   See [AI Assistant panel](#ai-assistant-panel) below
 
+## Enclosure design
+
+The **Enclosure** division embeds enclosure-maker in the same window, using
+`main.rhai` in the current project. Start from the board/BOM request or reopen
+an existing design. Select individual parts, move or rotate them with handles
+or exact numeric inputs, snap, undo/redo, and switch camera views. Saved part
+positions survive reopening and apply to STL/3MF exports.
+
+Dimension controls adjust script parameters and supported literal shape or
+hardware dimensions. The code editor and Claude/Codex/Copilot chat remain
+available. Desktop STL exports save to Downloads.
+See the [enclosure scripting and controls guide](enclosure-maker/README.md)
+and [integration comparison](enclosure-maker/docs/bancada-sync.md).
+
 ## AI Assistant panel
 
 A bottom-panel **Assistant** tab where you chat with a **Claude** agent that
@@ -427,10 +441,11 @@ bancada/
 ├── core/            # bancada-core: 31 modules of pure Rust (no Tauri, unit-tested)
 ├── src-tauri/       # Tauri app: commands, events, session state, window config
 ├── src/             # React frontend (Vite + TypeScript + CodeMirror)
+├── enclosure-maker/ # geometry, Rhai, live preview, model controls and project handoff
 ├── firmware/        # bancada_scope: companion ESP32 sketch for the ADC scope
 ├── docs/            # architecture, install, wire contracts, release notes
 ├── package.json
-└── Cargo.toml       # workspace: core + src-tauri
+└── Cargo.toml       # workspace: core + src-tauri + enclosure-maker crates
 ```
 
 See [docs/](docs/README.md) for the documentation index, and

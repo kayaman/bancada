@@ -15,6 +15,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 bancada-core = { path = "../core" }
+em-preview = { path = "../enclosure-maker/crates/em-preview" }
+em-projects = { path = "../enclosure-maker/crates/em-projects" }
 base64 = "0.22"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

@@ -436,13 +436,34 @@ export const saveBom = (sketchDir: string, bom: Bom) =>
 export const previewEnclosurePrompt = (sketchDir: string) =>
   invoke<string>("preview_enclosure_prompt", { sketchDir });
 
+/** Whether this sketch already has an enclosure project (a `main.rhai` of
+ *  its own) — lets the Enclosure tab skip straight to the embedded viewer
+ *  instead of the compose box when there's already something to look at. */
+export const hasEnclosureProject = (sketchDir: string) =>
+  invoke<boolean>("has_enclosure_project", { sketchDir });
+
+/** Resumes the preview server for an *already-existing* enclosure project
+ *  and returns its URL, with no seed message — entering the Enclosure
+ *  division again should not inject a new chat message, just resume
+ *  looking at what's already there. */
+export const resumeEnclosurePreview = (sketchDir: string) =>
+  invoke<string>("resume_enclosure_preview", { sketchDir });
+
 /** Hands this project's BOM, resolved board, and the user-approved `prompt`
- *  to enclosure-maker, which opens a new project seeded with that context.
- *  Returns the spawned `enclosure-maker-app` child's pid, which
- *  `onEnclosureEvent`/`onEnclosureClosed` payloads are tagged with. Throws
- *  (as a string) when the `enclosure-maker-app` binary isn't found on PATH. */
-export const sendToEnclosureMaker = (sketchDir: string, prompt: string) =>
-  invoke<number>("send_to_enclosure_maker", { sketchDir, prompt });
+ *  to enclosure-maker's project-creation logic (in-process — enclosure-maker
+ *  is merged into this workspace, see enclosure-maker/README.md), starts its
+ *  preview server, and returns the URL (seeded with that prompt as the first
+ *  chat message) for the Enclosure tab to embed in an iframe. */
+export const openEnclosurePreview = (sketchDir: string, prompt: string) =>
+  invoke<string>("open_enclosure_preview", { sketchDir, prompt });
+
+/** Writes an exported STL straight into the OS Downloads folder, on behalf
+ *  of the embedded enclosure-maker preview iframe — Tauri's `window.__TAURI__`
+ *  IPC bridge doesn't reach into a nested iframe's own `window`, so the
+ *  iframe `postMessage`s bancada's top frame instead (see `App.tsx`'s
+ *  `message` event listener) rather than calling this directly. */
+export const saveStlToDownloads = (filename: string, contentsB64: string) =>
+  invoke<string>("save_stl_to_downloads", { filename, contentsB64 });
 
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
@@ -1375,16 +1396,3 @@ export const onAgentClosed = (
   cb: (p: { reason: string; pid: number }) => void,
 ): Promise<UnlistenFn> =>
   listen<{ reason: string; pid: number }>("agent://closed", (e) => cb(e.payload));
-
-/** One parsed line from the mirrored `enclosure-maker-app` child's stdout —
- *  the same claude-CLI stream-json shape `onAgentEvent` carries, plus
- *  bancada's synthetic stderr/unparsed events, each tagged with the pid of
- *  the enclosure-maker-app process that produced it (see
- *  `send_to_enclosure_maker`). */
-export const onEnclosureEvent = (cb: (ev: AgentEvent) => void): Promise<UnlistenFn> =>
-  listen<AgentEvent>("enclosure://event", (e) => cb(e.payload));
-/** Fires once enclosure-maker-app's stdout hits EOF (the process exited). */
-export const onEnclosureClosed = (
-  cb: (p: { reason: string; pid: number }) => void,
-): Promise<UnlistenFn> =>
-  listen<{ reason: string; pid: number }>("enclosure://closed", (e) => cb(e.payload));

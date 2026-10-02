@@ -1610,6 +1610,14 @@ body {
   color: var(--text);
 }
 
+.enclosure-viewer {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  background: var(--bg);
+}
+
 /* ---------- diagram ---------- */
 
 .diagram-panel {

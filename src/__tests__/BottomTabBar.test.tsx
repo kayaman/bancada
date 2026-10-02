@@ -14,35 +14,67 @@ const tabButtons = () =>
     .filter((b) => b.classList.contains("tab"));
 
 describe("BottomTabBar", () => {
-  it("renders all tabs in bench order", () => {
+  it("scopes to the active division — Hardware sees Assistant plus every live/device tool", () => {
     render(
       <BottomTabBar
-        active="build"
+        active="serial"
         unseen={{}}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
       />,
     );
     expect(tabButtons().map((b) => b.textContent)).toEqual([
-      "Build",
+      "Assistant",
       "Serial",
       "Scope",
       "MQTT",
       "WS",
       "Web",
-      "Assistant",
       "BOM",
       "Diagram",
     ]);
+  });
+
+  it("scopes to the active division — Software sees only Assistant and Build", () => {
+    render(
+      <BottomTabBar
+        active="build"
+        unseen={{}}
+        division="software"
+        onOpen={noop}
+        maximized={false}
+        onToggleMaximize={noop}
+      />,
+    );
+    expect(tabButtons().map((b) => b.textContent)).toEqual([
+      "Assistant",
+      "Build",
+    ]);
+  });
+
+  it("scopes to the active division — Enclosure sees only Assistant, never an empty-looking row", () => {
+    render(
+      <BottomTabBar
+        active="agent"
+        unseen={{}}
+        division="enclosure"
+        onOpen={noop}
+        maximized={false}
+        onToggleMaximize={noop}
+      />,
+    );
+    expect(tabButtons().map((b) => b.textContent)).toEqual(["Assistant"]);
   });
 
   it("clicking a tab opens it", () => {
     const onOpen = vi.fn();
     render(
       <BottomTabBar
-        active="build"
+        active="serial"
         unseen={{}}
+        division="hardware"
         onOpen={onOpen}
         maximized={false}
         onToggleMaximize={noop}
@@ -57,6 +89,7 @@ describe("BottomTabBar", () => {
       <BottomTabBar
         active="mqtt"
         unseen={{}}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
@@ -65,9 +98,9 @@ describe("BottomTabBar", () => {
     const mqtt = screen.getByRole("button", { name: "MQTT" });
     expect(mqtt.getAttribute("aria-current")).toBe("true");
     expect(mqtt.classList.contains("active")).toBe(true);
-    const build = screen.getByRole("button", { name: "Build" });
-    expect(build.getAttribute("aria-current")).toBe(null);
-    expect(build.classList.contains("active")).toBe(false);
+    const serial = screen.getByRole("button", { name: "Serial" });
+    expect(serial.getAttribute("aria-current")).toBe(null);
+    expect(serial.classList.contains("active")).toBe(false);
     expect(
       tabButtons().filter((b) => b.getAttribute("aria-current") === "true")
         .length,
@@ -77,8 +110,9 @@ describe("BottomTabBar", () => {
   it("dots an unseen inactive tab", () => {
     render(
       <BottomTabBar
-        active="build"
+        active="agent"
         unseen={{ serial: true }}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
@@ -94,6 +128,7 @@ describe("BottomTabBar", () => {
       <BottomTabBar
         active="serial"
         unseen={{ serial: true }}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
@@ -105,8 +140,9 @@ describe("BottomTabBar", () => {
   it("draws the three former group boundaries as separators", () => {
     render(
       <BottomTabBar
-        active="build"
+        active="serial"
         unseen={{}}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
@@ -118,8 +154,9 @@ describe("BottomTabBar", () => {
   it("puts each separator immediately after the tab it closes off", () => {
     render(
       <BottomTabBar
-        active="build"
+        active="serial"
         unseen={{}}
+        division="hardware"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
@@ -130,8 +167,8 @@ describe("BottomTabBar", () => {
     for (const label of ["Serial", "Scope", "Web"]) {
       expect(after(label)?.getAttribute("role")).toBe("separator");
     }
-    // ...and nowhere else: Build, MQTT and WS are not group boundaries.
-    for (const label of ["Build", "MQTT", "WS"]) {
+    // ...and nowhere else: Assistant, MQTT and WS are not group boundaries.
+    for (const label of ["Assistant", "MQTT", "WS"]) {
       expect(after(label)?.getAttribute("role")).not.toBe("separator");
     }
   });
@@ -139,8 +176,9 @@ describe("BottomTabBar", () => {
   it("shows a badge count, named so it does not run into the tab label", () => {
     const { unmount } = render(
       <BottomTabBar
-        active="serial"
+        active="agent"
         unseen={{}}
+        division="software"
         badges={{ build: 3 }}
         onOpen={noop}
         maximized={false}
@@ -150,32 +188,33 @@ describe("BottomTabBar", () => {
     const badge = screen.getByLabelText("3 errors");
     expect(badge.classList.contains("tab-badge")).toBe(true);
     expect(badge.textContent).toBe("3");
-    expect(tabButtons()[0].contains(badge)).toBe(true);
+    const build = tabButtons()[1];
+    expect(build.contains(badge)).toBe(true);
     // Without the badge's own label the button would announce as "Build3".
-    expect(screen.getByRole("button", { name: "Build 3 errors" })).toBe(
-      tabButtons()[0],
-    );
+    expect(screen.getByRole("button", { name: "Build 3 errors" })).toBe(build);
     unmount();
 
     render(
       <BottomTabBar
-        active="serial"
+        active="agent"
         unseen={{}}
+        division="software"
         badges={{ build: 0 }}
         onOpen={noop}
         maximized={false}
         onToggleMaximize={noop}
       />,
     );
-    expect(tabButtons()[0].querySelector(".tab-badge")).toBe(null);
+    expect(tabButtons()[1].querySelector(".tab-badge")).toBe(null);
   });
 
   it("names the maximize button for what the click will do", () => {
     const onToggleMaximize = vi.fn();
     const { unmount } = render(
       <BottomTabBar
-        active="build"
+        active="agent"
         unseen={{}}
+        division="software"
         onOpen={noop}
         maximized={false}
         onToggleMaximize={onToggleMaximize}
@@ -189,8 +228,9 @@ describe("BottomTabBar", () => {
 
     render(
       <BottomTabBar
-        active="build"
+        active="agent"
         unseen={{}}
+        division="software"
         onOpen={noop}
         maximized={true}
         onToggleMaximize={noop}

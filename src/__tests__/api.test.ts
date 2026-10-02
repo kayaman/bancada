@@ -37,6 +37,31 @@ beforeEach(() => {
   listenMock.mockClear();
 });
 
+describe("embedded enclosure commands", () => {
+  it("checks and resumes the enclosure for the selected sketch", async () => {
+    await api.hasEnclosureProject("/s");
+    expect(called()).toEqual(["has_enclosure_project", { sketchDir: "/s" }]);
+    await api.resumeEnclosurePreview("/s");
+    expect(called()).toEqual(["resume_enclosure_preview", { sketchDir: "/s" }]);
+  });
+
+  it("opens the preview with the reviewed seed prompt", async () => {
+    await api.openEnclosurePreview("/s", "Make a case");
+    expect(called()).toEqual([
+      "open_enclosure_preview",
+      { sketchDir: "/s", prompt: "Make a case" },
+    ]);
+  });
+
+  it("passes the STL filename and base64 contents to the desktop save bridge", async () => {
+    await api.saveStlToDownloads("base.stl", "c3Rs");
+    expect(called()).toEqual([
+      "save_stl_to_downloads",
+      { filename: "base.stl", contentsB64: "c3Rs" },
+    ]);
+  });
+});
+
 describe("sketch and file commands", () => {
   it("listSketchFiles passes sketchDir", async () => {
     await api.listSketchFiles("/s");

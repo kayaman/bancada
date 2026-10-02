@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { tabRow, type BottomTab } from "../bottomTabs";
+import { tabRow, type BottomTab, type SideDivision } from "../bottomTabs";
 
 interface Props {
   active: BottomTab;
@@ -7,25 +7,30 @@ interface Props {
   unseen: Partial<Record<BottomTab, boolean>>;
   /** Optional per-tab counts (e.g. build errors); zero and absent both render nothing. */
   badges?: Partial<Record<BottomTab, number>>;
+  /** The active Software/Hardware/Enclosure division — scopes which tabs
+   *  this row shows (plus every "global" one; see `TAB_DIVISION`). */
+  division: SideDivision;
   onOpen: (t: BottomTab) => void;
   maximized: boolean;
   onToggleMaximize: () => void;
 }
 
-/** The bottom panel's whole header: one flat row of seven tabs, the former
- *  group boundaries left as thin separators, then the maximize toggle. What
- *  to render is decided by `tabRow` in `../bottomTabs` — add a tab there. */
+/** The bottom panel's whole header: one flat row scoped to the active
+ *  division, the former group boundaries left as thin separators, then the
+ *  maximize toggle. What to render is decided by `tabRow` in `../bottomTabs`
+ *  — add a tab there. */
 export default function BottomTabBar({
   active,
   unseen,
   badges,
+  division,
   onOpen,
   maximized,
   onToggleMaximize,
 }: Props) {
   return (
     <div className="panel-tabs bottom-tabs">
-      {tabRow(active, unseen, badges).map((item) => (
+      {tabRow(active, unseen, division, badges).map((item) => (
         <Fragment key={item.tab}>
           <button
             className={item.active ? "tab active" : "tab"}

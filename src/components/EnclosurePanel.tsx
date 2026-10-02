@@ -1,34 +1,36 @@
-// Enclosure panel — the third pillar, alongside Software (Assistant) and
-// Hardware (Build/Serial/Scope): compose-then-send the seed prompt for
-// enclosure-maker's own AI assistant, then mirror its live tool-call
-// activity here while it works in its own window.
+// Enclosure panel — one of the app's three big divisions (Software,
+// Hardware, Enclosure — see the sidebar switcher in App.tsx): compose the
+// seed prompt for enclosure-maker's own AI assistant, then embed its live
+// preview (3D render, code pane, chat) right here, in this pane, in this
+// same window — not a second native window. enclosure-maker is merged into
+// this workspace (see enclosure-maker/README.md); its preview server has no
+// Tauri dependency of its own, so the embedded iframe talks to it purely
+// over its own WebSocket, same as it would in a window of its own.
 //
-// Always mounted, hidden with display:none when another tab is active (same
-// pattern as every other bottom panel). `store` is App-owned, not
-// panel-owned, for the same reason `agentStore` is: the unseen dot must work
-// before this panel has ever been mounted.
+// Two phases: "compose" (nothing sent yet — draft prompt, editable, Send
+// button) and "viewer" (an enclosure project already exists for this
+// sketch — the embedded preview, with a way back to compose to revise and
+// resend). Rendered in the editor area only while the Enclosure division is
+// active (App.tsx's showPane-style ternary) — not always-mounted like the
+// bottom panels, since there's no App-level state to preserve across visits
+// beyond "does a project exist yet", which is re-checked on every entry.
 
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
-import type { AgentStore } from "../agent/agentStore";
-import { MessageView, TurnSummaryView, type TurnEnd } from "./AgentPanel";
-import type { BottomTab } from "../bottomTabs";
 
 interface Props {
-  active: boolean;
   sketchDir: string | null;
-  store: AgentStore;
-  openBottomTab: (tab: BottomTab) => void;
   notify: (msg: string, isError?: boolean) => void;
 }
 
-const POLL_MS = 100;
+type Phase = "checking" | "compose" | "viewer";
 
-export default function EnclosurePanel({ active, sketchDir, store, openBottomTab, notify }: Props) {
+export default function EnclosurePanel({ sketchDir, notify }: Props) {
+  const [phase, setPhase] = useState<Phase>("checking");
   const [draft, setDraft] = useState("");
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
 
   const loadDraft = () => {
     if (!sketchDir) return;
@@ -40,23 +42,54 @@ export default function EnclosurePanel({ active, sketchDir, store, openBottomTab
       .finally(() => setLoadingDraft(false));
   };
 
-  // Fill the compose box the first time this project's tab is opened.
-  const loadedForRef = useRef<string | null>(null);
+  // On entering this division (mount) or the open project changing: if an
+  // enclosure project already exists for this sketch, resume straight to
+  // the viewer — no reason to re-show the compose box or inject a fresh
+  // chat message just from navigating here. Otherwise show compose, with a
+  // freshly generated draft.
+  const checkedForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!active || !sketchDir || loadedForRef.current === sketchDir) return;
-    loadedForRef.current = sketchDir;
-    loadDraft();
+    if (!sketchDir) {
+      setPhase("compose");
+      return;
+    }
+    if (checkedForRef.current === sketchDir) return;
+    checkedForRef.current = sketchDir;
+    setPhase("checking");
+    api
+      .hasEnclosureProject(sketchDir)
+      .then((exists) => {
+        if (!exists) {
+          setPhase("compose");
+          loadDraft();
+          return;
+        }
+        return api
+          .resumeEnclosurePreview(sketchDir)
+          .then((url) => {
+            setViewerUrl(url);
+            setPhase("viewer");
+          })
+          .catch((err) => {
+            notify(String(err), true);
+            setPhase("compose");
+            loadDraft();
+          });
+      })
+      .catch(() => {
+        setPhase("compose");
+        loadDraft();
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, sketchDir]);
+  }, [sketchDir]);
 
   const send = async () => {
     if (!sketchDir || !draft.trim()) return;
     setSending(true);
     try {
-      const pid = await api.sendToEnclosureMaker(sketchDir, draft);
-      store.sessionStarted(pid);
-      setSent(true);
-      notify("Opening enclosure-maker…");
+      const url = await api.openEnclosurePreview(sketchDir, draft);
+      setViewerUrl(url);
+      setPhase("viewer");
     } catch (err) {
       notify(String(err), true);
     } finally {
@@ -64,105 +97,74 @@ export default function EnclosurePanel({ active, sketchDir, store, openBottomTab
     }
   };
 
-  const sendAnother = () => {
-    // Clears the transcript and supersedes the old pid, so a straggling
-    // event from the session just left behind can't paint into the next one
-    // (same AgentStore.clear() guard the Assistant tab's "New session" uses).
-    store.clear();
-    setSent(false);
+  const editPrompt = () => {
+    setPhase("compose");
     loadDraft();
   };
 
-  // ---------- repaint on store changes (only while shown) ----------
+  if (phase === "checking") {
+    return (
+      <section className="enclosure-panel">
+        <p className="agent-empty">Checking for an existing enclosure project…</p>
+      </section>
+    );
+  }
 
-  const [, setTick] = useState(0);
-  const lastVersionRef = useRef(-1);
-  useEffect(() => {
-    if (!active || !sent) return;
-    const iv = window.setInterval(() => {
-      if (store.version !== lastVersionRef.current) {
-        lastVersionRef.current = store.version;
-        setTick((t) => t + 1);
-      }
-    }, POLL_MS);
-    return () => window.clearInterval(iv);
-  }, [active, sent, store]);
-
-  const [viewTurn, setViewTurn] = useState<TurnEnd | null>(null);
-  const snap = store.snapshot();
+  if (phase === "viewer" && viewerUrl) {
+    return (
+      <section className="enclosure-panel enclosure-panel-viewer">
+        <div className="bom-toolbar">
+          <span className="bom-count">Enclosure — live preview</span>
+          <div className="spacer" />
+          <button className="btn small" onClick={editPrompt} title="Revise the prompt and send again">
+            ← Edit prompt
+          </button>
+        </div>
+        <iframe
+          key={viewerUrl}
+          className="enclosure-viewer"
+          src={viewerUrl}
+          title="Enclosure preview"
+        />
+      </section>
+    );
+  }
 
   return (
-    <section
-      className="enclosure-panel"
-      style={active ? undefined : { display: "none" }}
-    >
-      {!sent ? (
-        <>
-          <div className="bom-toolbar">
-            <span className="bom-count">
-              Review the request before it's sent to enclosure-maker:
-            </span>
-            <div className="spacer" />
-            <button
-              className="btn small"
-              disabled={loadingDraft || !sketchDir}
-              onClick={loadDraft}
-              title="Regenerate the draft from the current BOM and board"
-            >
-              {loadingDraft ? "Loading…" : "Regenerate"}
-            </button>
-            <button
-              className="btn small primary"
-              disabled={sending || loadingDraft || !sketchDir || !draft.trim()}
-              onClick={() => void send()}
-              title="Send this prompt to enclosure-maker"
-            >
-              {sending ? "Opening…" : "Send to Enclosure-maker →"}
-            </button>
-          </div>
-          <textarea
-            className="enclosure-prompt"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={
-              sketchDir
-                ? "Loading a draft from this project's BOM and board…"
-                : "Open a project first."
-            }
-            disabled={loadingDraft || sending}
-          />
-        </>
-      ) : viewTurn ? (
-        <TurnSummaryView turn={viewTurn} onBack={() => setViewTurn(null)} />
-      ) : (
-        <>
-          <div className="bom-toolbar">
-            <span className="bom-count">
-              Mirroring enclosure-maker's assistant
-              {snap.status === "ended" ? " — session ended" : "…"}
-            </span>
-            <div className="spacer" />
-            <button className="btn small" onClick={sendAnother}>
-              Send another →
-            </button>
-          </div>
-          <div className="agent-scroll">
-            {snap.messages.length === 0 && (
-              <p className="agent-empty">
-                Waiting for enclosure-maker to start…
-              </p>
-            )}
-            {snap.messages.map((msg, i) => (
-              <MessageView
-                key={i}
-                msg={msg}
-                openBottomTab={openBottomTab}
-                onOpenTurn={setViewTurn}
-              />
-            ))}
-          </div>
-        </>
-      )}
+    <section className="enclosure-panel">
+      <div className="bom-toolbar">
+        <span className="bom-count">
+          Review the request before it's handed off to enclosure-maker:
+        </span>
+        <div className="spacer" />
+        <button
+          className="btn small"
+          disabled={loadingDraft || !sketchDir}
+          onClick={loadDraft}
+          title="Regenerate the draft from the current BOM and board"
+        >
+          {loadingDraft ? "Loading…" : "Regenerate"}
+        </button>
+        <button
+          className="btn small primary"
+          disabled={sending || loadingDraft || !sketchDir || !draft.trim()}
+          onClick={() => void send()}
+          title="Open the live enclosure-maker preview with this prompt"
+        >
+          {sending ? "Opening…" : "Send to Enclosure-maker →"}
+        </button>
+      </div>
+      <textarea
+        className="enclosure-prompt"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder={
+          sketchDir
+            ? "Loading a draft from this project's BOM and board…"
+            : "Open a project first."
+        }
+        disabled={loadingDraft || sending}
+      />
     </section>
   );
 }

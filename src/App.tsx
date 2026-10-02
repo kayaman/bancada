@@ -119,11 +119,25 @@ import EnclosurePanel from "./components/EnclosurePanel";
 import BottomTabBar from "./components/BottomTabBar";
 import ToastStack from "./components/ToastStack";
 import StatusBar from "./components/StatusBar";
-import { type BottomTab } from "./bottomTabs";
+import { type BottomTab, type SideDivision, TAB_DIVISION } from "./bottomTabs";
 
-type SideGroup = "software" | "hardware";
+/** The app's three big divisions — Software, Hardware, Enclosure — all in
+ *  this one window. Reuses `bottomTabs.ts`'s own type so the sidebar
+ *  switcher and the bottom tab row it scopes can never disagree on what the
+ *  three options are. */
+type SideGroup = SideDivision;
 type SoftwareTab = "files" | "libraries";
 type HardwareTab = "boards" | "fleet";
+
+/** The bottom tab a division falls back to when the one currently open
+ *  isn't one of its own (and isn't the "global" Assistant tab either) —
+ *  each division's own most-used tab, same reasoning `bottomTabs.ts`
+ *  anchors Assistant at the row's left edge for. */
+const DEFAULT_TAB_FOR_DIVISION: Record<SideGroup, BottomTab> = {
+  software: "build",
+  hardware: "serial",
+  enclosure: "agent",
+};
 
 // Bottom panel sizing: layout preference, so it lives in localStorage (per
 // machine, not part of the app settings file).
@@ -189,11 +203,6 @@ const agentStore = new AgentStore();
 // saved chat replays into an identical transcript. Recording is
 // fire-and-forget (a failed append never breaks a live chat).
 const chatRecorder = new ChatRecorder();
-
-// Same reasoning as `agentStore`, for the Enclosure tab: `enclosure://event`
-// mirrors enclosure-maker-app's own live tool-call activity, fed by App-level
-// listeners so it keeps accumulating while that tab isn't mounted yet.
-const enclosureStore = new AgentStore();
 
 // The serial log, App-owned for the same reason `agentStore` is:
 // `serial://line` arrives while the Monitor tab is hidden — from the
@@ -307,19 +316,6 @@ export default function App() {
    *  file would be a surprising thing to do to the user. Expressed through
    *  `showPane` so the pane list stays in exactly one place. */
   const showEditor = () => showPane(null, profileForm);
-  /** True when the editor itself is what the editor area shows. Each of the
-   *  four panes `showPane` opens *replaces* CodeMirror (see the ternary in
-   *  the render), so while one is up `editorRef.current` is null and a
-   *  parked diagnostic jump has to wait for this to flip back — hence its
-   *  place in that effect's deps.
-   *  (`renamingProject` with no `sketchDir` renders the editor regardless,
-   *  but a jump needs a sketchDir to be requested at all, so that corner
-   *  cannot strand one.) */
-  const editorShowing =
-    !creatingProject &&
-    !duplicatingProject &&
-    !renamingProject &&
-    !showingUsage;
   // Live mirror of sketchDir for the App-level agent event listeners, which
   // are registered once (empty-dep effect) and would otherwise close over a
   // stale `null`.
@@ -486,12 +482,30 @@ export default function App() {
     [files],
   );
 
-  // ui — sidebar hierarchy: a Software/Hardware group switcher over per-group
-  // sub-tabs; each group remembers its last-used tab.
+  // ui — sidebar hierarchy: a Software/Hardware/Enclosure group switcher
+  // over per-group sub-tabs; each of Software/Hardware remembers its
+  // last-used tab. Enclosure has none of its own (see `sideTab` below) —
+  // selecting it swaps the whole editor area instead (see `editorShowing`
+  // and the editor-area render).
   const [sideGroup, setSideGroup] = useState<SideGroup>("software");
   const [softwareTab, setSoftwareTab] = useState<SoftwareTab>("files");
   const [hardwareTab, setHardwareTab] = useState<HardwareTab>("fleet");
-  const sideTab = sideGroup === "software" ? softwareTab : hardwareTab;
+  const sideTab =
+    sideGroup === "software" ? softwareTab : sideGroup === "hardware" ? hardwareTab : null;
+  /** True when the editor itself is what the editor area shows. Each of the
+   *  panes `showPane` opens, and the Enclosure division, *replace* CodeMirror
+   *  (see the ternary in the render), so while one is up `editorRef.current`
+   *  is null and a parked diagnostic jump has to wait for this to flip back
+   *  — hence its place in that effect's deps.
+   *  (`renamingProject` with no `sketchDir` renders the editor regardless,
+   *  but a jump needs a sketchDir to be requested at all, so that corner
+   *  cannot strand one.) */
+  const editorShowing =
+    !creatingProject &&
+    !duplicatingProject &&
+    !renamingProject &&
+    !showingUsage &&
+    sideGroup !== "enclosure";
   // Bottom panel: one flat row of seven tabs (no groups, nothing to
   // remember) — order and labels live in `./bottomTabs`.
   const [bottomTab, setBottomTab] = useState<BottomTab>("build");
@@ -523,7 +537,6 @@ export default function App() {
   const [bomVersion, setBomVersion] = useState(0);
   const [diagramMounted, setDiagramMounted] = useState(false);
   const [diagramVersion, setDiagramVersion] = useState(0);
-  const [enclosureMounted, setEnclosureMounted] = useState(false);
   /** A *user* action (Verify, Upload, scope firmware flash) is in flight. */
   const [userBusy, setUserBusy] = useState(false);
   /**
@@ -834,7 +847,58 @@ export default function App() {
     if (tab === "agent") setAgentMounted(true);
     if (tab === "bom") setBomMounted(true);
     if (tab === "diagram") setDiagramMounted(true);
-    if (tab === "enclosure") setEnclosureMounted(true);
+  }, []);
+
+  /** Switch the active division. Call this rather than setSideGroup — if the
+   *  bottom tab currently open belongs to neither this division nor the
+   *  global Assistant tab, it would otherwise stay "active" while hidden
+   *  from the (now filtered) tab row, showing no highlighted button for
+   *  whatever content is still on screen underneath. */
+  const selectSideGroup = useCallback(
+    (group: SideGroup) => {
+      setSideGroup(group);
+      const curDivision = TAB_DIVISION[bottomTabRef.current];
+      if (curDivision !== "global" && curDivision !== group) {
+        openBottomTab(DEFAULT_TAB_FOR_DIVISION[group]);
+      }
+    },
+    [openBottomTab],
+  );
+
+  // The embedded enclosure-maker preview (EnclosurePanel's iframe) runs at
+  // its own http://127.0.0.1:<port> origin, where Tauri's injected
+  // `window.__TAURI__` IPC bridge does not reach — only the top frame gets
+  // it. Its Export STL button falls back to postMessage-ing this (its
+  // parent) frame when `window.__TAURI__` is absent; this is the other half
+  // of that bridge, placed at App level (not EnclosurePanel-local) since the
+  // iframe survives exactly as long as the Enclosure division is active,
+  // same scope this listener needs.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (!/^https?:\/\/(127\.0\.0\.1|localhost):\d+$/.test(event.origin)) return;
+      const data = event.data as
+        | { type?: string; requestId?: unknown; filename?: unknown; contentsB64?: unknown }
+        | undefined;
+      if (data?.type !== "enclosure-maker:save-stl") return;
+      const { requestId, filename, contentsB64 } = data;
+      if (typeof filename !== "string" || typeof contentsB64 !== "string") return;
+      api
+        .saveStlToDownloads(filename, contentsB64)
+        .then((path) => {
+          event.source?.postMessage(
+            { type: "enclosure-maker:save-stl-result", requestId, ok: true, path },
+            { targetOrigin: event.origin },
+          );
+        })
+        .catch((err) => {
+          event.source?.postMessage(
+            { type: "enclosure-maker:save-stl-result", requestId, ok: false, error: String(err) },
+            { targetOrigin: event.origin },
+          );
+        });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
   }, []);
 
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
@@ -1032,20 +1096,6 @@ export default function App() {
         // `agent_stop(pid)` is a no-op unless pid still matches the live
         // session, so a stale close can never kill the new one (F4).
         api.agentStop(p.pid).catch(() => {});
-      }),
-      // Mirrors enclosure-maker-app's own tool-call activity into the
-      // Enclosure tab. Much simpler than the Assistant's agent plumbing
-      // above: bancada never drives this session (no send/interrupt, no
-      // chat recording, no verify/upload side effects — enclosure-maker's
-      // own tools aren't bancada's MCP ones), it only displays what the
-      // mirrored child reports.
-      api.onEnclosureEvent((ev) => {
-        enclosureStore.push(ev);
-        if (bottomTabRef.current !== "enclosure")
-          setUnseen((u) => (u.enclosure ? u : { ...u, enclosure: true }));
-      }),
-      api.onEnclosureClosed((p) => {
-        enclosureStore.closed(p.reason, p.pid);
       }),
     ];
     api
@@ -3255,7 +3305,7 @@ export default function App() {
                   ? "side-group-btn active"
                   : "side-group-btn"
               }
-              onClick={() => setSideGroup("software")}
+              onClick={() => selectSideGroup("software")}
               title="The project: files and libraries"
             >
               ▦ Software
@@ -3266,10 +3316,21 @@ export default function App() {
                   ? "side-group-btn active"
                   : "side-group-btn"
               }
-              onClick={() => setSideGroup("hardware")}
+              onClick={() => selectSideGroup("hardware")}
               title="The bench: board platforms and your device fleet"
             >
               ⚙ Hardware
+            </button>
+            <button
+              className={
+                sideGroup === "enclosure"
+                  ? "side-group-btn active"
+                  : "side-group-btn"
+              }
+              onClick={() => selectSideGroup("enclosure")}
+              title="The case: compose a request and hand it to enclosure-maker's own window"
+            >
+              ⬚ Enclosure
             </button>
             <button
               className="side-collapse-btn"
@@ -3296,7 +3357,7 @@ export default function App() {
                   Libraries
                 </button>
               </>
-            ) : (
+            ) : sideGroup === "hardware" ? (
               <>
                 <button
                   className={sideTab === "fleet" ? "tab active" : "tab"}
@@ -3313,7 +3374,7 @@ export default function App() {
                   Boards
                 </button>
               </>
-            )}
+            ) : null}
           </div>
           {sideTab === "files" && (
             <FileTree
@@ -3432,6 +3493,8 @@ export default function App() {
               onClose={() => setShowingUsage(false)}
               openBottomTab={openBottomTab}
             />
+          ) : sideGroup === "enclosure" ? (
+            <EnclosurePanel sketchDir={sketchDir} notify={notify} />
           ) : (
             <>
           <EditorTabs
@@ -3488,6 +3551,7 @@ export default function App() {
           active={bottomTab}
           unseen={unseen}
           badges={{ build: badgeCount(buildModel.summary) }}
+          division={sideGroup}
           onOpen={openBottomTab}
           maximized={bottomMax}
           onToggleMaximize={() => setBottomMax((m) => !m)}
@@ -3577,16 +3641,6 @@ export default function App() {
             sketchDir={sketchDir}
             bomVersion={bomVersion}
             diagramVersion={diagramVersion}
-            notify={notify}
-          />
-        )}
-        {enclosureMounted && (
-          <EnclosurePanel
-            key={sketchDir ?? ""}
-            active={bottomTab === "enclosure"}
-            sketchDir={sketchDir}
-            store={enclosureStore}
-            openBottomTab={openBottomTab}
             notify={notify}
           />
         )}

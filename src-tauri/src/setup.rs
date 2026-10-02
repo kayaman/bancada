@@ -58,7 +58,14 @@ fn drm_drivers() -> Vec<String> {
 
 /// Turn WebKitGTK's DMA-BUF renderer off on GPUs where it draws garbage.
 ///
-/// Must run before the webview exists, like [`ensure_user_bins_on_path`].
+/// Must run before any webview exists, like [`ensure_user_bins_on_path`] --
+/// including the Enclosure tab's in-process preview window, which renders a
+/// much heavier WebGL scene than bancada's own UI and is where enclosure-maker
+/// originally found the DMA-BUF toggle alone wasn't enough on this same
+/// driver, also disabling compositing and hardware GL. All three are env
+/// vars WebKitGTK reads only at webview creation, so setting them once here
+/// covers every window this process ever opens, main or not.
+///
 /// An explicit setting in the environment — either value — is the user's
 /// and is left alone. Returns the driver that triggered the workaround, so
 /// `run()` can say so once on stderr.
@@ -69,6 +76,8 @@ pub fn ensure_webkit_renderer_works() -> Option<String> {
     let drivers = drm_drivers();
     let bad = setup::webkit_dmabuf_unsafe_driver(drivers.iter().map(String::as_str))?.to_string();
     std::env::set_var(setup::WEBKIT_DMABUF_VAR, "1");
+    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
     Some(bad)
 }
 
