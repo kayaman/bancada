@@ -10,6 +10,11 @@ Bancada ships as three Linux installables, all produced by one build:
 
 There is no hosted download yet — build the bundles from a checkout
 (section 1), then install the one matching your distro (section 2).
+`scripts/build-and-install.sh` (`npm run build:install`) automates both
+steps for the machine you run it on: it detects your distro, builds just
+that one bundle, and installs it with `sudo`. Use `--build-only` to stop
+after building, or `--bundle rpm|deb|appimage` / `BANCADA_BUNDLE=...` to
+override the detected target.
 
 ## 1. Build the installables
 

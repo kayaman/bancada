@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "build:install": "bash scripts/build-and-install.sh",
     "test": "vitest run",
     "test:e2e": "python3 e2e/native_smoke.py",
     "test:coverage": "vitest run --coverage",
