@@ -6,7 +6,14 @@
 // travels with the project in git.
 
 import { useEffect, useRef, useState } from "react";
-import { loadBom, saveBom, sendToEnclosureMaker, type BomEntry, type WiringEntry } from "../api";
+import {
+  enclosureSeedPrompt,
+  loadBom,
+  saveBom,
+  sendToEnclosureMaker,
+  type BomEntry,
+  type WiringEntry,
+} from "../api";
 
 interface Props {
   active: boolean;
@@ -67,9 +74,20 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
   const [rows, setRows] = useState<BomEntry[] | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  /** null = not composing; string = seed prompt draft shown for edit before send. */
+  const [composePrompt, setComposePrompt] = useState<string | null>(null);
+  const [seedingPrompt, setSeedingPrompt] = useState(false);
   const [sendingToEnclosure, setSendingToEnclosure] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const addRowRef = useRef<HTMLButtonElement>(null);
+
+  // Drop the compose draft when the open project changes — the prompt is
+  // project-scoped and a leftover from another sketch would be wrong.
+  useEffect(() => {
+    setComposePrompt(null);
+    setSeedingPrompt(false);
+    setSendingToEnclosure(false);
+  }, [sketchDir]);
 
   // Reload whenever the open project changes or the agent writes bom.yaml.
   useEffect(() => {
@@ -202,19 +220,46 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
     }
   };
 
-  // Software | Hardware | Enclosure: hand this project's BOM + board off to
-  // enclosure-maker. Saves first if there are unsaved edits, so the
-  // handed-off bom.yaml always matches what's on screen.
+  // Software | Hardware | Enclosure: open a compose step with the skill-shaped
+  // seed prompt. Saves first if there are unsaved edits, so the handed-off
+  // bom.yaml (and the seed brief derived from it) match what's on screen.
   const designEnclosure = async () => {
     if (!sketchDir || !rows) return;
-    setSendingToEnclosure(true);
+    setSeedingPrompt(true);
     try {
       if (dirty) {
         await saveBom(sketchDir, { components: rows.map(clean) });
         setDirty(false);
         onSaved();
       }
-      await sendToEnclosureMaker(sketchDir);
+      const prompt = await enclosureSeedPrompt(sketchDir);
+      setComposePrompt(prompt);
+    } catch (err) {
+      notify(String(err), true);
+    } finally {
+      setSeedingPrompt(false);
+    }
+  };
+
+  const regenerateComposePrompt = async () => {
+    if (!sketchDir) return;
+    setSeedingPrompt(true);
+    try {
+      const prompt = await enclosureSeedPrompt(sketchDir);
+      setComposePrompt(prompt);
+    } catch (err) {
+      notify(String(err), true);
+    } finally {
+      setSeedingPrompt(false);
+    }
+  };
+
+  const openEnclosureMaker = async () => {
+    if (!sketchDir || composePrompt === null) return;
+    setSendingToEnclosure(true);
+    try {
+      await sendToEnclosureMaker(sketchDir, composePrompt);
+      setComposePrompt(null);
       notify("Opening enclosure-maker…");
     } catch (err) {
       notify(String(err), true);
@@ -222,6 +267,13 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
       setSendingToEnclosure(false);
     }
   };
+
+  const cancelCompose = () => {
+    setComposePrompt(null);
+  };
+
+  const composing = composePrompt !== null;
+  const enclosureBusy = seedingPrompt || sendingToEnclosure;
 
   // Tab to next cell; Enter on the last cell of a row adds a new row.
   const onCellKeyDown = (
@@ -248,23 +300,23 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
       style={active ? undefined : { display: "none" }}
     >
       <div className="bom-toolbar">
-        {rows !== null && rows.length > 0 && (
+        {rows !== null && rows.length > 0 && !composing && (
           <span className="bom-count">
             {rows.length} line{rows.length === 1 ? "" : "s"} · {totalQty} parts
           </span>
         )}
         <div className="spacer" />
-        {rows !== null && rows.length > 0 && (
+        {rows !== null && rows.length > 0 && !composing && (
           <button
             className="btn small"
-            disabled={sendingToEnclosure || saving || !sketchDir}
+            disabled={enclosureBusy || saving || !sketchDir}
             onClick={() => void designEnclosure()}
-            title="Send this BOM and board to enclosure-maker"
+            title="Preview and edit the enclosure seed prompt, then open enclosure-maker"
           >
-            {sendingToEnclosure ? "Opening…" : "Design Enclosure →"}
+            {seedingPrompt ? "Preparing…" : "Design Enclosure →"}
           </button>
         )}
-        {rows !== null && rows.length >= 0 && (
+        {rows !== null && rows.length >= 0 && !composing && (
           <button
             className={dirty ? "btn small primary" : "btn small"}
             disabled={saving || !dirty || !sketchDir}
@@ -276,11 +328,51 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
         )}
       </div>
 
-      {rows === null && (
+      {composing && (
+        <div className="bom-enclosure-compose">
+          <div className="bom-enclosure-compose-head">
+            <span>Enclosure seed prompt</span>
+            <div className="spacer" />
+            <button
+              className="btn small"
+              disabled={enclosureBusy}
+              onClick={cancelCompose}
+              title="Discard the draft and return to the BOM"
+            >
+              Cancel
+            </button>
+            <button
+              className="btn small"
+              disabled={enclosureBusy || !sketchDir}
+              onClick={() => void regenerateComposePrompt()}
+              title="Rebuild the seed prompt from the current board and BOM"
+            >
+              {seedingPrompt ? "Regenerating…" : "Regenerate"}
+            </button>
+            <button
+              className="btn small primary"
+              disabled={enclosureBusy || !sketchDir || !composePrompt.trim()}
+              onClick={() => void openEnclosureMaker()}
+              title="Send this prompt with the BOM and board to enclosure-maker"
+            >
+              {sendingToEnclosure ? "Opening…" : "Open enclosure-maker →"}
+            </button>
+          </div>
+          <textarea
+            className="bom-enclosure-compose-textarea"
+            value={composePrompt}
+            disabled={enclosureBusy}
+            spellCheck={false}
+            onChange={(e) => setComposePrompt(e.target.value)}
+          />
+        </div>
+      )}
+
+      {!composing && rows === null && (
         <div className="bom-empty">Loading…</div>
       )}
 
-      {rows !== null && rows.length === 0 && !dirty && (
+      {!composing && rows !== null && rows.length === 0 && !dirty && (
         <div className="bom-empty">
           <p>No <code>bom.yaml</code> in this project yet.</p>
           <button className="btn primary" onClick={addRow} disabled={!sketchDir}>
@@ -289,7 +381,7 @@ export default function BomPanel({ active, sketchDir, bomVersion = 0, onSaved, n
         </div>
       )}
 
-      {rows !== null && (rows.length > 0 || dirty) && (
+      {!composing && rows !== null && (rows.length > 0 || dirty) && (
         <div className="bom-scroll">
           <table className="bom-table">
             <colgroup>
