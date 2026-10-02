@@ -2280,6 +2280,8 @@ fn tag_flash(
                 body.push_str(&format!("profile: {profile}\n"));
             }
             if let Some(fqbn) = fqbn {
+                let corrected = bancada_core::usb_cdc::enabled_fqbn(port, fqbn);
+                let fqbn = corrected.as_deref().unwrap_or(fqbn);
                 body.push_str(&format!("fqbn: {fqbn}\n"));
             }
         }

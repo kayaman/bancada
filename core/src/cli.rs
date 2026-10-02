@@ -337,9 +337,33 @@ impl ArduinoCli {
         profile: Option<&str>,
         fqbn: Option<&str>,
         port: &str,
-        on_line: impl FnMut(OutputLine),
+        mut on_line: impl FnMut(OutputLine),
     ) -> Result<RunResult> {
-        let args = upload_args(sketch_dir, profile, fqbn, port);
+        // A profile outranks the explicit FQBN. Repair the actual build
+        // input before compile -u, preserving platform and library pins.
+        let corrected = if let Some(name) = profile {
+            let project = crate::sketch::SketchProject::open(sketch_dir)?;
+            let mut yaml = project.load_yaml()?;
+            let selected = yaml
+                .profiles
+                .get_mut(name)
+                .ok_or_else(|| Error::Other(format!("profile `{name}` not found")))?;
+            let corrected = crate::usb_cdc::enabled_fqbn(port, &selected.fqbn);
+            if let Some(fqbn) = &corrected {
+                selected.fqbn = fqbn.clone();
+                project.save_yaml(&yaml)?;
+            }
+            corrected
+        } else {
+            fqbn.and_then(|fqbn| crate::usb_cdc::enabled_fqbn(port, fqbn))
+        };
+        if let Some(fqbn) = &corrected {
+            on_line(OutputLine {
+                stream: OutputStream::Stdout,
+                line: format!("USB CDC On Boot enabled automatically for {port}: {fqbn}"),
+            });
+        }
+        let args = upload_args(sketch_dir, profile, corrected.as_deref().or(fqbn), port);
         self.run_streaming(&as_str_slice(&args), on_line)
     }
 }

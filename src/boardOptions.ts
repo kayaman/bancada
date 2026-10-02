@@ -155,7 +155,7 @@ export function silentSerialWarning(
 
   const { base, selection } = parseFqbn(fqbn);
   const segments = base.split(":");
-  if (segments.length !== 3) return null;
+  if (segments.length !== 3 || segments[0] !== "esp32" || segments[1] !== "esp32") return null;
   if (!NATIVE_USB_BOARDS.has(segments[2])) return null;
 
   const cdc = selection.CDCOnBoot;
@@ -172,6 +172,20 @@ export function silentSerialWarning(
     `USB port, so the monitor stays empty while the upload itself looks fine. ` +
     `Set USB CDC On Boot to Enabled in the profile's board options.`
   );
+}
+
+/** Mirror the upload correction when recording an ad-hoc build's FQBN.
+ *  Profile builds read the backend's saved FQBN instead. */
+export function usbCdcUploadFqbn(port: string, fqbn: string): string {
+  if (!silentSerialWarning(port, fqbn)) return fqbn;
+  const parts = fqbn.split(":");
+  if (parts.length > 4) return fqbn;
+  const options = parts[3] === undefined ? [] : parts[3].split(",");
+  if (options.some((option) => !option.includes("=") ||
+    (option.startsWith("CDCOnBoot=") && option !== "CDCOnBoot=default"))) return fqbn;
+  const corrected = options.filter((option) => !option.startsWith("CDCOnBoot="));
+  corrected.push("CDCOnBoot=cdc");
+  return `${parts.slice(0, 3).join(":")}:${corrected.join(",")}`;
 }
 
 /**

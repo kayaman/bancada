@@ -5,6 +5,7 @@ import {
   idfSilentSerialWarning,
   parseFqbn,
   silentSerialWarning,
+  usbCdcUploadFqbn,
 } from "../boardOptions";
 import type { ConfigOption } from "../boardOptions";
 
@@ -274,6 +275,26 @@ describe("silentSerialWarning", () => {
 
   it("stays quiet for a network port", () => {
     expect(silentSerialWarning("2804:7f0::1", "esp32:esp32:esp32s3")).toBeNull();
+  });
+});
+
+describe("usbCdcUploadFqbn", () => {
+  it("records USB CDC for a corrected ad-hoc build without losing other options", () => {
+    expect(usbCdcUploadFqbn("/dev/ttyACM0", "esp32:esp32:esp32c6:FlashSize=8M"))
+      .toBe("esp32:esp32:esp32c6:FlashSize=8M,CDCOnBoot=cdc");
+    expect(usbCdcUploadFqbn("/dev/ttyACM0", "esp32:esp32:esp32s3:CDCOnBoot=default,PSRAM=opi"))
+      .toBe("esp32:esp32:esp32s3:PSRAM=opi,CDCOnBoot=cdc");
+  });
+
+  it("keeps bridge, already enabled and non-Espressif builds unchanged", () => {
+    for (const [port, fqbn] of [
+      ["/dev/ttyUSB0", "esp32:esp32:esp32s3"],
+      ["/dev/ttyACM0", "esp32:esp32:esp32c6:CDCOnBoot=cdc"],
+      ["/dev/ttyACM0", "other:esp32:esp32s3"],
+      ["/dev/ttyACM0", "esp32:esp32:esp32s3:FlashSize=16M:PSRAM=opi"],
+      ["/dev/ttyACM0", "esp32:esp32:esp32s3:FlashSize=16M,garbage"],
+      ["/dev/ttyACM0", "esp32:esp32:esp32s3:CDCOnBoot=unknown,CDCOnBoot=default"],
+    ]) expect(usbCdcUploadFqbn(port, fqbn)).toBe(fqbn);
   });
 });
 

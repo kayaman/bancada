@@ -42,6 +42,7 @@ pub mod sketch;
 pub mod targets;
 pub mod types;
 pub mod usage;
+pub mod usb_cdc;
 pub mod vstheme;
 
 use thiserror::Error;
