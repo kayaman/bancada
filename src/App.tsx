@@ -8,8 +8,10 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createSaveQueue, mayLeaveEditor, saveBuffers } from "./editorSave";
 import { matchesAccel, parseAccel } from "./keys";
+import CommandPalette from "./components/CommandPalette";
+import type { Command } from "./commandPalette";
 import { boardOffer } from "./boardOffer";
-import { idfSilentSerialWarning, silentSerialWarning } from "./boardOptions";
+import { idfSilentSerialWarning, usbCdcUploadFqbn } from "./boardOptions";
 import { MAX_RECAPTURE_ATTEMPTS, giveUpMarker, recapturePlan } from "./monitorRecovery";
 import {
   comparableIdentity,
@@ -119,7 +121,7 @@ import EnclosurePanel from "./components/EnclosurePanel";
 import BottomTabBar from "./components/BottomTabBar";
 import ToastStack from "./components/ToastStack";
 import StatusBar from "./components/StatusBar";
-import { type BottomTab, type SideDivision, TAB_DIVISION } from "./bottomTabs";
+import { type BottomTab, type SideDivision, BOTTOM_TABS, TAB_DIVISION, TAB_LABEL } from "./bottomTabs";
 
 /** The app's three big divisions — Software, Hardware, Enclosure — all in
  *  this one window. Reuses `bottomTabs.ts`'s own type so the sidebar
@@ -160,6 +162,8 @@ const clampSidebarWidth = (w: number) =>
 // Global accelerators; the specs are literals, so the parses cannot fail.
 const ACCEL_SAVE = parseAccel("Ctrl+S")!;
 const ACCEL_OPEN = parseAccel("Ctrl+O")!;
+const ACCEL_PALETTE = parseAccel("Ctrl+K")!;
+const ACCEL_PALETTE_ALT = parseAccel("Ctrl+Shift+P")!;
 
 const MAX_CONSOLE_LINES = 5000;
 const TRIM_CONSOLE_LINES = 4000;
@@ -509,6 +513,7 @@ export default function App() {
   // Bottom panel: one flat row of seven tabs (no groups, nothing to
   // remember) — order and labels live in `./bottomTabs`.
   const [bottomTab, setBottomTab] = useState<BottomTab>("build");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // Bottom panel expanded over the whole main area (editor stays mounted).
   const [bottomMax, setBottomMax] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(() => {
@@ -1271,6 +1276,13 @@ export default function App() {
     if (pinned) setSelectedPort(pinned);
   };
 
+  /** Uploads can enable USB CDC in the profile, even if the build fails. */
+  const refreshUploadProfile = async (dir: string) => {
+    const yaml = await api.loadSketchYaml(dir).catch(() => null);
+    if (yaml && sketchDirRef.current === dir) setSketchYaml(yaml);
+    return yaml;
+  };
+
   const openSketch = async () => {
     const dir = await open({ directory: true, title: "Open project folder" });
     if (typeof dir !== "string") return;
@@ -1834,6 +1846,9 @@ export default function App() {
       } else if (matchesAccel(e, ACCEL_OPEN)) {
         e.preventDefault();
         void openSketch();
+      } else if (matchesAccel(e, ACCEL_PALETTE) || matchesAccel(e, ACCEL_PALETTE_ALT)) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
       }
     };
     window.addEventListener("keydown", handler);
@@ -1926,18 +1941,12 @@ export default function App() {
       ? sketchYaml?.profiles?.[target.profile]?.fqbn
       : undefined;
     const detected = detectedIdentity();
-    // Both facts are already known here: which kind of port is selected, and
-    // whether the profile turns USB CDC on. When they disagree the board
-    // flashes perfectly and prints nothing — the failure that is hardest to
-    // read, because nothing about it looks like a configuration problem.
-    // Whichever backend this project builds with, the question is the same:
-    // will the port that is open actually see anything? Only the evidence
-    // differs — an FQBN option for Arduino, `CONFIG_ESP_CONSOLE_*` for
-    // ESP-IDF.
+    // Arduino uploads enable USB CDC automatically before compiling.
+    // ESP-IDF console routing still needs its own configuration warning.
     const silent =
       projectKind === "idf"
         ? idfSilentSerialWarning(selectedPort, idfConsole)
-        : silentSerialWarning(selectedPort, profileFqbn ?? target.fqbn);
+        : null;
     if (flashTargetMismatch(profileFqbn, detected)) {
       notify(
         `⚠ ${selectedPortName()} reports ${detected}, but profile “${target.profile}” builds for ${profileFqbn} — flashing the profile's board anyway…`,
@@ -1961,6 +1970,7 @@ export default function App() {
         target.profile,
         target.fqbn,
       );
+      const uploadedYaml = await refreshUploadProfile(sketchDir);
       ok = r.success;
       notify(
         r.success
@@ -1977,10 +1987,11 @@ export default function App() {
         openBottomTab("serial");
         // The FQBN this board was actually built for, for its fleet record.
         const usedFqbn =
-          target.fqbn ??
-          (target.profile
-            ? sketchYaml?.profiles?.[target.profile]?.fqbn
-            : undefined);
+          target.profile
+            ? uploadedYaml?.profiles?.[target.profile]?.fqbn
+            : target.fqbn
+              ? usbCdcUploadFqbn(selectedPort, target.fqbn)
+              : undefined;
         setTimeout(() => {
           // Re-arms the standing request the flash cleared, so a port
           // that is still re-enumerating is chased rather than missed.
@@ -2007,6 +2018,7 @@ export default function App() {
       }
     } catch (e) {
       notify(String(e), true);
+      await refreshUploadProfile(sketchDir);
     } finally {
       setUserBusy(false);
       endActivity("upload", ok, ok ? "Flashed" : "Flash failed");
@@ -2619,6 +2631,8 @@ export default function App() {
         }
         openBottomTab("build");
       } else {
+        const dir = sketchDirRef.current;
+        if (dir) void refreshUploadProfile(dir);
         endActivity(["agent_upload"], ev.success === true, "Assistant flash");
         // Back to wherever the user actually was — the chat, the serial
         // monitor, whatever — the moment the flash resolves, not to a
@@ -3182,6 +3196,25 @@ export default function App() {
 
   // ---------- render ----------
 
+  const paletteCommands: Command[] = [
+    { id: "save", group: "File", label: "Save", shortcut: "Ctrl+S", run: () => void saveCurrent() },
+    { id: "open", group: "File", label: "Open project…", shortcut: "Ctrl+O", run: () => void openSketch() },
+    { id: "verify", group: "Build", label: "Verify (compile)", disabled: !sketchDir, run: () => void verify() },
+    { id: "upload", group: "Build", label: "Upload to board", disabled: !sketchDir, run: () => void upload() },
+    ...BOTTOM_TABS.map((t): Command => ({
+      id: `tab-${t}`,
+      group: "Go to",
+      label: TAB_LABEL[t],
+      run: () => openBottomTab(t),
+    })),
+    ...(["software", "hardware", "enclosure"] as const).map((g): Command => ({
+      id: `div-${g}`,
+      group: "Switch to",
+      label: `${g.charAt(0).toUpperCase()}${g.slice(1)} view`,
+      run: () => selectSideGroup(g),
+    })),
+  ];
+
   return (
     <div className="app">
       <Toolbar
@@ -3645,6 +3678,13 @@ export default function App() {
           />
         )}
       </section>
+
+      {paletteOpen && (
+        <CommandPalette
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
 
       <ToastStack
         toasts={toasts.toasts}

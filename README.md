@@ -123,6 +123,10 @@ desktop entry and hicolor icon set included. **Installing them (and the
 serial-port/ModemManager setup an end user needs) is documented in
 [docs/INSTALL.md](docs/INSTALL.md).**
 
+To build and install on the machine you're building on in one step, run
+`npm run build:install` (`scripts/build-and-install.sh`) — it detects your
+distro, builds the matching bundle, and installs it with `sudo`.
+
 ## Tests and coverage
 
 ```bash
@@ -205,6 +209,10 @@ scaffolded library, a fetched library and a newly created project actually
   (CodeMirror 6, C++ mode, Ctrl+S to save)
 - Board/port detection with live rescan (`arduino-cli board list`)
 - Build profiles from `sketch.yaml` (default profile pre-selected)
+- Uploads to supported ESP32 native USB ports automatically enable **USB CDC
+  On Boot** before compiling and save `CDCOnBoot=cdc` in the active profile,
+  so `Serial` output reaches the monitor. Other board options and dependency
+  pins are preserved; the Build console reports the adjustment.
 - Verify / Flash with **live streaming build output** (compile falls back to
   nothing-selected errors gracefully; upload requires a port). The **Build**
   console parses that output: **click a compiler error to jump to the file and
