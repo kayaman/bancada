@@ -6,10 +6,15 @@
 //! `.claude/settings.json` tries to disable hooks entirely (deny rules are
 //! evaluated before hooks and are unaffected by that setting).
 //!
-//! This is a narrower adaptation than bancada's: no MCP tools, no ESP-IDF
-//! docs server. The core confinement primitive -- "is this write path
-//! inside the project root, outside any refused subtree" -- is the same
-//! idea, reimplemented here for this project.
+//! There are MCP tools now (FreeCAD's own server -- see
+//! `../../docs/freecad-trust-model.md`), but this file doesn't govern them:
+//! it only adjudicates `Write`/`Edit`/`MultiEdit`/`NotebookEdit`, none of
+//! which are offered to the embedded session anymore (there's no script
+//! file to write), so what's below runs as free defense-in-depth rather
+//! than the session's main containment. The core confinement primitive --
+//! "is this write path inside the project root, outside any refused
+//! subtree" -- is the same idea bancada's own `core/src/agent.rs` uses,
+//! reimplemented here for this project.
 
 use serde_json::Value;
 use std::ffi::OsString;

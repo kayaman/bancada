@@ -1,8 +1,0 @@
-[package]
-name = "em-primitives"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-em-core = { workspace = true }
-em-csg = { workspace = true }

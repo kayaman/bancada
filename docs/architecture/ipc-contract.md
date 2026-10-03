@@ -40,19 +40,19 @@ Grouped by domain; the order within each group follows `generate_handler!`.
 ### Embedded enclosure preview
 
 `preview_enclosure_prompt` returns the board/BOM draft for `sketchDir`.
-`has_enclosure_project` checks for its `main.rhai`; `resume_enclosure_preview`
+`has_enclosure_project` checks for its `model.FCStd` (a FreeCAD document,
+replacing the old `main.rhai` script entry point); `resume_enclosure_preview`
 opens an existing design without a new request. `open_enclosure_preview`
 accepts `sketchDir` and the reviewed `prompt`. Both preview commands return a
 loopback URL for the Enclosure iframe; no external app is spawned.
 
-The iframe's parameter, mesh, part-transform and chat messages use the preview
-server's WebSocket. Desktop STL downloads use the parent window instead:
-the iframe sends `{ type: "enclosure-maker:save-stl", requestId, filename,
-contentsB64 }` via `postMessage`, and `App.tsx` calls `save_stl_to_downloads`
-with `filename` and `contentsB64`. The parent replies with
-`{ type: "enclosure-maker:save-stl-result", requestId, ok, path }` on success
-or `error` on failure. Only loopback origins are accepted by the parent;
-the Rust save command validates filenames before writing to Downloads.
+The embedded chat session drives FreeCAD itself through FreeCAD's own MCP
+server — the iframe now carries a chat-only page, with no mesh, parameter, or
+part-transform protocol: the WebSocket only ever exchanges chat messages and
+chat-history requests. There is no desktop STL download bridge anymore either
+(`enclosure-maker:save-stl` and `save_stl_to_downloads` are gone): the agent's
+own FreeCAD Python writes STL/3MF straight to whatever filesystem path it's
+asked for (e.g. Downloads), with no Tauri round-trip needed.
 
 ### Environment and toolchain — 6
 `cli_version` · `list_boards` · `sketchbook_dir` · `default_project_parent` ·

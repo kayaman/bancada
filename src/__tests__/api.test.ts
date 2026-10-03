@@ -52,14 +52,6 @@ describe("embedded enclosure commands", () => {
       { sketchDir: "/s", prompt: "Make a case" },
     ]);
   });
-
-  it("passes the STL filename and base64 contents to the desktop save bridge", async () => {
-    await api.saveStlToDownloads("base.stl", "c3Rs");
-    expect(called()).toEqual([
-      "save_stl_to_downloads",
-      { filename: "base.stl", contentsB64: "c3Rs" },
-    ]);
-  });
 });
 
 describe("sketch and file commands", () => {

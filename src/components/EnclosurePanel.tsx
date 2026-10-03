@@ -1,15 +1,19 @@
 // Enclosure panel — one of the app's three big divisions (Software,
 // Hardware, Enclosure — see the sidebar switcher in App.tsx): compose the
-// seed prompt for enclosure-maker's own AI assistant, then embed its live
-// preview (3D render, code pane, chat) right here, in this pane, in this
-// same window — not a second native window. enclosure-maker is merged into
-// this workspace (see enclosure-maker/README.md); its preview server has no
-// Tauri dependency of its own, so the embedded iframe talks to it purely
-// over its own WebSocket, same as it would in a window of its own.
+// seed prompt for enclosure-maker's own AI assistant, then embed its chat
+// right here, in this pane, in this same window — not a second native
+// window. enclosure-maker is merged into this workspace (see
+// enclosure-maker/README.md); its chat server has no Tauri dependency of
+// its own, so the embedded iframe talks to it purely over its own
+// WebSocket, same as it would in a window of its own.
+//
+// The chat session drives FreeCAD directly through FreeCAD's own MCP
+// server — FreeCAD's own GUI window holds the live model, not this pane.
+// There is no embedded 3D canvas here; this iframe is chat only.
 //
 // Two phases: "compose" (nothing sent yet — draft prompt, editable, Send
 // button) and "viewer" (an enclosure project already exists for this
-// sketch — the embedded preview, with a way back to compose to revise and
+// sketch — the embedded chat, with a way back to compose to revise and
 // resend). Rendered in the editor area only while the Enclosure division is
 // active (App.tsx's showPane-style ternary) — not always-mounted like the
 // bottom panels, since there's no App-level state to preserve across visits
@@ -114,7 +118,10 @@ export default function EnclosurePanel({ sketchDir, notify }: Props) {
     return (
       <section className="enclosure-panel enclosure-panel-viewer">
         <div className="bom-toolbar">
-          <span className="bom-count">Enclosure — live preview</span>
+          <span className="bom-count">
+            Enclosure — chat with the assistant; the model itself opens and
+            updates in FreeCAD's own window
+          </span>
           <div className="spacer" />
           <button className="btn small" onClick={editPrompt} title="Revise the prompt and send again">
             ← Edit prompt
@@ -124,7 +131,7 @@ export default function EnclosurePanel({ sketchDir, notify }: Props) {
           key={viewerUrl}
           className="enclosure-viewer"
           src={viewerUrl}
-          title="Enclosure preview"
+          title="Enclosure assistant chat"
         />
       </section>
     );
@@ -149,7 +156,7 @@ export default function EnclosurePanel({ sketchDir, notify }: Props) {
           className="btn small primary"
           disabled={sending || loadingDraft || !sketchDir || !draft.trim()}
           onClick={() => void send()}
-          title="Open the live enclosure-maker preview with this prompt"
+          title="Start the enclosure-maker chat session with this prompt"
         >
           {sending ? "Opening…" : "Send to Enclosure-maker →"}
         </button>

@@ -1,5 +1,14 @@
 # Enclosure-maker comparison — 2026-10-02
 
+**Superseded.** This is a dated snapshot of the hand-rolled Rust CSG/Rhai
+engine (em-core, em-csg, em-primitives, em-hardware, em-export, em-script)
+and its live-preview iframe (model controls, parameter sliders, the
+iframe/postMessage STL export bridge), all since deleted. That engine was
+replaced by driving FreeCAD directly through FreeCAD's own MCP server — see
+`enclosure-maker/README.md` and `enclosure-maker/docs/freecad-trust-model.md`
+for the current architecture. Left below as a historical record of that
+sync event, not as current fact.
+
 Compared Bancada's integrated copy with the sibling `enclosure-maker` checkout
 at `04dfd8b`, including its uncommitted model-controls and printing-guidance
 changes. Fetched `origin`: its main branch had no commits missing from that

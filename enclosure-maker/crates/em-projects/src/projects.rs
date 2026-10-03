@@ -1,19 +1,18 @@
 //! Project CRUD: a "project" is a directory directly under the projects
-//! root containing a `main.rhai` entry-point script (that file's presence
-//! is what distinguishes an enclosure-maker project from the many other,
-//! unrelated project folders that also live under `~/Projects`).
+//! root containing a `model.FCStd` entry-point document (that file's
+//! presence is what distinguishes an enclosure-maker project from the many
+//! other, unrelated project folders that also live under `~/Projects`).
 
 use std::path::{Path, PathBuf};
 
-pub const ENTRY_FILE: &str = "main.rhai";
+pub const ENTRY_FILE: &str = "model.FCStd";
 
-const STARTER_TEMPLATE: &str = r#"// New enclosure-maker project.
-let width = param("Width", 60.0, 20.0, 200.0);
-let depth = param("Depth", 40.0, 20.0, 200.0);
-let height = param("Height", 20.0, 10.0, 100.0);
-
-emit(cuboid(width, depth, height));
-"#;
+/// A minimal, blank FreeCAD document, embedded at compile time and copied
+/// to `<dir>/model.FCStd` for every new project. Generated once via
+/// FreeCAD's own `freecadcmd` (`FreeCAD.newDocument(...).saveAs(...)`), not
+/// hand-built, so it's a real, valid `.FCStd` zip container rather than a
+/// guess at FreeCAD's internal XML schema.
+const STARTER_TEMPLATE: &[u8] = include_bytes!("../../../assets/starter.FCStd");
 
 #[derive(Clone, serde::Serialize)]
 pub struct ProjectInfo {
@@ -98,9 +97,8 @@ pub fn list_projects(root: &Path) -> Vec<ProjectInfo> {
     projects
 }
 
-/// Creates `dir/main.rhai` from the starter template (plus an empty `lib/`
-/// for shared imports, matching the `examples/lib/` pattern). Refuses only
-/// if `dir` already has a `main.rhai` -- `dir` itself may already exist and
+/// Creates `dir/model.FCStd` from the starter template. Refuses only if
+/// `dir` already has a `model.FCStd` -- `dir` itself may already exist and
 /// hold unrelated files, since the bancada-import path uses this directly
 /// against a bancada project's own (already populated) directory, not the
 /// launcher's `projects_root()`.
@@ -109,7 +107,7 @@ pub(crate) fn create_project_at(dir: &Path) -> Result<PathBuf, String> {
     if main.is_file() {
         return Err(format!("{} already exists", main.display()));
     }
-    std::fs::create_dir_all(dir.join("lib")).map_err(|e| format!("could not create the project folder: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create the project folder: {e}"))?;
     std::fs::write(&main, STARTER_TEMPLATE).map_err(|e| format!("could not write {ENTRY_FILE}: {e}"))?;
     Ok(main)
 }
@@ -167,9 +165,9 @@ mod tests {
     fn create_then_list_finds_the_new_project() {
         let root = tempdir();
         let main = create_project(&root, "My Enclosure").unwrap();
-        assert!(main.ends_with("My Enclosure/main.rhai"));
-        assert!(main.exists());
-        assert!(root.join("My Enclosure/lib").is_dir());
+        assert!(main.ends_with("My Enclosure/model.FCStd"));
+        assert!(main.is_file());
+        assert!(std::fs::metadata(&main).unwrap().len() > 0);
 
         let projects = list_projects(&root);
         assert_eq!(projects.len(), 1);
@@ -195,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn list_ignores_folders_without_main_rhai() {
+    fn list_ignores_folders_without_model_fcstd() {
         let root = tempdir();
         create_project(&root, "real-project").unwrap();
         std::fs::create_dir_all(root.join("unrelated-project")).unwrap();
@@ -234,12 +232,12 @@ mod tests {
     fn rename_moves_the_folder_and_keeps_contents() {
         let root = tempdir();
         create_project(&root, "old-name").unwrap();
-        std::fs::write(root.join("old-name/lib/helper.rhai"), "fn f() { 1 }").unwrap();
+        std::fs::write(root.join("old-name/notes.txt"), "some project note").unwrap();
 
         let new_main = rename_project(&root, "old-name", "new-name").unwrap();
         assert!(!root.join("old-name").exists());
         assert!(new_main.exists());
-        assert!(root.join("new-name/lib/helper.rhai").exists());
+        assert!(root.join("new-name/notes.txt").exists());
     }
 
     #[test]

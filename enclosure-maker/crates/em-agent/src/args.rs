@@ -6,9 +6,13 @@ pub struct AgentCfg {
     /// on Linux, and the hook's command line has no business appearing
     /// there in full.
     pub settings_path: String,
+    /// Path to a JSON file holding the `--mcp-config` payload: exactly one
+    /// server, FreeCAD's own MCP server (see [`crate::build_mcp_config_json`]).
+    /// Also a *path*, for the same `/proc/<pid>/cmdline` reason as
+    /// `settings_path`.
+    pub mcp_config_path: String,
     /// Extra context appended to the system prompt: project directory,
-    /// pointers at README.md, and the instruction to keep edits to `.rhai`
-    /// files.
+    /// pointers at how to drive FreeCAD, and the fastener dimension table.
     pub system_prompt_extra: String,
     /// `claude`'s own session id to resume via native `--resume`, when
     /// continuing a past chat whose transcript the CLI still has on disk.
@@ -18,11 +22,23 @@ pub struct AgentCfg {
 
 /// The tools offered to the embedded session. No `Bash`/`Task` (no shelling
 /// out, no subagents), no `WebFetch`/`WebSearch` (keeps the safety story
-/// simple for v1 -- the whole scripting API is documented in the project's
-/// own README.md, which `Read` already reaches), no `NotebookEdit` (not
-/// meaningful for a `.rhai` project, and leaving it out of `--tools` avoids
-/// giving `guarded_tool_path`'s `notebook_path` spelling any surface here).
-pub const TOOLS: &str = "Read,Edit,Write,Glob,Grep";
+/// simple -- FreeCAD's own Python is the model's capability surface), no
+/// `Write`/`Edit`/`NotebookEdit` (there is no more script file to write --
+/// geometry changes happen through the FreeCAD MCP tools below, and FreeCAD's
+/// own `execute_code` makes a Bancada-side file-write tool redundant anyway).
+///
+/// The `mcp__freecad__*` entries are FreeCAD's own MCP server tools, made
+/// reachable only because [`agent_args`] also passes `--mcp-config` pointing
+/// at a generated file naming exactly that one server (see
+/// [`crate::build_mcp_config_json`]) -- `run_fem_analysis` is deliberately
+/// left out, since FEM analysis isn't part of designing an enclosure.
+pub const TOOLS: &str = "Read,Glob,Grep,\
+mcp__freecad__create_document,mcp__freecad__create_object,mcp__freecad__edit_object,\
+mcp__freecad__delete_object,mcp__freecad__get_object,mcp__freecad__get_objects,\
+mcp__freecad__list_documents,mcp__freecad__reload_document,mcp__freecad__execute_code,\
+mcp__freecad__execute_code_async,mcp__freecad__get_async_status,mcp__freecad__execute_code_headless,\
+mcp__freecad__get_view,mcp__freecad__get_rpc_status,mcp__freecad__get_parts_list,\
+mcp__freecad__insert_part_from_library";
 
 /// Builds the `claude` argv (everything after the binary name) for an
 /// embedded headless session.
@@ -42,10 +58,12 @@ pub const TOOLS: &str = "Read,Edit,Write,Glob,Grep";
 /// included, none of them in `TOOLS` above) -- probe-verified to balloon the
 /// very first turn's prompt from ~1.7k to ~93k cache-creation tokens on a
 /// machine with a typical plugin set, and to leak tool access the embedded
-/// assistant was never meant to have. `--settings` and `--resume` keep
-/// working with both flags set (also probe-verified); only the *ambient*
-/// user/project/local settings, plugins, and foreign MCP servers are
-/// dropped.
+/// assistant was never meant to have. `--settings`, `--mcp-config` and
+/// `--resume` keep working with both flags set (also probe-verified); only
+/// the *ambient* user/project/local settings, plugins, and foreign MCP
+/// servers are dropped. `--mcp-config cfg.mcp_config_path` is what makes
+/// `--strict-mcp-config` admit exactly one server -- FreeCAD's own (see
+/// [`crate::build_mcp_config_json`]) -- rather than none at all.
 ///
 /// When [`AgentCfg::resume_session_id`] is `Some`, `--resume <id>` is
 /// appended as the *final* pair, after `--append-system-prompt`'s value --
@@ -65,6 +83,8 @@ pub fn agent_args(cfg: &AgentCfg) -> Vec<String> {
         "acceptEdits".to_string(),
         "--restricted".to_string(),
         "--strict-mcp-config".to_string(),
+        "--mcp-config".to_string(),
+        cfg.mcp_config_path.clone(),
         "--tools".to_string(),
         TOOLS.to_string(),
         "--allowedTools".to_string(),
@@ -90,17 +110,20 @@ mod tests {
     fn cfg(settings_path: &str, system_prompt_extra: &str) -> AgentCfg {
         AgentCfg {
             settings_path: settings_path.to_string(),
+            mcp_config_path: "/tmp/mcp.json".to_string(),
             system_prompt_extra: system_prompt_extra.to_string(),
             resume_session_id: None,
         }
     }
 
     #[test]
-    fn argv_has_no_shell_or_bash_task_tools() {
+    fn argv_has_no_shell_bash_task_or_file_write_tools() {
         let args = agent_args(&cfg("/tmp/x.json", "ctx"));
         let joined = args.join(" ");
-        assert!(joined.contains("--tools Read,Edit,Write,Glob,Grep"));
-        assert!(!joined.contains("Bash,Task,NotebookEdit,KillShell,BashOutput,WebFetch,WebSearch,Read"));
+        assert!(joined.contains("--tools Read,Glob,Grep,"));
+        assert!(joined.contains("mcp__freecad__execute_code"));
+        assert!(!joined.contains("Write"));
+        assert!(!joined.contains(",Edit,"));
         let disallowed_idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert!(args[disallowed_idx + 1].contains("Bash"));
         assert!(args[disallowed_idx + 1].contains("Task"));
@@ -112,10 +135,20 @@ mod tests {
         // own plugins, skills, and connected MCP servers (Slack/Gmail/Drive
         // included) -- probe-verified to balloon the first turn from ~1.7k
         // to ~93k cache-creation tokens and to leak tool access well beyond
-        // `TOOLS`. `--settings` and `--resume` still work with both set.
+        // `TOOLS`. `--settings`, `--mcp-config` and `--resume` still work
+        // with both set.
         let args = agent_args(&cfg("/tmp/x.json", "ctx"));
         assert!(args.iter().any(|a| a == "--restricted"));
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn mcp_config_path_is_passed_through_as_a_flag_value() {
+        let mut c = cfg("/tmp/x.json", "ctx");
+        c.mcp_config_path = "/tmp/secret-mcp.json".to_string();
+        let args = agent_args(&c);
+        let idx = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert_eq!(args[idx + 1], "/tmp/secret-mcp.json");
     }
 
     #[test]

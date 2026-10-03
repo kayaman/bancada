@@ -24,6 +24,7 @@ pub struct AgentSession {
     claude_stdin: Option<ChildStdin>,
     command_task: Option<JoinHandle<()>>,
     settings_path: Option<PathBuf>,
+    mcp_config_path: Option<PathBuf>,
 }
 
 impl AgentSession {
@@ -49,6 +50,7 @@ impl AgentSession {
             claude_stdin: None,
             command_task: None,
             settings_path: None,
+            mcp_config_path: None,
         };
 
         if provider == AgentProvider::Claude {
@@ -87,8 +89,19 @@ impl AgentSession {
         em_agent::write_private_file(&settings_path, &settings_json)
             .context("could not write the agent's settings file")?;
 
+        let mcp_config_json = em_agent::build_mcp_config_json();
+        let mcp_config_path = temp_dir.join(format!(
+            "enclosure-maker-agent-mcp-{}.json",
+            random_token()
+        ));
+        if let Err(error) = em_agent::write_private_file(&mcp_config_path, &mcp_config_json) {
+            let _ = std::fs::remove_file(&settings_path);
+            return Err(error).context("could not write the agent's MCP config file");
+        }
+
         let cfg = AgentCfg {
             settings_path: settings_path.to_string_lossy().into_owned(),
+            mcp_config_path: mcp_config_path.to_string_lossy().into_owned(),
             system_prompt_extra: self.system_prompt.clone(),
             resume_session_id,
         };
@@ -102,6 +115,7 @@ impl AgentSession {
             .spawn()
             .with_context(|| {
                 let _ = std::fs::remove_file(&settings_path);
+                let _ = std::fs::remove_file(&mcp_config_path);
                 "could not spawn the `claude` CLI -- is it installed and on PATH?"
             })?;
 
@@ -117,6 +131,7 @@ impl AgentSession {
         relay_stderr(child.stderr.take(), AgentProvider::Claude);
         self.claude_child = Some(child);
         self.settings_path = Some(settings_path);
+        self.mcp_config_path = Some(mcp_config_path);
         Ok(())
     }
 
@@ -199,29 +214,76 @@ impl AgentSession {
 }
 
 fn design_assistant_prompt(project_dir: &str) -> String {
-    const API_REFERENCE: &str = include_str!("../../../README.md");
     const PRINTING_GUIDANCE: &str = include_str!("../../../docs/printing-guidance.md");
+    const HARDWARE_TABLE: &str = "\
+Fastener dimensions (mm), M2 / M3 / M4:
+| | M2 | M3 | M4 |
+|---|---|---|---|
+| Insert OD (bore) | 3.2 | 4.1 | 5.1 |
+| Insert length | 3.5 | 5.7 | 6.8 |
+| Bore depth (length + 1.0 relief) | 4.5 | 6.7 | 7.8 |
+| Nut across-flats | 4.0 | 5.5 | 7.0 |
+| Nut height | 1.6 | 2.4 | 3.2 |
+| Screw clearance hole | 2.4 | 3.4 | 4.5 |
+
+A heat-set insert needs a blind straight bore (square mouth) at the bore \
+depth above. A screw boss is a cylinder (outer diameter = insert OD + \
+2 x wall) with 2-4 triangular gussets, structural only — cut the insert \
+bore into its top as a separate boolean. A hex nut trap is a hex prism \
+sized from the across-flats dimension (circumradius = across-flats / \
+sqrt(3)), depth = nut height + clearance. A PCB standoff is a hollow \
+cylinder with a through screw-clearance bore. None of these need a special \
+library: build them with ordinary Part.makeCylinder/Part.makeBox/etc. plus \
+boolean cut/fuse inside execute_code.";
+
     format!(
-        "You are helping edit a parametric CAD project at {project_dir}, built on \
-         enclosure-maker (a Rust CSG engine driven by .rhai scripts). Only edit .rhai files \
-         unless the user clearly asks for something else. Never modify .git, .claude, \
-         .codex, .github, or .enclosure-maker. Read, Grep, and Glob only see this project \
-         directory; a path outside it is refused. `.enclosure-maker` inside the project is \
-         chat and transform metadata, not the engine, and it does not contain `screw_boss` \
-         or the other hardware functions. Their signatures and fixed dimensions are in the \
-         scripting API reference below. The user has a live 3D preview open in their \
-         browser that automatically re-renders whenever a .rhai file changes; do not explain \
-         how to view changes because they appear automatically. Expose dimensions such as \
-         boss heights, wall thicknesses, hole diameters, and clearances with param(...) so \
-         the user can adjust them using numeric controls. Preserve named emit parts when \
-         possible: manual part transforms are saved in .enclosure-maker/<script filename>.transforms.json \
-         and applied after evaluation and during export. Read those offsets when positioning \
-         parts, but never modify that metadata or duplicate its transforms in the script. \
-         Keep the user posted while \
-         you work: before each tool call, write one short sentence saying what you are about \
-         to do and why, and after a result changes the plan, say what you found. Do not go \
-         silent between steps.\n\n{PRINTING_GUIDANCE}\n\nFull scripting API reference:\n\n\
-         {API_REFERENCE}"
+        "You are helping design a 3D-printable enclosure for the project at \
+         {project_dir}, by driving FreeCAD through its MCP server — there is no \
+         script file to edit; the FreeCAD document is the model. Available tools: \
+         mcp__freecad__create_document, mcp__freecad__create_object, \
+         mcp__freecad__edit_object, mcp__freecad__delete_object, \
+         mcp__freecad__get_object, mcp__freecad__get_objects, \
+         mcp__freecad__list_documents, mcp__freecad__reload_document, \
+         mcp__freecad__execute_code, mcp__freecad__execute_code_async, \
+         mcp__freecad__get_async_status, mcp__freecad__execute_code_headless, \
+         mcp__freecad__get_view, mcp__freecad__get_rpc_status, \
+         mcp__freecad__get_parts_list, mcp__freecad__insert_part_from_library. \
+         create_object only covers a handful of built-in types (Part::Box, \
+         Part::Cylinder, Part::Cut, PartDesign::Body, a few Draft:: factories) — \
+         execute_code is how most real geometry actually gets built: it gives full \
+         FreeCAD Python (Part, Mesh, Draft, Sketcher, ...), which is what fillets, \
+         shells, lofts, and the fastener shapes below require.\n\n\
+         First move in every session: call get_rpc_status and list_documents to see \
+         what's already live. If get_rpc_status fails, FreeCAD or freecad-mcp isn't \
+         running — say that plainly rather than guessing or retrying blindly. The \
+         project's document is `{project_dir}/model.FCStd`; if it isn't already the \
+         open document, open it (FreeCAD.openDocument in Python) rather than starting \
+         a new one. Save back to that same path after meaningful changes — \
+         doc.save(), or doc.saveAs(path) only if it's genuinely a fresh document.\n\n\
+         To export, use FreeCAD's own Mesh.export(...) / Import.export(...) via \
+         execute_code, writing directly to a path. When the user doesn't name one, a \
+         reasonable default is their Downloads folder — compute it yourself in Python \
+         with os.path.expanduser(\"~/Downloads\") rather than guessing a fixed path.\n\n\
+         Never modify .git, .claude, .codex, .github, or .enclosure-maker — that \
+         directory holds this session's own chat history, not part of the model, and \
+         you should never write to it directly. Read, Grep, and Glob only see this \
+         project directory; a path outside it is refused.\n\n\
+         Keep the user posted while you work: before each tool call, write one short \
+         sentence saying what you are about to do and why, and after a result changes \
+         the plan, say what you found. Do not go silent between steps.\n\n\
+         {HARDWARE_TABLE}\n\n\
+         The printing guidance below predates this FreeCAD-based engine and still \
+         describes real printability concerns (material/profile defaults, wall \
+         thickness, overhang limits, bridge spans, hole-compensation discipline) even \
+         though it was written for the old Rhai scripting engine. Translate its \
+         engine-specific language: 'the Rhai project' / 'named emit parts' means \
+         FreeCAD's named Part objects in the document tree; 'param(...)' describes \
+         exposing a dimension as adjustable, which here just means using a named \
+         variable in your Python and being ready to change it when asked, not a UI \
+         slider; '.enclosure-maker metadata' / saved part transforms do not exist in \
+         this engine — part placement lives directly in the FreeCAD document instead, \
+         so there is nothing to read or preserve there. Apply its printing judgment, \
+         not its API calls:\n\n{PRINTING_GUIDANCE}"
     )
 }
 
@@ -358,6 +420,9 @@ impl Drop for AgentSession {
         if let Some(path) = self.settings_path.as_ref() {
             let _ = std::fs::remove_file(path);
         }
+        if let Some(path) = self.mcp_config_path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -378,11 +443,16 @@ mod tests {
     fn prompt_answers_hardware_sizes_without_leaving_the_project() {
         let prompt = design_assistant_prompt("/tmp/proj");
         assert!(prompt.contains("Read, Grep, and Glob only see this project directory"));
-        assert!(prompt.contains("not the engine"));
-        assert!(prompt.contains("| M3 | 4.1 | 5.7 | 6.7 | 5.5 | 2.4 | 3.4 |"));
-        assert!(prompt.contains("outer diameter is insert OD + 2 × `wall`"));
-        assert!(prompt.contains("A successful preview is not an"));
-        assert!(prompt.contains("do not add hole_comp again"));
+        assert!(prompt.contains("mcp__freecad__execute_code"));
+        assert!(prompt.contains("mcp__freecad__create_object"));
+        assert!(prompt.contains("get_rpc_status"));
+        assert!(prompt.contains("/tmp/proj/model.FCStd"));
+        // The M3 column of the transposed fastener table: insert OD, insert
+        // length, bore depth, nut across-flats, nut height, screw clearance.
+        for m3_value in ["4.1", "5.7", "6.7", "5.5", "2.4", "3.4"] {
+            assert!(prompt.contains(m3_value), "missing M3 dimension {m3_value}");
+        }
+        assert!(prompt.contains("os.path.expanduser(\"~/Downloads\")"));
     }
 
     #[test]

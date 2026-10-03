@@ -115,13 +115,13 @@ fn project_dir_for(root: &std::path::Path, name: &str, import: &BancadaImport) -
 }
 
 /// Creates a fresh project from `import`, or reuses one from a prior import
-/// under the same name, leaving `main.rhai` untouched either way once it
+/// under the same name, leaving `model.FCStd` untouched either way once it
 /// exists -- re-sending from bancada must not clobber work already done on
 /// the enclosure. Refuses a name collision with an unrelated, non-imported
 /// project rather than overwriting it silently. Returns the project's
-/// `main.rhai` path and the seed chat message to open it with.
+/// `model.FCStd` path and the seed chat message to open it with.
 ///
-/// Branches on `provenance`/`main.rhai`, not on whether `dir` itself
+/// Branches on `provenance`/`model.FCStd`, not on whether `dir` itself
 /// exists: `dir` is routinely a bancada project's own directory, already
 /// populated with its sketch, `.bancada/`, `bom.yaml` and so on well before
 /// the first import ever runs, so "the directory exists" can't be the
@@ -316,7 +316,7 @@ mod tests {
 
         let (main_path, seed) = create_or_reuse_project(&root, &import).unwrap();
 
-        assert!(main_path.ends_with("soil-sensor/main.rhai"));
+        assert!(main_path.ends_with("soil-sensor/model.FCStd"));
         assert!(main_path.is_file());
         assert!(root.join("soil-sensor/.enclosure-maker/import.json").is_file());
         assert!(seed.contains("ESP32-C6-DevKitC-1"));
@@ -343,18 +343,18 @@ mod tests {
     }
 
     #[test]
-    fn re_importing_refreshes_provenance_but_leaves_main_rhai_alone() {
+    fn re_importing_refreshes_provenance_but_leaves_model_fcstd_alone() {
         let root = tempdir("reimport");
         let import = fixture_named("soil-sensor");
         let (main_path, _) = create_or_reuse_project(&root, &import).unwrap();
 
-        // Simulate the assistant (or the user) having customized the script.
-        std::fs::write(&main_path, "// customized by hand\nemit(cuboid(1.0, 1.0, 1.0));\n").unwrap();
+        // Simulate the assistant (or the user) having customized the model.
+        std::fs::write(&main_path, b"customized by hand, not a real FCStd").unwrap();
 
         let (main_path_2, _) = create_or_reuse_project(&root, &import).unwrap();
         assert_eq!(main_path, main_path_2);
-        let contents = std::fs::read_to_string(&main_path).unwrap();
-        assert!(contents.contains("customized by hand"), "re-import must not overwrite main.rhai");
+        let contents = std::fs::read(&main_path).unwrap();
+        assert_eq!(contents, b"customized by hand, not a real FCStd", "re-import must not overwrite model.FCStd");
     }
 
     #[test]
@@ -392,42 +392,41 @@ mod tests {
 
         let (main_path, _) = create_or_reuse_project(&root, &import).unwrap();
 
-        assert_eq!(main_path, source.join("main.rhai"));
+        assert_eq!(main_path, source.join("model.FCStd"));
         assert!(source.join(".enclosure-maker/import.json").is_file());
-        assert!(source.join("lib").is_dir());
         assert!(source.join("sketch.ino").is_file(), "the bancada project's own files must be untouched");
         assert!(!root.join(&import.project_name).exists(), "must not also create a same-named project under root");
     }
 
     #[test]
-    fn re_importing_into_a_bancada_project_directory_leaves_main_rhai_alone() {
+    fn re_importing_into_a_bancada_project_directory_leaves_model_fcstd_alone() {
         let root = tempdir("nest-reimport-root");
         let source = tempdir("nest-reimport-source");
         let import = fixture_with_source_dir(&source);
         let (main_path, _) = create_or_reuse_project(&root, &import).unwrap();
 
-        std::fs::write(&main_path, "// customized by hand\nemit(cuboid(1.0, 1.0, 1.0));\n").unwrap();
+        std::fs::write(&main_path, b"customized by hand, not a real FCStd").unwrap();
 
         let (main_path_2, _) = create_or_reuse_project(&root, &import).unwrap();
         assert_eq!(main_path, main_path_2);
-        let contents = std::fs::read_to_string(&main_path).unwrap();
-        assert!(contents.contains("customized by hand"), "re-import must not overwrite main.rhai");
+        let contents = std::fs::read(&main_path).unwrap();
+        assert_eq!(contents, b"customized by hand, not a real FCStd", "re-import must not overwrite model.FCStd");
     }
 
     /// A narrower collision than before: it's no longer "the bancada
     /// project directory already exists" (normal -- it's bancada's own
-    /// sketch folder), but "it already has a `main.rhai` that isn't ours".
+    /// sketch folder), but "it already has a `model.FCStd` that isn't ours".
     #[test]
-    fn refuses_a_bancada_directory_with_an_unrelated_main_rhai() {
+    fn refuses_a_bancada_directory_with_an_unrelated_model_fcstd() {
         let root = tempdir("nest-collision-root");
         let source = tempdir("nest-collision-source");
-        std::fs::write(source.join("main.rhai"), "// not from us\n").unwrap();
+        std::fs::write(source.join("model.FCStd"), b"not from us").unwrap();
         let import = fixture_with_source_dir(&source);
 
         let result = create_or_reuse_project(&root, &import);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("wasn't created from a bancada import"));
-        assert_eq!(std::fs::read_to_string(source.join("main.rhai")).unwrap(), "// not from us\n");
+        assert_eq!(std::fs::read(source.join("model.FCStd")).unwrap(), b"not from us");
     }
 
     /// `source_dir` pointing at a path that doesn't exist (a stale or
@@ -440,6 +439,6 @@ mod tests {
         import.source_dir = "/does/not/exist/soil-sensor".to_string();
 
         let (main_path, _) = create_or_reuse_project(&root, &import).unwrap();
-        assert_eq!(main_path, root.join("soil-sensor/main.rhai"));
+        assert_eq!(main_path, root.join("soil-sensor/model.FCStd"));
     }
 }

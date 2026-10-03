@@ -3,12 +3,6 @@ resolver = "2"
 members = [
     "core",
     "src-tauri",
-    "enclosure-maker/crates/em-core",
-    "enclosure-maker/crates/em-csg",
-    "enclosure-maker/crates/em-primitives",
-    "enclosure-maker/crates/em-hardware",
-    "enclosure-maker/crates/em-export",
-    "enclosure-maker/crates/em-script",
     "enclosure-maker/crates/em-agent",
     "enclosure-maker/crates/em-preview",
     "enclosure-maker/crates/em-projects",
@@ -24,12 +18,10 @@ license = "MIT"
 # (see enclosure-maker/README.md) -- `{ workspace = true }` in their own
 # Cargo.tomls resolves against these, unchanged from how that repo's own
 # root Cargo.toml declared them, just re-rooted under enclosure-maker/.
+# The CSG/Rhai geometry engine (em-core/em-csg/em-primitives/em-hardware/
+# em-export/em-script) was deleted when enclosure-maker moved to driving
+# FreeCAD directly through FreeCAD's own MCP server -- see
+# enclosure-maker/docs/freecad-trust-model.md.
 [workspace.dependencies]
-em-core = { path = "enclosure-maker/crates/em-core" }
-em-csg = { path = "enclosure-maker/crates/em-csg" }
-em-primitives = { path = "enclosure-maker/crates/em-primitives" }
-em-hardware = { path = "enclosure-maker/crates/em-hardware" }
-em-export = { path = "enclosure-maker/crates/em-export" }
-em-script = { path = "enclosure-maker/crates/em-script" }
 em-agent = { path = "enclosure-maker/crates/em-agent" }
 thiserror = "2"

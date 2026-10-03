@@ -323,16 +323,27 @@ scaffolded library, a fetched library and a newly created project actually
 ## Enclosure design
 
 The **Enclosure** division embeds enclosure-maker in the same window, using
-`main.rhai` in the current project. Start from the board/BOM request or reopen
-an existing design. Select individual parts, move or rotate them with handles
-or exact numeric inputs, snap, undo/redo, and switch camera views. Saved part
-positions survive reopening and apply to STL/3MF exports.
+`model.FCStd` (a FreeCAD document) in the current project. Review the
+board/BOM draft request — generated from the project's resolved board and
+BOM, editable before sending — or reopen an existing design, then send it to
+start a chat session.
 
-Dimension controls adjust script parameters and supported literal shape or
-hardware dimensions. The code editor and Claude/Codex/Copilot chat remain
-available. Desktop STL exports save to Downloads.
-See the [enclosure scripting and controls guide](enclosure-maker/README.md)
-and [integration comparison](enclosure-maker/docs/bancada-sync.md).
+That session drives **FreeCAD itself** through FreeCAD's own MCP server
+(`freecad-mcp`): there is no in-window 3D canvas, code editor, or model
+controls anymore — FreeCAD's own GUI window (kept open, with its MCP RPC
+addon running) is the live model, and this pane is chat only. The Claude
+agent has full FreeCAD Python access (fillets, shells, lofts, the fastener
+dimensions for heat-set inserts, screw bosses, nut traps, and standoffs) and
+exports STL/3MF by writing directly to a path you ask for, such as
+Downloads, with no separate export step. Codex/Copilot remain available as
+chat providers but don't yet drive FreeCAD themselves.
+
+FreeCAD (with its MCP addon) and the `freecad-mcp` server (installed via
+`uv`/`uvx`) are a new external dependency, checked by the Setup panel like
+arduino-cli and the others. See the
+[enclosure chat guide](enclosure-maker/README.md), its
+[FreeCAD trust model](enclosure-maker/docs/freecad-trust-model.md), and the
+[integration comparison](enclosure-maker/docs/bancada-sync.md).
 
 ## AI Assistant panel
 

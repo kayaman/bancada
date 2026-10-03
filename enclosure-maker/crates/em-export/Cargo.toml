@@ -1,9 +1,0 @@
-[package]
-name = "em-export"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-em-core = { workspace = true }
-thiserror = { workspace = true }
-zip = { version = "2", default-features = false, features = ["deflate"] }

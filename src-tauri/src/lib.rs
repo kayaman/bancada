@@ -5922,7 +5922,6 @@ pub fn run() {
             enclosure_preview::has_enclosure_project,
             enclosure_preview::resume_enclosure_preview,
             enclosure_preview::open_enclosure_preview,
-            enclosure_preview::save_stl_to_downloads,
             init_profile,
             retarget_profile,
             add_local_library,

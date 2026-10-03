@@ -1,6 +1,0 @@
-[package]
-name = "em-core"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]

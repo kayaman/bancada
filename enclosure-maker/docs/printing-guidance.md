@@ -7,17 +7,20 @@ additional tools or filesystem access. User choices override house defaults.
 
 ## Native source and adjustable dimensions
 
-Keep the existing Rhai project and stable named emit parts. Expose important
-independent dimensions with param(...): wall/floor, bore diameter, insert length,
-relief, boss height and radial wall, gusset dimensions, clearances and hole positions.
-Derive mating features from shared inputs. Preserve imported helpers and parameter
-names; use only APIs documented by this host. Do not convert the project to SCAD.
+Keep the existing project and its stable named parts rather than starting
+over. Expose important independent dimensions as clearly-named, adjustable
+values: wall/floor, bore diameter, insert length, relief, boss height and
+radial wall, gusset dimensions, clearances and hole positions. Derive mating
+features from shared inputs rather than repeating a number in two places.
+Use only APIs and conventions documented for this host; don't introduce a
+different modeling engine or scripting language mid-project.
 
-Use mm. Identify nominal size, per-side clearance, diameter compensation and final
-CAD size. A circular female feature may use nominal male diameter + 2 * per-side
-clearance + diameter compensation. A coupon-selected insert bore is already final
-CAD size: do not add hole_comp again. Rectangular lid clearances apply per face.
-Choose one owner for hole compensation, CAD or slicer, and document it.
+Use mm. Identify nominal size, per-side clearance, diameter compensation and
+final CAD size. A circular female feature may use nominal male diameter +
+2 * per-side clearance + diameter compensation. A coupon-selected insert
+bore is already final CAD size: don't apply the diameter compensation a
+second time on top of it. Rectangular lid clearances apply per face. Choose
+one owner for hole compensation, CAD or slicer, and document it.
 
 ## House profile and fasteners
 
@@ -39,21 +42,28 @@ Compute effective boss OD as max(requested minimum, profile minimum, final bore 
 beneath blind bores, screw engagement/bottom clearance and matching lid-hole centres.
 Tie loaded columns into the shell with gussets and suitable root reinforcement.
 
-Built-in hardware calls can fix bore sizes and tessellation. If those are unsuitable,
-use documented primitives in project-local helpers with explicit dimensions; do not
-invent overloads. Use at least 64 segments for functional circular holes on final
-exports, preserving intentional hexagons. A raw shell operation on complex geometry
-is not proof of constant wall thickness. A lid needs a locating register and explicit
-clearance. Avoid support on mating surfaces; favour screwed closures for house
-PETG-CF and assess load direction across layers.
+A host's own fastener/dimension reference can fix bore sizes; if those are
+unsuitable for a specific case, build the feature from primitives with
+explicit dimensions instead of guessing at an undocumented variant. Make
+sure a circular hole's final mesh is fine enough to stay functionally round
+on export (check the mesher's tessellation/deflection quality, not just
+whatever default it ships with), while preserving intentionally
+polygonal features like hex nut traps. A raw shell/hollow operation on
+complex geometry is not proof of constant wall thickness. A lid needs a
+locating register and explicit clearance. Avoid support on mating surfaces;
+favour screwed closures for house PETG-CF and assess load direction across
+layers.
 
 ## Print orientation and verification
 
-Emit named printable parts; use view(...) for assembly/exploded/section compositions.
-Keep print orientation distinct from assembly placement, and bed faces at z=0.
-Read existing saved part transforms when reasoning about placement; never edit
-.enclosure-maker metadata or repeat its offsets in code. Saved transforms also
-apply to exports and may move a part off the bed.
+Keep each printable part as its own distinct, named object; use separate,
+clearly-marked non-printable geometry only for visualizing an assembly,
+exploded view, or section — never ship that alongside the printable output.
+Keep print orientation distinct from assembly placement, and bed faces at
+z=0. Part placement lives directly on the object itself (its transform in
+the document) — keep it consistent with the intended print orientation, and
+remember that placement also applies at export time, so double-check a part
+still sits on or above the bed after any reposition.
 
 Validate critical dimensions in source, sections and actual exports. Inspect closed
 mesh topology, intended body count, bed position and envelope, then slicer layers

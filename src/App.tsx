@@ -870,42 +870,6 @@ export default function App() {
     [openBottomTab],
   );
 
-  // The embedded enclosure-maker preview (EnclosurePanel's iframe) runs at
-  // its own http://127.0.0.1:<port> origin, where Tauri's injected
-  // `window.__TAURI__` IPC bridge does not reach — only the top frame gets
-  // it. Its Export STL button falls back to postMessage-ing this (its
-  // parent) frame when `window.__TAURI__` is absent; this is the other half
-  // of that bridge, placed at App level (not EnclosurePanel-local) since the
-  // iframe survives exactly as long as the Enclosure division is active,
-  // same scope this listener needs.
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (!/^https?:\/\/(127\.0\.0\.1|localhost):\d+$/.test(event.origin)) return;
-      const data = event.data as
-        | { type?: string; requestId?: unknown; filename?: unknown; contentsB64?: unknown }
-        | undefined;
-      if (data?.type !== "enclosure-maker:save-stl") return;
-      const { requestId, filename, contentsB64 } = data;
-      if (typeof filename !== "string" || typeof contentsB64 !== "string") return;
-      api
-        .saveStlToDownloads(filename, contentsB64)
-        .then((path) => {
-          event.source?.postMessage(
-            { type: "enclosure-maker:save-stl-result", requestId, ok: true, path },
-            { targetOrigin: event.origin },
-          );
-        })
-        .catch((err) => {
-          event.source?.postMessage(
-            { type: "enclosure-maker:save-stl-result", requestId, ok: false, error: String(err) },
-            { targetOrigin: event.origin },
-          );
-        });
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
-
   /** Drag the handle right of the sidebar to resize it (dbl-click resets). */
   const startSidebarResize = (e: React.PointerEvent<HTMLDivElement>) => {
     const startX = e.clientX;

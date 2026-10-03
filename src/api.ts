@@ -457,14 +457,6 @@ export const resumeEnclosurePreview = (sketchDir: string) =>
 export const openEnclosurePreview = (sketchDir: string, prompt: string) =>
   invoke<string>("open_enclosure_preview", { sketchDir, prompt });
 
-/** Writes an exported STL straight into the OS Downloads folder, on behalf
- *  of the embedded enclosure-maker preview iframe — Tauri's `window.__TAURI__`
- *  IPC bridge doesn't reach into a nested iframe's own `window`, so the
- *  iframe `postMessage`s bancada's top frame instead (see `App.tsx`'s
- *  `message` event listener) rather than calling this directly. */
-export const saveStlToDownloads = (filename: string, contentsB64: string) =>
-  invoke<string>("save_stl_to_downloads", { filename, contentsB64 });
-
 /** One value a board option can take. Mirror of core::types::ConfigValue. */
 export interface ConfigValue {
   value: string;

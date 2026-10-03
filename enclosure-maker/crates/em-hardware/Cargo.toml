@@ -1,7 +1,0 @@
-[package]
-name = "em-hardware"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-em-primitives = { workspace = true }

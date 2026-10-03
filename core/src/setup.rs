@@ -90,6 +90,20 @@ pub const TOOLS: &[ToolSpec] = &[
         install: "curl -fsSL https://claude.ai/install.sh | sh   # then run `claude` once to sign in",
         docs: "https://claude.com/product/claude-code",
     },
+    ToolSpec {
+        id: "freecad-mcp",
+        bin: "uvx",
+        name: "FreeCAD MCP (uvx)",
+        purpose: "The Enclosure tab's chat-driven FreeCAD design assistant",
+        // This only confirms `uvx` itself (and therefore `uvx freecad-mcp`)
+        // can run -- it cannot confirm a FreeCAD GUI process with the RPC
+        // addon loaded is actually reachable. That live check is the
+        // embedded assistant's own first move (`get_rpc_status`), not
+        // something this pre-flight probe can see.
+        required: false,
+        install: "pip install --user uv   # then open FreeCAD once with its MCP addon enabled",
+        docs: "https://github.com/neka-nat/freecad-mcp",
+    },
 ];
 
 /// The engine with a given id.

@@ -1,10 +1,12 @@
 mod args;
 mod guard;
+mod mcp_config;
 mod protocol;
 mod provider;
 mod settings;
 
 pub use args::{agent_args, AgentCfg, TOOLS};
+pub use mcp_config::build_mcp_config_json;
 pub use guard::{
     deny_rules, guard_decision, guard_hook_matcher, guarded_tool_path, path_is_confined,
     GUARDED_TOOLS, REFUSED_DIRS,
